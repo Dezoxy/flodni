@@ -632,6 +632,19 @@ file (an idea in `docs/ideas.md`, not planned). Warm on add and its catch-up,
 which fill windows on their own, are described in their own section below; both
 are off by default.
 
+The quota counts allocated blocks, not apparent sizes: a sparse file (a tail
+written in pieces, a head with holes) counts what it holds on disk, as the
+start-up walk, the eviction walk, writes and removals all do. Where a platform
+reports no block count for a non-empty file, its apparent size stands in. The
+cache keeps a ledger of what each file has contributed to the total, so a
+removal gives back exactly that, and every change to the total happens under
+one lock. Where a filesystem reports blocks late (ZFS within a transaction
+group), a write counts at least the bytes it wrote: the total never reads low
+because of the lag, and the next eviction walk corrects the rest. The window
+lengths and the coverage the cache serves still follow the logical length of
+the files. An eviction walk holds that lock while it reads the directory, and
+a head write waits for it; the daemon logs a walk that takes more than 50 ms.
+
 - **Played** means a playback confirmed by Plex's play webhook, never a
   scanner's read. A webhook marks at most one file: a movie by file name,
   IMDB id or a unique title (and year); an episode by file name, or by a
@@ -1057,7 +1070,7 @@ scraper on the same host or Docker network.
 | `flodni_warmup_cache_bytes` | gauge | none | Approximate size of the warmup cache; only with the cache enabled. |
 | `flodni_warmup_cache_quota_bytes` | gauge | none | Its size limit; only with the cache enabled. |
 | `flodni_warmup_evictions_total` | counter | `window` | Files removed by quota eviction, `head` or `tail`. |
-| `flodni_warmup_evicted_bytes_total` | counter | `window` | Their apparent size in bytes. |
+| `flodni_warmup_evicted_bytes_total` | counter | `window` | Their allocated size in bytes. |
 | `flodni_warm_fills_total` | counter | `trigger`, `outcome` | Warm fills. `trigger="mount"`: per-file records the mount path wrote, `outcome` `warmed` (the engine holds a swarm delivery stamp) or `cached` (it does not); needs the state database and index mode. `trigger="add"` and `trigger="catchup"`: warm on add and catch-up attempts, `outcome` as in "Warm on add", every value present from 0. |
 | `flodni_warm_fill_bytes_total` | counter | `trigger`, `window` | Bytes warm on add and catch-up wrote, `window` `head` or `tail`, also by fills that did not finish. |
 | `flodni_warm_cache_failures_total` | counter | `reason` | Warm on add and catch-up attempts that lost a window or could not write it: `lost` or `write_failed`. |
@@ -1119,8 +1132,10 @@ to be stable; buckets and help text are not.
   a session closed and reads with no session, so it differs from the
   `[Session]` lines.
 - `flodni_warmup_cache_bytes` is a running total, resynced from the disk on
-  each eviction walk. It can drift in between; the known causes are in
-  `docs/ideas.md`.
+  each eviction walk. Writes and removals through the cache keep it in step
+  (counted in allocated blocks, see the eviction section); it can still
+  differ from the disk by files changed behind the cache's back, until the
+  next walk.
 - `flodni_warmup_files` reads the cache's in-memory index. A head removed
   behind the cache's back shows until the next lookup of it, a tail until
   the next restart. Warm bytes are `flodni_warmup_cache_bytes`. The series is a count of files, not of

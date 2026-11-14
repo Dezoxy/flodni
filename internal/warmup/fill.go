@@ -71,8 +71,8 @@ type FillRequest struct {
 	Trigger  string      // trigger of the evictions made; empty means TriggerWarmAdd
 	// Protect, if set, names files the room check must not evict, such as files in
 	// flight and the other files of the add being warmed. It runs under the cache's
-	// quota lock, like IsPlayed: memory only, never blocking, never calling back into
-	// the cache.
+	// quota lock and tailMu, like IsPlayed: memory only, never blocking, never calling
+	// back into the cache (a cache writer would deadlock).
 	Protect func(FileKey) bool
 	// Stop, if set, is polled before each chunk and while one waits for its pieces:
 	// true ends the fill with ErrStopped. A reader already blocked in a fetch (up to

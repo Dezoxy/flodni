@@ -16,6 +16,7 @@ func evictEnv(t *testing.T) *DiskWarmupCache {
 	t.Cleanup(func() { diskQuotaGB, IsPlayed, OnEvicted = oldGB, oldPlayed, oldOn })
 	diskQuotaGB = 1
 	IsPlayed, OnEvicted = nil, nil
+	countApparent(t) // its tests fake a large cache with sparse files
 	return indexCache(t, t.TempDir())
 }
 

@@ -44,8 +44,9 @@ const TriggerRequest = "request"
 
 // IsPlayed, if set, reports whether a playback confirmed by the media server protects
 // the file now (a play inside the configured protection time). It runs under the
-// cache's quota lock, so it must read memory only and never block. Nil: nothing is
-// played, and eviction degenerates to oldest first.
+// cache's quota lock and tailMu, so it must read memory only, never block and never call
+// a cache writer (it would deadlock). Nil: nothing is played, and eviction degenerates
+// to oldest first.
 var IsPlayed func(FileKey) bool
 
 // OnEvicted, if set, receives the files one quota check evicted. It runs after the
@@ -55,7 +56,7 @@ var OnEvicted func([]Eviction)
 // Eviction describes one evicted media file.
 type Eviction struct {
 	Key       FileKey
-	HeadBytes int64 // apparent size of the head window removed, 0 when it had none
+	HeadBytes int64 // allocated size of the head window removed, 0 when it had none
 	TailBytes int64
 	Age       time.Duration // since the newest write of the two windows
 	Played    bool          // the file was inside its played protection
@@ -157,6 +158,13 @@ func (d *DiskWarmupCache) enforceQuotaLocked(needed int64, opts evictOpts) (evic
 		return nil, true
 	}
 
+	// The walk stores an absolute total, so no write or removal may change totalSize
+	// between the walk and the store: tailMu is held from before the walk to the end,
+	// after d.mu as everywhere.
+	d.tailMu.Lock()
+	defer d.tailMu.Unlock()
+
+	walkStart := time.Now()
 	entries, err := os.ReadDir(d.dir)
 	if err != nil {
 		// A vanished or unreadable directory proves nothing about the total: keep the
@@ -166,6 +174,7 @@ func (d *DiskWarmupCache) enforceQuotaLocked(needed int64, opts evictOpts) (evic
 	}
 	units := map[string]*evictUnit{}
 	var diskTotal int64
+	ledger := map[string]int64{}
 	for _, e := range entries {
 		name := e.Name()
 		isTail := strings.HasSuffix(name, tailSuffix)
@@ -184,17 +193,23 @@ func (d *DiskWarmupCache) enforceQuotaLocked(needed int64, opts evictOpts) (evic
 		}
 		full := filepath.Join(d.dir, name)
 		if isTail {
-			u.tailPath, u.tailBytes = full, info.Size()
+			u.tailPath, u.tailBytes = full, allocatedBytes(info)
 		} else {
-			u.headPath, u.headBytes = full, info.Size()
+			u.headPath, u.headBytes = full, allocatedBytes(info)
 		}
 		if info.ModTime().After(u.newest) {
 			u.newest = info.ModTime()
 		}
-		diskTotal += info.Size()
+		diskTotal += allocatedBytes(info)
+		ledger[full] = allocatedBytes(info)
 	}
 
 	atomic.StoreInt64(&d.totalSize, diskTotal)
+	d.ledger = ledger
+	// tailMu is held for the whole walk, and a head write waits on it: say when it is slow.
+	if dur := time.Since(walkStart); dur > 50*time.Millisecond {
+		logf.Printf("[DiskWarmup] quota walk held tailMu for %v over %d files", dur.Round(time.Millisecond), len(ledger))
+	}
 	if diskTotal+needed <= quota {
 		return nil, true
 	}
@@ -233,8 +248,6 @@ func (d *DiskWarmupCache) enforceQuotaLocked(needed int64, opts evictOpts) (evic
 	})
 
 	now := time.Now()
-	d.tailMu.Lock()
-	defer d.tailMu.Unlock()
 	d.removals.Add(1)
 	failed := 0
 	for _, u := range victims {
@@ -257,6 +270,7 @@ func (d *DiskWarmupCache) enforceQuotaLocked(needed int64, opts evictOpts) (evic
 			removeFile(p + coverSuffix)
 			d.sizeCache.Delete(p)
 			d.tailCoverage.Delete(p)
+			delete(d.ledger, p)
 			if i == 0 {
 				headGone = u.headBytes
 				evictedHeads.Add(1)

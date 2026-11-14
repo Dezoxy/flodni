@@ -47,6 +47,7 @@ func TestMissingHeadChunkPastZeroDoesNotEvict(t *testing.T) {
 	oldGB := diskQuotaGB
 	t.Cleanup(func() { diskQuotaGB = oldGB })
 	diskQuotaGB = 1
+	countApparent(t) // the filler is a sparse file that only has to count as full
 	const quota = int64(1) << 30
 
 	d := indexCache(t, t.TempDir())

@@ -157,7 +157,7 @@ func collectWarmupProm(w *promtext.Writer) {
 	w.Counter("flodni_warmup_evictions_total", "Files removed by quota eviction, by window.",
 		promSample(st.EvictedHeads, lbl("window", "head")),
 		promSample(st.EvictedTails, lbl("window", "tail")))
-	w.Counter("flodni_warmup_evicted_bytes_total", "Bytes (apparent size) removed by quota eviction, by window.",
+	w.Counter("flodni_warmup_evicted_bytes_total", "Bytes (allocated size) removed by quota eviction, by window.",
 		promSample(st.EvictedHeadBytes, lbl("window", "head")),
 		promSample(st.EvictedTailBytes, lbl("window", "tail")))
 	w.Counter("flodni_warmup_unverified_drops_total",

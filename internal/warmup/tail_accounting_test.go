@@ -34,7 +34,7 @@ func TestTailWriteCountsGrowthOnly(t *testing.T) {
 	}
 	fi, err := os.Stat(d.tailPath("h", 1))
 	if err != nil || fi.Size() != tailTotal(d) {
-		t.Fatalf("tracked total must equal the file's apparent size: %v %v", fi, err)
+		t.Fatalf("tracked total must equal the file's allocated size: %v %v", fi, err)
 	}
 }
 
@@ -53,10 +53,11 @@ func TestTailGrowthOverQuotaIsEnforcedByNextHead(t *testing.T) {
 	t.Cleanup(func() { diskQuotaGB = oldGB })
 	diskQuotaGB = 1
 	const quota = int64(1) << 30
+	countApparent(t) // the old file is sparse and only has to count as nearly full
 
 	d := indexCache(t, t.TempDir())
-	// A sparse head file that nearly fills the quota by apparent size, the basis the
-	// startup walk and the eviction walk both use. It is the oldest file.
+	// A sparse head file that nearly fills the quota by apparent size, which this test
+	// has the startup walk and the eviction walk count. It is the oldest file.
 	oldPath := d.filePath("old", 1)
 	f, err := os.Create(oldPath)
 	if err != nil {
@@ -109,12 +110,13 @@ func TestTailCountSurvivesRestartWalk(t *testing.T) {
 	}
 }
 
-func TestTailFirstWriteAtOffsetCountsTheHole(t *testing.T) {
+func TestTailFirstWriteAtOffsetDoesNotCountTheHole(t *testing.T) {
 	d := indexCache(t, t.TempDir())
 	const fileSize = 8 << 20
 	d.writeTail("h", 1, bytes.Repeat([]byte{1}, 128<<10), fileSize-1<<20+256<<10, fileSize)
-	if got := tailTotal(d); got != 384<<10 {
-		t.Fatalf("total = %d, want %d (hole + data, apparent size)", got, 384<<10)
+	// The quota counts allocated blocks: the hole below the data is not on disk.
+	if got := tailTotal(d); got != 128<<10 {
+		t.Fatalf("total = %d, want %d (the data only, not the hole)", got, 128<<10)
 	}
 }
 
@@ -165,7 +167,7 @@ func TestTailAccountingUnderConcurrency(t *testing.T) {
 		for _, e := range entries {
 			if strings.HasSuffix(e.Name(), warmupSuffix) || strings.HasSuffix(e.Name(), tailSuffix) {
 				if fi, err := e.Info(); err == nil {
-					sum += fi.Size()
+					sum += allocatedBytes(fi)
 				}
 			}
 		}
@@ -174,7 +176,7 @@ func TestTailAccountingUnderConcurrency(t *testing.T) {
 	deadline := time.Now().Add(10 * time.Second)
 	for len(d.writeCh) != 0 || tailTotal(d) != diskSum() {
 		if time.Now().After(deadline) {
-			t.Fatalf("tracked total %d != apparent size on disk %d (queue=%d)", tailTotal(d), diskSum(), len(d.writeCh))
+			t.Fatalf("tracked total %d != allocated size on disk %d (queue=%d)", tailTotal(d), diskSum(), len(d.writeCh))
 		}
 		time.Sleep(5 * time.Millisecond)
 	}

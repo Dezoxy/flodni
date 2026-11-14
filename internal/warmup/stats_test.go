@@ -8,9 +8,20 @@ import (
 	"time"
 )
 
-// sparseFile makes a file of the given apparent size and age.
+// countApparent makes the quota count a file's length, so a test can fake a large cache
+// with sparse files. The tests of allocated-block accounting leave it off.
+func countApparent(t *testing.T) {
+	t.Helper()
+	old := allocatedBytes
+	allocatedBytes = func(fi os.FileInfo) int64 { return fi.Size() }
+	t.Cleanup(func() { allocatedBytes = old })
+}
+
+// sparseFile makes a file of the given apparent size and age, and has the quota count
+// apparent sizes for the rest of the test.
 func sparseFile(t *testing.T, path string, size int64, age time.Duration) {
 	t.Helper()
+	countApparent(t)
 	f, err := os.Create(path)
 	if err != nil {
 		t.Fatal(err)
