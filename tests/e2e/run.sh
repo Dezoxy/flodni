@@ -15,8 +15,8 @@
 # fail); E2E_PROM_DUMP=<file> saves the /metrics/prometheus body of each
 # non-replacement variant (the last one wins; a scrape sample for the docs);
 # E2E_ONLY=<variant> runs just that variant (default, slow-seeder,
-# index-cache, warm-on-add, catch-up, late-confirm, keep-alive, budget-refusal,
-# replacement, removal). slow-seeder is default with a seeder that
+# index-cache, warm-on-add, warm-lifecycle, catch-up, late-confirm, keep-alive,
+# budget-refusal, replacement, removal). slow-seeder is default with a seeder that
 # keeps the engine's 1 MiB per-peer request allowance. The index-cache variant runs
 # with a random FLODNI_API_TOKEN: the seeder must see 401 without the bearer
 # header before its authorised add, and the same for GoStorm's 8090 (401 on
@@ -42,6 +42,12 @@
 # `get` answers 404 for B, C and D at once and after the idle timeout, that B's
 # descriptor fails with EIO at an uncached offset (a refused wake, not a failed read) and
 # that no index-cache file of the three remains.
+# The warm-lifecycle variant (warm-on-add config, auth off) holds title A open with a
+# confirmed playback, files B and C while the warmer is paused for it, removes B while it
+# is queued, waits for C's torrent to be closed by the engine, ends the playback and
+# asserts that C is warmed by a wake from the stored record and B never is. A public
+# canary tracker (listed in trackers.txt, so only a public torrent may announce to it)
+# must see a public control title and none of the private ones.
 # E2E_WARM_NEGATIVE=1 runs the warm-on-add variant with the switch off: it must
 # fail at step 2 (no fill). It is not part of make e2e.
 set -euo pipefail
@@ -476,6 +482,7 @@ JSON
       catchup_config false "$file"
       ;;
     removal) write_config index-cache "$file" ;;
+    warm-lifecycle) write_config warm-on-add "$file" ;;
     slow-seeder) write_config default "$file" ;;
     *) echo "unknown variant $variant" >&2; return 1 ;;
   esac
@@ -803,8 +810,8 @@ check_readback() {
 # on and read nothing through the mount; wait for the fill; check the evidence (metric,
 # [Warm] line, per-file row, torrent record); kill the seeder; read the head and the
 # tail back through the mount and compare them with the seeder's hashes, and show that
-# the bytes came from the SSD windows. Pause/wake and removal while queued are not here
-# (docs/ideas.md); the replacement variant runs with the switch off.
+# the bytes came from the SSD windows. Pause, wake and removal while queued are the
+# warm-lifecycle variant.
 run_warm_on_add() {
   local dir t0=$SECONDS
   start_stack warm-on-add
@@ -896,8 +903,225 @@ run_warm_on_add() {
   echo "ok ($v): torrent record ${trow}" >&2
 
   check_readback "$v" "$path" "$head_want" "$tail_want" || return 1
-  echo "NOTE ($v): pause/wake and removal while queued are not exercised here; the replacement variant runs with warm_on_add off" >&2
+  echo "NOTE ($v): pause, wake and removal while queued are the warm-lifecycle variant" >&2
   echo "PASS ($v): windows filled by the warmer, read back with the seeder dead, $((SECONDS - t0))s" >&2
+
+  stop_stack
+}
+
+# warm_line hash outcome: the first [Warm] line of the hash with that outcome ("" any).
+warm_line() {
+  local logs
+  logs=$(docker logs "$flodni" 2>&1 || true)
+  grep -F '[Warm] ' <<<"$logs" | grep -F "\"hash\":\"$1\"" | grep -F "${2:+\"outcome\":\"$2\"}" | head -n 1 || true
+}
+
+# lc_wait v label seconds series value: poll a Prometheus series until it equals value.
+lc_wait() {
+  local v=$1 label=$2 limit=$3 series=$4 want=$5 deadline got
+  deadline=$((SECONDS + limit))
+  while :; do
+    got=$(prom_value "$(prom_body)" "$series")
+    [ "$got" = "$want" ] && return 0
+    if [ "$SECONDS" -ge "$deadline" ]; then
+      echo "FAIL ($v): $label: $series is $got after ${limit}s, want $want" >&2
+      return 1
+    fi
+    sleep 1
+  done
+}
+
+# library_remove hash: POST /api/library/remove; prints the status line.
+library_remove() {
+  docker exec "$flodni" bash -c 'b="{\"hash\":\"$1\"}"
+    exec 3<>/dev/tcp/127.0.0.1/9080
+    printf "POST /api/library/remove HTTP/1.0\r\nHost: x\r\nContent-Type: application/json\r\nContent-Length: ${#b}\r\n\r\n%s" "$b" >&3
+    head -n 1 <&3' _ "$1" 2>/dev/null || true
+}
+
+# lc_stop v reader: a failed step. Ends the playback hold, prints the diagnostics.
+lc_stop() {
+  docker exec "$flodni" touch /tmp/lc.go >/dev/null 2>&1 || true
+  [ -n "${2:-}" ] && kill "$2" 2>/dev/null || true
+  dump_diagnostics
+}
+
+# run_warm_lifecycle: warm on add against the real engine, the parts the warm-on-add
+# variant leaves out. A is warmed, then held open by a descriptor and a confirmed play
+# webhook, so the warmer pauses for it. B is filed and removed while queued; C is filed and
+# waits until the engine closes its torrent. Then the playback ends: the pause lifts, C
+# is woken from the stored record and warmed, B is never warmed. A public canary tracker
+# in trackers.txt gets a public control title and no private one (hard rule 3). DHT and
+# PEX are not observable on the internal network and stay with the unit pins.
+run_warm_lifecycle() {
+  local dir t0=$SECONDS
+  start_stack warm-lifecycle -mode warm-lifecycle
+  local out="$dir/out" v=warm-lifecycle
+  printf 'http://seeder:%s/announce\n' 6970 >"$dir/state/trackers.txt"
+  wait_for_file "$out/a.path" "$WAIT_SECONDS" "$v"
+  local hash_a path_a name
+  hash_a=$(cat "$out/a.hash") path_a="$MOUNT_PATH/$(cat "$out/a.path")" name=$(basename "$path_a")
+  echo "step add A: $((SECONDS - t0))s since start" >&2
+
+  # Step 1: A is warmed with nothing in the way.
+  local deadline=$((SECONDS + 120)) line=""
+  while [ "$SECONDS" -lt "$deadline" ]; do
+    line=$(warm_line "$hash_a" warmed)
+    [ -n "$line" ] && break
+    sleep 1
+  done
+  if [ -z "$line" ]; then
+    echo "FAIL ($v): A was not warmed in 120 s: $(warm_line "$hash_a")" >&2
+    dump_diagnostics
+    return 1
+  fi
+  echo "ok ($v): A warmed: ${line#*\[Warm\] }" >&2
+
+  # Step 2: hold A open and confirm its playback, so the warmer has a reason to pause.
+  docker exec "$flodni" rm -f /tmp/lc.go
+  docker exec "$flodni" timeout -k 10 600 sh -c \
+    '( dd bs=1048576 count=1 iflag=fullblock of=/dev/null status=none; \
+       until [ -e /tmp/lc.go ]; do sleep 0.1; done ) < "$1"' _ "$path_a" >"$out/hold.out" 2>"$out/hold.err" &
+  local reader=$!
+  sleep 2
+  local payload resp
+  payload='{"event":"media.play","Metadata":{"title":"E2E Fixture","year":2026,"librarySectionType":"movie","Media":[{"Part":[{"file":"/data/movies/'"$name"'"}]}]}}'
+  resp=$(post_webhook "$payload")
+  if ! head -n 1 <<<"$resp" | grep -q ' 200 '; then
+    echo "FAIL ($v): play webhook post: $(head -n 1 <<<"$resp")" >&2
+    lc_stop "$v" "$reader"
+    return 1
+  fi
+
+  # Step 3: B is filed while A plays: queued, the warmer paused, nothing warmed.
+  touch "$out/add-b"
+  wait_for_file "$out/b.path" "$WAIT_SECONDS" "$v" || { lc_stop "$v" "$reader"; return 1; }
+  local hash_b
+  hash_b=$(cat "$out/b.hash")
+  lc_wait "$v" "B queued" 30 flodni_warm_queue_files 1 || { lc_stop "$v" "$reader"; return 1; }
+  lc_wait "$v" "B queued" 30 flodni_warm_paused 1 || { lc_stop "$v" "$reader"; return 1; }
+  sleep 8
+  if [ -n "$(warm_line "$hash_b" "")" ]; then
+    echo "FAIL ($v): B has a [Warm] line while the warmer is paused: $(warm_line "$hash_b" "")" >&2
+    lc_stop "$v" "$reader"
+    return 1
+  fi
+  echo "ok ($v): B queued behind A's playback: flodni_warm_queue_files 1, flodni_warm_paused 1, no [Warm] line in 8 s" >&2
+
+  # Step 4: B is removed while queued: the queue empties, the pause stays.
+  resp=$(library_remove "$hash_b")
+  if ! grep -q ' 200 ' <<<"$resp"; then
+    echo "FAIL ($v): library remove of B: $resp" >&2
+    lc_stop "$v" "$reader"
+    return 1
+  fi
+  lc_wait "$v" "B removed" 30 flodni_warm_queue_files 0 || { lc_stop "$v" "$reader"; return 1; }
+  echo "ok ($v): B removed while queued: flodni_warm_queue_files 0" >&2
+
+  # Step 5: C is filed and queued; the engine closes its idle torrent during the pause.
+  touch "$out/add-c"
+  wait_for_file "$out/c.path" "$WAIT_SECONDS" "$v" || { lc_stop "$v" "$reader"; return 1; }
+  local hash_c stat="" list
+  hash_c=$(cat "$out/c.hash")
+  lc_wait "$v" "C queued" 30 flodni_warm_queue_files 1 || { lc_stop "$v" "$reader"; return 1; }
+  deadline=$((SECONDS + 90))
+  while [ "$SECONDS" -lt "$deadline" ]; do
+    list=$(gostorm_list)
+    stat=$(grep -o "\"hash\":\"$hash_c\"[^}]*" <<<"$list" | grep -o '"stat_string":"[^"]*"' | head -n 1 | cut -d'"' -f4 || true)
+    if grep -qiE 'closed|in db' <<<"$stat"; then break; fi
+    sleep 1
+  done
+  if ! grep -qiE 'closed|in db' <<<"$stat"; then
+    echo "FAIL ($v): C's torrent is not closed after 90 s: ${stat:-no entry}" >&2
+    lc_stop "$v" "$reader"
+    return 1
+  fi
+  if [ "$(prom_value "$(prom_body)" flodni_warm_paused)" != 1 ] || [ -n "$(warm_line "$hash_c" "")" ]; then
+    echo "FAIL ($v): C was warmed or the pause lifted before the playback ended: $(warm_line "$hash_c" "")" >&2
+    lc_stop "$v" "$reader"
+    return 1
+  fi
+  echo "ok ($v): C queued, its torrent closed ($stat), warmer still paused, no [Warm] line for B or C" >&2
+
+  # Step 6: the playback ends. Pause lifts, C is woken from the stored record and warmed.
+  docker exec "$flodni" touch /tmp/lc.go
+  wait "$reader" || true
+  resp=$(post_webhook "${payload/media.play/media.stop}")
+  if ! head -n 1 <<<"$resp" | grep -q ' 200 '; then
+    echo "FAIL ($v): stop webhook post: $(head -n 1 <<<"$resp")" >&2
+    dump_diagnostics
+    return 1
+  fi
+  lc_wait "$v" "the playback ended" 90 flodni_warm_paused 0 || { dump_diagnostics; return 1; }
+  deadline=$((SECONDS + 120))
+  line=""
+  while [ "$SECONDS" -lt "$deadline" ]; do
+    line=$(warm_line "$hash_c" "")
+    [ -n "$line" ] && break
+    sleep 1
+  done
+  if [[ "$line" != *'"outcome":"warmed"'* || "$line" != *'"trigger":"add"'* ]]; then
+    echo "FAIL ($v): C wants a [Warm] line trigger add, outcome warmed: ${line:-none}" >&2
+    dump_diagnostics
+    return 1
+  fi
+  local hb tb
+  hb=$(json_num "$line" head_bytes) tb=$(json_num "$line" tail_bytes)
+  if [ "${hb:-0}" -ne $((16 * 1048576)) ] || [ "${tb:-0}" -lt $((4 * 1048576)) ]; then
+    echo "FAIL ($v): C's windows are not full: $line" >&2
+    dump_diagnostics
+    return 1
+  fi
+  echo "ok ($v): C woken from the stored record and warmed after the pause: ${line#*\[Warm\] }" >&2
+
+  # Step 7: B was never warmed, left nothing behind and the totals add up.
+  sleep 5
+  local body
+  body=$(prom_body)
+  if [ -n "$(warm_line "$hash_b" "")" ] || [ "$(cache_files "$hash_b")" != 0 ] ||
+    [ "$(gostorm_get_status "$hash_b")" != 404 ]; then
+    echo "FAIL ($v): B left a trace: [Warm] '$(warm_line "$hash_b" "")', cache files $(cache_files "$hash_b"), get $(gostorm_get_status "$hash_b")" >&2
+    dump_diagnostics
+    return 1
+  fi
+  local warmed bad
+  warmed=$(prom_value "$body" 'flodni_warm_fills_total{trigger="add",outcome="warmed"}')
+  bad=$(grep -E '^flodni_warm_fills_total\{trigger="add",outcome="(wake_error|skipped)"\} ' <<<"$body" | awk '$2 != 0' || true)
+  if [ "$warmed" != 2 ] || [ -n "$bad" ] || [ "$(prom_value "$body" flodni_wake_refused_total)" != 0 ]; then
+    echo "FAIL ($v): want 2 warmed fills (A and C), no wake_error or skipped, no refused wake: warmed=$warmed bad='$bad' refused=$(prom_value "$body" flodni_wake_refused_total)" >&2
+    dump_diagnostics
+    return 1
+  fi
+  echo "ok ($v): B never warmed, no cache file, get 404; fills add warmed=$warmed, no wake_error, no refused wake" >&2
+
+  # Step 8: the canary tracker. The public control title must reach it, the private
+  # titles (A, B and C, one woken) must not.
+  touch "$out/add-p"
+  wait_for_file "$out/p.path" "$WAIT_SECONDS" "$v"
+  local hash_p canary=""
+  hash_p=$(cat "$out/p.hash")
+  deadline=$((SECONDS + 45))
+  while [ "$SECONDS" -lt "$deadline" ]; do
+    canary=$(cat "$out/canary.log")
+    grep -F "$hash_p" <<<"$canary" >/dev/null && break
+    sleep 1
+  done
+  if ! grep -F "$hash_p" <<<"$canary" >/dev/null; then
+    echo "FAIL ($v): the canary tracker never saw the public control title: the canary proves nothing" >&2
+    dump_diagnostics
+    return 1
+  fi
+  local h
+  for h in "$hash_a" "$hash_b" "$hash_c"; do
+    if grep -F "$h" <<<"$canary" >/dev/null; then
+      echo "FAIL ($v): a private torrent announced to the public canary tracker: $h" >&2
+      dump_diagnostics
+      return 1
+    fi
+  done
+  echo "ok ($v): canary tracker saw the public control title ($(grep -c . <<<"$canary") announce(s)) and none of the private A, B, C" >&2
+  echo "NOTE ($v): DHT and PEX are not observable on the internal network; the unit pins cover them" >&2
+  echo "PASS ($v): B queued, removed and never warmed; C queued behind a playback, woken from the stored record and warmed after it; no private torrent reached the canary, $((SECONDS - t0))s" >&2
 
   stop_stack
 }
@@ -2014,6 +2238,7 @@ if want_variant default; then run_variant default; fi
 if want_variant slow-seeder; then run_variant slow-seeder; fi
 if want_variant index-cache; then run_variant index-cache; fi
 if want_variant warm-on-add; then run_warm_on_add; fi
+if want_variant warm-lifecycle; then run_warm_lifecycle; fi
 if want_variant catch-up; then run_catchup; fi
 if want_variant late-confirm; then run_late_confirm; fi
 if want_variant keep-alive; then run_keepalive; fi

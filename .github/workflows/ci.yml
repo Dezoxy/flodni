@@ -267,6 +267,7 @@ jobs:
           - slow-seeder
           - index-cache
           - warm-on-add
+          - warm-lifecycle
           - catch-up
           - late-confirm
           - keep-alive

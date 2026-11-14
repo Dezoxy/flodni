@@ -6,7 +6,9 @@
 // the expected sha256 and the FUSE path in a shared directory for run.sh.
 //
 // With -mode replacement it files three single-file episode releases instead:
-// see replacement.go. With -mode removal it files four movies: see removal.go.
+// see replacement.go. With -mode removal it files four movies: see removal.go. With
+// -mode warm-lifecycle it files one private movie at once and three more titles on
+// request: see warmlifecycle.go.
 package main
 
 import (
@@ -57,7 +59,7 @@ func main() {
 	flodni := flag.String("flodni", "flodni", "hostname of the Flodni container")
 	peerPort := flag.Int("peer-port", 51413, "TCP peer port")
 	trackerPort := flag.Int("tracker-port", 6969, "HTTP announce port")
-	mode := flag.String("mode", "stream", "stream (one movie), replacement (three episode releases) or removal (four movies)")
+	mode := flag.String("mode", "stream", "stream (one movie), replacement (three episode releases) or removal (four movies) or warm-lifecycle (titles filed on request)")
 	flag.BoolVar(&engineDefaultAlloc, "engine-default-alloc", false,
 		"keep the engine's 1 MiB per-peer request allowance (a slow real peer) instead of 64 MiB")
 	flag.Parse()
@@ -72,6 +74,8 @@ func main() {
 		err = runReplacement(*out, *flodni, *peerPort, *trackerPort)
 	case "removal":
 		err = runRemoval(*out, *flodni, *peerPort, *trackerPort)
+	case "warm-lifecycle":
+		err = runWarmLifecycle(*out, *flodni, *peerPort, *trackerPort)
 	default:
 		err = fmt.Errorf("unknown mode %q", *mode)
 	}
@@ -256,7 +260,11 @@ func writeRandom(path string, seed byte, size int64, tee io.Writer) error {
 }
 
 func buildMetaInfo(root string) (*metainfo.MetaInfo, error) {
-	private := true
+	return buildMetaInfoFlag(root, true)
+}
+
+// buildMetaInfoFlag is buildMetaInfo with the BEP 27 private flag chosen.
+func buildMetaInfoFlag(root string, private bool) (*metainfo.MetaInfo, error) {
 	info := metainfo.Info{PieceLength: pieceSize, Private: &private}
 	if err := info.BuildFromFilePath(root); err != nil {
 		return nil, err

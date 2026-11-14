@@ -69,8 +69,10 @@ A change that violates one is wrong even if it works.
   everywhere are in `.errcheck-excludes`); `make go-test` runs the tests
   with the race detector. `make e2e` seeds a private torrent and reads it
   through FUSE in the built image, fills a title's windows with warm on add
-  and reads them back with the seeder dead, restarts the daemon to catch up on
-  a title that was never warmed, sends a play webhook in the middle of a
+  and reads them back with the seeder dead, holds a title open so a second one
+  queues behind the pause, removes it while queued and wakes a closed third
+  from the stored record with a canary tracker silent, restarts the daemon to
+  catch up on a title that was never warmed, sends a play webhook in the middle of a
   read past the reader-budget margin and checks it counts as confirmed late,
   measures the engine's idle closes with a webhook while the torrent is
   closed, holds a torrent with a confirmed playback through two idle windows
