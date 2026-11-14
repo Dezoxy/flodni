@@ -53,6 +53,7 @@ type StartupCacheBuilder struct {
 	startTime      time.Time
 	foundFiles     map[string]bool // V142: Track files for GC
 	foundHashes    map[string]bool // lower-case info hashes of every stub seen, for pruning
+	stubsSeen      int             // stubs noted, duplicates included: tells a directory that held none
 
 	// hasMetainfo says whether the engine stores the hash with its metainfo; a test
 	// swaps it.
@@ -78,20 +79,7 @@ func (b *StartupCacheBuilder) Start() {
 	b.logger.Printf("Starting cache pre-population from %s", b.sourcePath)
 
 	go func() {
-		// Process movies directory
-		walked := 0
-		moviesPath := filepath.Join(b.sourcePath, "movies")
-		if _, err := os.Stat(moviesPath); err == nil {
-			b.processDirectory(moviesPath, false) // Not recursive
-			walked++
-		}
-
-		// Process TV directory (recursive for seasons)
-		tvPath := filepath.Join(b.sourcePath, "tv")
-		if _, err := os.Stat(tvPath); err == nil {
-			b.processDirectory(tvPath, true) // Recursive
-			walked++
-		}
+		walked, whole := b.walkLibrary()
 
 		// Log final statistics
 		duration := time.Since(b.startTime)
@@ -109,8 +97,8 @@ func (b *StartupCacheBuilder) Start() {
 		b.logger.Printf("Cache after startup: %d entries, %.2f MB used of %.2f MB capacity",
 			stats.Entries, float64(stats.Size)/(1024*1024), float64(stats.Capacity)/(1024*1024))
 
-		b.pruneReadability(walked == 2)
-		b.pruneFileState(walked == 2)
+		b.pruneReadability(whole)
+		b.pruneFileState(whole)
 		b.warnUnstored()
 
 		// V133: Save inode map after startup scan completes
@@ -125,8 +113,38 @@ func (b *StartupCacheBuilder) Start() {
 		}
 
 		// V142: Inode GC - Remove ghost entries (files that no longer exist)
-		b.pruneInodes(walked == 2)
+		b.pruneInodes(walked)
 	}()
+}
+
+// walkLibrary walks movies, then tv. It reports whether both exist (walked) and
+// whether each also held at least one stub (whole). A directory that is present and
+// empty (a separate mount that did not come up) must not let the other directory's
+// stubs stand for the whole library: the prunes would delete the rows of every
+// torrent filed in the empty one.
+func (b *StartupCacheBuilder) walkLibrary() (walked, whole bool) {
+	walked, whole = true, true
+	for _, d := range []struct {
+		name      string
+		recursive bool // tv is recursive for seasons
+	}{{"movies", false}, {"tv", true}} {
+		path := filepath.Join(b.sourcePath, d.name)
+		if _, err := os.Stat(path); err != nil {
+			walked, whole = false, false
+			continue
+		}
+		b.mu.Lock()
+		before := b.stubsSeen
+		b.mu.Unlock()
+		b.processDirectory(path, d.recursive)
+		b.mu.Lock()
+		if b.stubsSeen == before {
+			whole = false
+			b.logger.Printf("Startup cache: %s holds no stubs", d.name)
+		}
+		b.mu.Unlock()
+	}
+	return walked, whole
 }
 
 // processDirectory walks directory and processes all .mkv files
@@ -238,6 +256,7 @@ func (b *StartupCacheBuilder) noteHash(url string) {
 	}
 	b.mu.Lock()
 	b.foundHashes[hash] = true
+	b.stubsSeen++
 	b.mu.Unlock()
 }
 

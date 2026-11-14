@@ -330,11 +330,14 @@ line below is the one log format that is).
 - Times are UTC and are taken when the session closes, up to two minutes
   after its last read.
 - An entry goes when the last stub of its torrent is removed through the
-  library API. A session still open on that torrent writes the entry back
-  when it closes, and a stub deleted another way leaves it in place. Such
+  library API, replaced by an add, or deleted through the mount. A session
+  still open on that torrent is closed first, by the usual close rules (a
+  session under 25 s gets no dead-swarm verdict), so it cannot write the
+  entry back. A stub deleted directly on disk leaves the entry in place. Such
   entries stay until a startup prunes them. The prune runs only after a
-  complete scan: both `movies` and `tv` exist and every stub was read. It
-  is skipped otherwise, and the log says so.
+  complete scan: both `movies` and `tv` exist and each held at least one
+  stub, and every stub was read. It is skipped otherwise, and the log says
+  so.
 - Join from `GET /api/library/list`: an entry whose hash that list does
   not carry belongs to a torrent that left the library. Ignore it.
 - New reason and source values may appear; ignore the ones you do not

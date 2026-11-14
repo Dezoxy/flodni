@@ -331,3 +331,54 @@ func TestPruneInodesDropsTheGhostAfterAWholeWalk(t *testing.T) {
 		t.Fatalf("files = %d, want only the found one", got)
 	}
 }
+
+// A movies or tv directory that exists and holds no stubs (a mount that did not come
+// up) must not make the walk count as whole: the other directory's stubs would then
+// keep the prune from sparing the rows of every torrent filed in the empty one.
+func TestWalkLibraryNeedsStubsInBothDirectories(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		movies, tv bool // which directory holds a stub
+		noTVDir    bool
+		wantWalked bool
+		wantWhole  bool
+	}{
+		{"both hold stubs", true, true, false, true, true},
+		{"movies empty", false, true, false, true, false},
+		{"tv empty", true, false, false, true, false},
+		{"tv missing", true, false, true, false, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			root := t.TempDir()
+			mc := cache.NewLRUCache(1<<20, time.Hour)
+			for _, d := range []struct {
+				dir  string
+				has  bool
+				skip bool
+			}{{"movies", tc.movies, false}, {"tv", tc.tv, tc.noTVDir}} {
+				if d.skip {
+					continue
+				}
+				dir := filepath.Join(root, d.dir)
+				if err := os.MkdirAll(dir, 0o755); err != nil {
+					t.Fatal(err)
+				}
+				if !d.has {
+					continue
+				}
+				path := filepath.Join(dir, "Title_"+d.dir+".mkv")
+				if err := os.WriteFile(path, []byte("{}"), 0o644); err != nil {
+					t.Fatal(err)
+				}
+				mc.Put(path, &vfs.Metadata{URL: "http://engine/stream?link=" + inLibHash + "&index=1&play"}, 100)
+			}
+			b := NewStartupCacheBuilder(root, mc, log.New(io.Discard, "", 0))
+
+			walked, whole := b.walkLibrary()
+
+			if walked != tc.wantWalked || whole != tc.wantWhole {
+				t.Fatalf("walked=%v whole=%v, want %v %v", walked, whole, tc.wantWalked, tc.wantWhole)
+			}
+		})
+	}
+}

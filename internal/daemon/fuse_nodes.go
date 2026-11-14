@@ -481,6 +481,12 @@ func forceCloseVirtualFile(fullPath string) {
 func invalidateSyncRemovedPath(path string) {
 	if strings.HasSuffix(path, ".mkv") {
 		forceCloseVirtualFile(path)
+		// Close the session now, before the library clears the readability row: a session
+		// left open writes its row back when it closes. closeSession keeps its usual
+		// rules, so a young one gets no dead-swarm verdict.
+		if v, ok := sessions.Load(path); ok {
+			v.(*TTFFSession).closeSession()
+		}
 		registry.RemoveFromRegistry(path)
 	}
 	// The directory listing is not the only way back to a removed stub: a lookup by
