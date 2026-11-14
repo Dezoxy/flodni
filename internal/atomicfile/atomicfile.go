@@ -51,3 +51,14 @@ func WriteFile(path string, data []byte, perm os.FileMode) (err error) {
 	}
 	return nil
 }
+
+// WriteFileKeepMode is WriteFile for a file that may hold secrets: when path
+// exists its permission bits are kept, otherwise the file is created with
+// newPerm. Ownership is not touched.
+func WriteFileKeepMode(path string, data []byte, newPerm os.FileMode) error {
+	perm := newPerm
+	if fi, err := os.Stat(path); err == nil {
+		perm = fi.Mode().Perm()
+	}
+	return WriteFile(path, data, perm)
+}

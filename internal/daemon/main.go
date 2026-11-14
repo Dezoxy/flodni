@@ -579,7 +579,7 @@ func Run() {
 			}
 			// Update file
 			data, _ := json.MarshalIndent(newCfg, "", "  ")
-			if err := atomicfile.WriteFile(gc().ConfigPath, data, 0644); err != nil {
+			if err := atomicfile.WriteFileKeepMode(gc().ConfigPath, data, 0600); err != nil {
 				http.Error(w, err.Error(), 500)
 				return
 			}

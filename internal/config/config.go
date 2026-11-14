@@ -197,7 +197,7 @@ func (c *Config) Save() error {
 	}
 
 	// 2. Write to file
-	return atomicfile.WriteFile(c.ConfigPath, data, 0644)
+	return atomicfile.WriteFileKeepMode(c.ConfigPath, data, 0600)
 }
 
 // Redacted returns a copy that is safe to send to the control panel: the API

@@ -43,5 +43,5 @@ lockout.
 ## Secrets
 
 The repository holds no secrets; `config.json` is ignored by git and
-`config.json.example` carries placeholders. CI runs gitleaks on the full
+`config.json.example` carries placeholders. `config.json` holds `api_token` and the Plex token in clear text: a save from the panel keeps the file's existing permission bits (a new file is created 0600), so keep it unreadable to other users, or pass the secrets as `FLODNI_API_TOKEN` and `FLODNI_PLEX_TOKEN` instead. CI runs gitleaks on the full
 history, and GitHub secret scanning with push protection is enabled.

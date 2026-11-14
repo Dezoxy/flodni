@@ -99,7 +99,11 @@ headers, so `/plex/webhook` and `/webhook` also accept the token in the URL,
 for example `http://host:9080/plex/webhook?token=<token>`; no other route
 does. `/control` loads without it and asks for the token on its first call,
 then keeps it in the browser's local storage. `GET /api/config` never
-returns the token, and saving from the panel leaves it unchanged. The
+returns the token, and saving from the panel leaves it unchanged.
+A panel save keeps the permission bits of an existing `config.json` (a new
+file is created 0600), and secrets are better passed as the
+`FLODNI_API_TOKEN` and `FLODNI_PLEX_TOKEN` environment variables than stored
+in the file. The
 same token covers GoStorm's port 8090 (every route except `GET /echo`, header
 only, no `?token=`); external clients of 8090 must send it. There is no TLS:
 see `SECURITY.md`.

@@ -68,3 +68,41 @@ func TestWriteFileMissingDirectory(t *testing.T) {
 		t.Fatal("expected an error for a missing directory")
 	}
 }
+
+func TestWriteFileKeepModeKeepsExistingMode(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.json")
+	if err := os.WriteFile(path, []byte("old"), 0640); err != nil {
+		t.Fatal(err)
+	}
+	// os.WriteFile is subject to the umask; pin the mode under test.
+	if err := os.Chmod(path, 0640); err != nil {
+		t.Fatal(err)
+	}
+	if err := WriteFileKeepMode(path, []byte("new"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	fi, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fi.Mode().Perm() != 0640 {
+		t.Fatalf("mode = %v, want 0640", fi.Mode().Perm())
+	}
+	if b, _ := os.ReadFile(path); string(b) != "new" {
+		t.Fatalf("content = %q", b)
+	}
+}
+
+func TestWriteFileKeepModeCreatesMissingFile0600(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.json")
+	if err := WriteFileKeepMode(path, []byte("new"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	fi, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fi.Mode().Perm() != 0600 {
+		t.Fatalf("mode = %v, want 0600", fi.Mode().Perm())
+	}
+}
