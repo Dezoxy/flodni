@@ -126,6 +126,7 @@ func collectProm(w *promtext.Writer) {
 	collectWebhookHealthProm(w)
 	collectReadabilityProm(w)
 	collectUnstoredProm(w)
+	collectSwarmProm(w)
 	collectReadAheadProm(w)
 	collectStubIndexProm(w)
 

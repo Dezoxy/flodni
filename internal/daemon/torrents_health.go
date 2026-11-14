@@ -24,9 +24,11 @@ type torrentHealth struct {
 	LastFailureReason   *string `json:"last_failure_reason"`
 	LastFailureSource   *string `json:"last_failure_source"`
 	LastSwarmReadAt     *string `json:"last_swarm_read_at"`
-	// Files is EXPERIMENTAL (README) and must stay the last field: the e2e test matches
-	// "hash":"..."[^}]*"last_swarm_read_at", which a nested object before it would break.
+	// Files and Swarm are EXPERIMENTAL (README). Both stay after last_swarm_read_at: the
+	// e2e test matches "hash":"..."[^}]*"last_swarm_read_at", which a nested object before
+	// it would break. Swarm is the last key.
 	Files []fileHealth `json:"files"`
+	Swarm *swarmHealth `json:"swarm"`
 }
 
 // fileHealth is the per-file warm record as served. Times are RFC 3339 or null; an
@@ -123,12 +125,13 @@ func newTorrentsHealthHandler(store readabilityLister, files func() map[string][
 				LastFailureSource:   strOrNil(row.LastSource),
 				LastSwarmReadAt:     unixOrNil(row.LastSwarmRead),
 				Files:               filesOrEmpty(byHash[row.Hash]),
+				Swarm:               swarmFor(row.Hash),
 			})
 		}
 		if minFailures == 0 {
 			for hash, fs := range byHash {
 				if !listed[hash] {
-					out = append(out, torrentHealth{Hash: hash, Files: filesOrEmpty(fs)})
+					out = append(out, torrentHealth{Hash: hash, Files: filesOrEmpty(fs), Swarm: swarmFor(hash)})
 				}
 			}
 			sort.Slice(out, func(i, j int) bool { return out[i].Hash < out[j].Hash })

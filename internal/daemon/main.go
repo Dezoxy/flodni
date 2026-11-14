@@ -421,6 +421,7 @@ func Run() {
 	}
 
 	startWebhookStatus(webhookStatus, backgroundStopChan)
+	startSwarmSnapshot(engineSwarmSource, backgroundStopChan, logger)
 
 	finishGlobalInodeMapInit(logger)
 

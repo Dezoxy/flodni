@@ -345,10 +345,10 @@ line below is the one log format that is).
 ### Per-file records (experimental)
 
 Each torrent object carries a `files` array, always present (`[]` when empty)
-and always the last key. It is **experimental**: it is outside the contract
-sentence above and the stable-names promise, and its names may change until
-its first consumer runs against it. It is served only with the state database
-on. Three things write it. In index mode (`warmup_dir` set), a read through
+and followed only by `swarm` (below). It is **experimental**: it is outside
+the contract sentence above and the stable-names promise, and its names may
+change until its first consumer runs against it. It is served only with the
+state database on. Three things write it. In index mode (`warmup_dir` set), a read through
 the mount that leaves a file's head and tail windows both complete records the
 file. In any cache mode, a quota eviction records `cache: evicted`, also for a
 file with no earlier record. With `warm_on_add` set, the warmer records every
@@ -380,6 +380,31 @@ set; those keep their per-torrent meaning.
 - The series `flodni_warm_fills_total{trigger="mount",outcome}` counts the
   records the mount path wrote (`warmed`, or `cached` when no stamp exists);
   `trigger="add"` is warm on add.
+
+### Swarm signal (experimental)
+
+Each torrent object also carries a `swarm` key, always present and always the
+last key. It is **experimental**, outside the contract sentence above and the
+stable-names promise, like `files`. It is `null` for a torrent the engine does
+not have open: Flodni never wakes a closed torrent to fill it, and a torrent
+with no record is not listed here at all.
+
+| Field | Meaning |
+|---|---|
+| `awake` | Always `true` when the object is present. |
+| `peers` | Peers connected to the engine now. |
+| `seeders` | Connected peers that have every piece; `null` until the metainfo is in. |
+| `last_piece_at` | RFC 3339 UTC time the engine last completed a piece of this torrent; `null` if none since it opened (the stamp is not kept across a close). |
+| `rate_bps` | Download rate in bytes per second as the engine's one-second ticker last measured it. |
+
+- The values come from a snapshot the daemon rebuilds every 15 s from the
+  engine's existing stats; a request reads the snapshot and does not touch the
+  engine. A torrent opened or closed since the last snapshot shows the old
+  state for up to 15 s, and nothing is served before the first snapshot.
+- `flodni_swarm_awake_torrents` (gauge) is the number of torrents in that
+  snapshot.
+- Not a verdict: zero peers on an awake torrent is a fact about now, not a
+  dead swarm. Tested against a fake engine only; not run against a real swarm.
 
 ## Session log
 

@@ -235,7 +235,7 @@ func TestTorrentsHealthHandler(t *testing.T) {
 		t.Fatalf("body = %s", rec.Body.String())
 	}
 	wantKeys := []string{"consecutive_failures", "files", "first_failure_at", "hash", "last_failure_at",
-		"last_failure_reason", "last_failure_source", "last_swarm_read_at"}
+		"last_failure_reason", "last_failure_source", "last_swarm_read_at", "swarm"}
 	for _, tor := range body.Torrents {
 		var keys []string
 		for k := range tor {
