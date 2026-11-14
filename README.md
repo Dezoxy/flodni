@@ -747,6 +747,27 @@ left alone. The call reads each stub under both folders. A stub with no
 readable hash is skipped and logged once per call. The torrent is dropped once
 no stub links to it.
 
+## Replacing a release
+
+**Implemented.** When an add of a TV release would replace episode stubs that
+another release filed, the old stubs stay until the new release has shown it
+delivers. The check reads the first 64 KiB of a bounded sample of the new
+release's files: the file that replaces an existing stub, plus the first and
+the last episode by season and episode number, three files at most. A sample
+clip or an extra that names no episode is never chosen, since only files that
+name an episode are filed at all. The reads run at the same time under one
+60 s timeout, so a dead release costs one wait, not three. The replacement
+goes ahead only if every sampled file reads. Otherwise the call answers 422,
+the old stubs and registry rows stay, the new torrent is dropped, and the log
+names the release. A release with one file is checked on that file; an add that
+replaces nothing is not checked. A private torrent is read through its own
+peer sources only.
+
+The trade-off: the check samples, it does not prove. A pack whose middle
+episodes are dead but whose sampled files read still replaces the old stubs,
+and those episodes then fail on first play. Reading every file would delay
+every replacement by the slowest episode of the pack.
+
 ## Warm on add
 
 **Experimental, off by default.** With `warm_on_add` set (and `warmup_dir`

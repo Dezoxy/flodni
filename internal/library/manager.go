@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -28,7 +29,12 @@ const (
 // swarm delivers, small enough to cost seconds on a live one.
 const replacementReadBytes = 64 << 10
 
-// replacementReadTimeout bounds that read. A release with no seeds would otherwise
+// replacementSampleSize is how many files of a replacing pack the check reads: the
+// one being replaced, the first and the last episode by name, never more. A bound
+// on cost, not a proof: a dead file outside the sample can still pass.
+const replacementSampleSize = 3
+
+// replacementReadTimeout bounds that read, for the whole sample together. A release with no seeds would otherwise
 // hold the request open until the client gives up; a minute matches the metadata
 // wait. A variable so tests can shrink it.
 var replacementReadTimeout = 60 * time.Second
@@ -549,6 +555,43 @@ func (m *Manager) pickFile(index int, files []FileStat) (*FileStat, error) {
 	return best, nil
 }
 
+// replacementSample returns the indexes into the sorted episode list whose files
+// the check reads: the one being replaced, then the first and the last episode. The
+// list holds only files that name an episode, so samples and extras never appear. A
+// single-file release yields one index.
+func replacementSample(n, replacing int) []int {
+	idx := []int{replacing}
+	for _, j := range []int{0, n - 1} {
+		if len(idx) < replacementSampleSize && !slices.Contains(idx, j) {
+			idx = append(idx, j)
+		}
+	}
+	return idx
+}
+
+// readReplacementSample reads the head of every sampled file at once, under one
+// shared timeout. Concurrent, so the worst case is one timeout, as for a single
+// file, rather than three; at most replacementSampleSize reads run. The first
+// failure cancels the others and is returned.
+func (m *Manager) readReplacementSample(ctx context.Context, hash string, files []FileStat) error {
+	ctx, cancel := context.WithTimeout(ctx, replacementReadTimeout)
+	defer cancel()
+	errs := make(chan error, len(files))
+	for _, f := range files {
+		go func() {
+			errs <- m.cfg.GoStorm.ReadFileHead(ctx, hash, f.ID, min(replacementReadBytes, f.Length))
+		}()
+	}
+	var first error
+	for range files {
+		if err := <-errs; err != nil && first == nil {
+			first = err
+			cancel()
+		}
+	}
+	return first
+}
+
 func (m *Manager) addEpisodes(ctx context.Context, req AddRequest, hash, magnet string, info *TorrentStats, dropped map[string]bool) ([]AddedFile, error) {
 	type episodeFile struct {
 		file    FileStat
@@ -609,7 +652,7 @@ func (m *Manager) addEpisodes(ctx context.Context, req AddRequest, hash, magnet 
 	// swarm must not cost the files that played. Nothing is written or removed
 	// before this check passes, so a failure needs no rollback. Re-adding a stub at
 	// its own path replaces nothing and is not checked.
-	for _, w := range wanted {
+	for i, w := range wanted {
 		path := filepath.Join(showDir, fmt.Sprintf("Season.%02d", w.season),
 			EpisodeFilename(req.Title, w.season, w.episode, hash[:8]))
 		prev, ok, err := m.cfg.Registry.GetEpisode(EpisodeKey(req.Title, w.season, w.episode))
@@ -620,16 +663,17 @@ func (m *Manager) addEpisodes(ctx context.Context, req AddRequest, hash, magnet 
 		if !ok || prev == nil || prev.FilePath == "" || prev.FilePath == path {
 			continue
 		}
-		rctx, cancel := context.WithTimeout(ctx, replacementReadTimeout)
-		err = m.cfg.GoStorm.ReadFileHead(rctx, hash, w.file.ID, min(replacementReadBytes, w.file.Length))
-		cancel()
-		if err != nil {
+		var sample []FileStat
+		for _, j := range replacementSample(len(wanted), i) {
+			sample = append(sample, wanted[j].file)
+		}
+		if err := m.readReplacementSample(ctx, hash, sample); err != nil {
 			m.cfg.Logger.Printf("[LibraryAPI] replacement %s for %q delivered no data, existing files kept: %v",
 				hash[:8], req.Title, err)
 			return nil, errf(http.StatusUnprocessableEntity,
 				"replacement release delivered no data (%v, limit %s); existing files kept", err, replacementReadTimeout)
 		}
-		break // one readable file proves the release; later episodes need no second read
+		break // one sample proves the release; later episodes need no second check
 	}
 
 	var out []AddedFile

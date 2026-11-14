@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"sort"
 	"sync"
 	"testing"
 	"time"
@@ -23,9 +24,11 @@ type replaceEngine struct {
 	files    []FileStat
 	readErr  error         // returned by ReadFileHead
 	readWait time.Duration // when set, ReadFileHead blocks until ctx ends
+	failFile map[int]error // per file index; checked before readErr
 
 	mu      sync.Mutex
 	reads   int
+	readIDs []int
 	removed []string
 }
 
@@ -42,10 +45,14 @@ func (e *replaceEngine) RemoveTorrent(_ context.Context, hash string) error {
 	return nil
 }
 func (e *replaceEngine) ListTorrents(context.Context) ([]TorrentStats, error) { return nil, nil }
-func (e *replaceEngine) ReadFileHead(ctx context.Context, _ string, _ int, _ int64) error {
+func (e *replaceEngine) ReadFileHead(ctx context.Context, _ string, id int, _ int64) error {
 	e.mu.Lock()
 	e.reads++
+	e.readIDs = append(e.readIDs, id)
 	e.mu.Unlock()
+	if err := e.failFile[id]; err != nil {
+		return err
+	}
 	if e.readWait > 0 {
 		<-ctx.Done()
 		return ctx.Err()
@@ -144,8 +151,8 @@ func TestReplacementThatDeliversReplacesStubs(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(resp.Files) != 2 || eng.reads != 1 {
-		t.Fatalf("files = %d, reads = %d, want 2 and 1", len(resp.Files), eng.reads)
+	if len(resp.Files) != 2 || eng.reads != 2 {
+		t.Fatalf("files = %d, reads = %d, want 2 and 2", len(resp.Files), eng.reads)
 	}
 	if exists(oldStub) {
 		t.Fatal("old stub still there")
@@ -205,5 +212,101 @@ func TestReplacementReadTimeoutKeepsExistingStubs(t *testing.T) {
 	}
 	if !exists(oldStub) {
 		t.Fatal("old stub gone")
+	}
+}
+
+// bigPack serves five episodes plus a sample clip that names an episode and an
+// extra that names none.
+func bigPack(eng *replaceEngine) {
+	eng.files = []FileStat{
+		{ID: 1, Path: "Show.S01/Show.S01E01.mkv", Length: 1 << 30},
+		{ID: 2, Path: "Show.S01/Show.S01E02.mkv", Length: 1 << 30},
+		{ID: 3, Path: "Show.S01/Show.S01E03.mkv", Length: 1 << 30},
+		{ID: 4, Path: "Show.S01/Show.S01E04.mkv", Length: 1 << 30},
+		{ID: 5, Path: "Show.S01/Show.S01E05.mkv", Length: 1 << 30},
+		{ID: 6, Path: "Show.S01/Sample/show.s01e01.sample.mkv", Length: 1 << 20},
+		{ID: 7, Path: "Show.S01/Extras/Featurette.mkv", Length: 1 << 20},
+	}
+}
+
+func TestPackWhoseSampledOtherEpisodeDoesNotReadKeepsStubs(t *testing.T) {
+	eng := &replaceEngine{failFile: map[int]error{5: errors.New("no peers")}}
+	m, oldStub, reg := replaceFixture(t, eng)
+	bigPack(eng)
+
+	_, err := addPack(m)
+
+	var apiErr *Error
+	if !errors.As(err, &apiErr) || apiErr.Status != http.StatusUnprocessableEntity {
+		t.Fatalf("err = %v, want a 422 library error", err)
+	}
+	if !exists(oldStub) {
+		t.Fatal("old stub gone")
+	}
+	if got := reg.rows[EpisodeKey("Show", 1, 1)]; got.Hash != oldHash {
+		t.Fatalf("registry row changed: %+v", got)
+	}
+	if _, ok := reg.rows[EpisodeKey("Show", 1, 2)]; ok {
+		t.Fatal("registry row written for the new release")
+	}
+}
+
+func TestPackWhoseSampledFilesAllReadReplaces(t *testing.T) {
+	// Episode 3 is outside the sample and dead: the documented gap in the check.
+	eng := &replaceEngine{failFile: map[int]error{3: errors.New("no peers")}}
+	m, oldStub, reg := replaceFixture(t, eng)
+	bigPack(eng)
+
+	resp, err := addPack(m)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(resp.Files) != 5 {
+		t.Fatalf("files = %d, want 5", len(resp.Files))
+	}
+	if exists(oldStub) {
+		t.Fatal("old stub still there")
+	}
+	if got := reg.rows[EpisodeKey("Show", 1, 1)]; got.Hash != newHash {
+		t.Fatalf("registry row = %+v, want the new release", got)
+	}
+}
+
+func TestSampleIsFirstAndLastEpisodeNeverSamplesOrExtras(t *testing.T) {
+	eng := &replaceEngine{}
+	m, _, _ := replaceFixture(t, eng)
+	bigPack(eng)
+
+	if _, err := addPack(m); err != nil {
+		t.Fatal(err)
+	}
+	got := append([]int(nil), eng.readIDs...)
+	sort.Ints(got)
+	// E01 is both the replaced and the first episode: two distinct reads.
+	if len(got) != 2 || got[0] != 1 || got[1] != 5 {
+		t.Fatalf("read file ids = %v, want [1 5] (no sample clip, no extra)", got)
+	}
+}
+
+func TestSingleFileReleaseReadsOnce(t *testing.T) {
+	eng := &replaceEngine{}
+	m, _, _ := replaceFixture(t, eng)
+	eng.files = eng.files[:1]
+
+	if _, err := addPack(m); err != nil {
+		t.Fatal(err)
+	}
+	if eng.reads != 1 {
+		t.Fatalf("reads = %d, want 1", eng.reads)
+	}
+}
+
+func TestSampleSizeNeverExceedsTheConstant(t *testing.T) {
+	// The replaced episode sits in the middle: three distinct reads, no more.
+	if got := replacementSample(5, 2); len(got) != replacementSampleSize {
+		t.Fatalf("sample = %v, want %d indexes", got, replacementSampleSize)
+	}
+	if got := replacementSample(1, 0); len(got) != 1 {
+		t.Fatalf("sample = %v, want one index", got)
 	}
 }

@@ -680,8 +680,8 @@ func TestPackReplacesScatteredEpisodesFromOtherReleases(t *testing.T) {
 	if got := e.reg.rows[EpisodeKey("Show", 1, 1)].ShowIMDB; got != "tt0111111" {
 		t.Errorf("show imdb = %q, want it carried over", got)
 	}
-	if e.eng.reads != 1 {
-		t.Errorf("reads = %d, want one readability check", e.eng.reads)
+	if e.eng.reads != 2 {
+		t.Errorf("reads = %d, want the replaced first episode and the last", e.eng.reads)
 	}
 	removed := append([]string(nil), e.eng.removed...)
 	sort.Strings(removed)
