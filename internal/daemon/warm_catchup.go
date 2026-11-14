@@ -17,7 +17,9 @@ import (
 // A pass lists the stubs, keeps the files that are not warm on disk, not evicted and not
 // failing, and feeds them to the warmer slowly, newest first. It never evicts: a full
 // cache ends the pass. It needs warm_on_add, warmup_dir and the state database.
-// With warm_catchup_scope "retries" (roadmap, step 8) it keeps only the files warm on
+// An evicted file played within played_protection_days is fed again, only into room
+// (catch-up never evicts) and once per play: the re-warm is an attempt, and an attempt
+// after the last play ends it. With warm_catchup_scope "retries" (roadmap, step 8) it keeps only the files warm on
 // add attempted and did not finish; the cold backlog is left alone.
 
 const (
@@ -50,6 +52,7 @@ const (
 	stateEvicted    = "evicted"
 	stateNotStored  = "not_stored"
 	stateOutOfScope = "out_of_scope" // gauge and predicate: not a retry, and the scope is "retries"
+	stateRewarm     = "rewarm"       // predicate only: an evicted file played within the protection time; fed like pending, counted as pending in the gauge
 	stateLeftNoRoom = "left_no_room" // gauge only: files a pass left because the cache was full
 )
 
@@ -63,6 +66,7 @@ type catchupFile struct {
 	hashFailedRecently bool     // some file of the same hash failed under 20 h ago
 	notStored          bool     // WakeStored refused the hash in this process
 	retriesOnly        bool     // warm_catchup_scope is "retries"
+	rewarmable         bool     // evicted, played within played_protection_days, not attempted since that play
 }
 
 // unfinished reports a file warm on add attempted and did not finish: a failed read, a
@@ -88,12 +92,26 @@ func failedRecently(w fileWarm, now time.Time) bool {
 // catchupState is the predicate, in the order of the list under "Catch-up" in the README.
 // It is pure: the pass reads the facts and acts on the answer.
 func catchupState(f catchupFile, now time.Time) string {
+	evicted := f.evicted || f.warm.cache == cacheEvicted
+	rewarm := evicted && f.rewarmable
+	st := catchupWait(f, now, evicted && !rewarm, rewarm)
+	if rewarm && st == statePending {
+		return stateRewarm
+	}
+	return st
+}
+
+// catchupWait is the predicate's ordered cases. leftEvicted: the file is evicted and
+// stays so until its next play. A rewarmable evicted file runs the waits like any
+// other, and is in scope of "retries": it was kept once and is fetched again, which is
+// no cold backlog.
+func catchupWait(f catchupFile, now time.Time, leftEvicted, rewarm bool) string {
 	switch {
 	case f.complete:
 		return stateWarm // whatever the record says: the disk is the truth
-	case f.evicted || f.warm.cache == cacheEvicted:
+	case leftEvicted:
 		return stateEvicted
-	case f.retriesOnly && !unfinished(f.warm, now):
+	case f.retriesOnly && !rewarm && !unfinished(f.warm, now):
 		return stateOutOfScope // before the waits: the cold backlog is not waiting, it is not ours
 	case f.warm.readability == readFailed && f.warm.failedAttempts >= catchupMaxFailed:
 		return stateGaveUp
@@ -107,6 +125,18 @@ func catchupState(f catchupFile, now time.Time) string {
 		return stateNotStored
 	}
 	return statePending
+}
+
+// RewarmFact is when a confirmed play last happened and whether it is within the
+// protection time (0 = forever). Memory only.
+func (x *fileStateIndex) RewarmFact(k warmup.FileKey) (time.Time, bool) {
+	x.mu.Lock()
+	defer x.mu.Unlock()
+	e := x.m[normKey(k)]
+	if e == nil || e.lastPlayed.IsZero() {
+		return time.Time{}, false
+	}
+	return e.lastPlayed, x.protect == 0 || x.now().Sub(e.lastPlayed) < x.protect
 }
 
 // CatchupFact is the record of a file and whether quota eviction ever removed it
@@ -171,7 +201,7 @@ func collectCatchupProm(w *promtext.Writer, g *catchupGauge) {
 		promSample(b2i(sc == scopeAll), lbl("scope", scopeAll)),
 		promSample(b2i(sc == scopeRetries), lbl("scope", scopeRetries)))
 	w.Gauge("flodni_warm_catchup_files",
-		"Library files catch-up has not warmed, as of the last pass, by state: pending (candidates, also those a pass left because it was stopped, the pace was set to 0 or its disk failed), retry_wait (attempted under 20 hours ago, or a file of the same torrent failed), gave_up (4 failed attempts), evicted (quota eviction removed it: left to play), not_stored (the engine refused to wake the torrent), out_of_scope (scope retries only: files warm on add never attempted, left to a play or to scope all) and left_no_room (candidates the last pass left because the cache was full). Already warm files are not counted.",
+		"Library files catch-up has not warmed, as of the last pass, by state: pending (candidates, also those a pass left because it was stopped, the pace was set to 0 or its disk failed), retry_wait (attempted under 20 hours ago, or a file of the same torrent failed), gave_up (4 failed attempts), evicted (quota eviction removed it: left to its next play, unless it was played within played_protection_days; those are fed again as pending, see the README), not_stored (the engine refused to wake the torrent), out_of_scope (scope retries only: files warm on add never attempted, left to a play or to scope all) and left_no_room (candidates the last pass left because the cache was full). Already warm files are not counted.",
 		s...)
 }
 
@@ -207,6 +237,7 @@ type catchup struct {
 	list     func() ([]library.Item, error)
 	complete func(warmup.FileKey) bool
 	facts    func(warmup.FileKey) (fileWarm, bool)
+	played   func(warmup.FileKey) (time.Time, bool) // last confirmed play and whether it is within played_protection_days; nil means never
 	record   func(warmUpdate)
 	target   warmer.Target
 	perHour  func() int
@@ -229,6 +260,7 @@ func newCatchup(w *warmer.Warmer, x *fileStateIndex, list func() ([]library.Item
 		list:     list,
 		complete: func(k warmup.FileKey) bool { ok, _ := warmup.DiskWarmup.WindowsComplete(k); return ok },
 		facts:    x.CatchupFact,
+		played:   x.RewarmFact,
 		record:   func(u warmUpdate) { x.RecordWarm(u) },
 		target:   w,
 		perHour: func() int {
@@ -348,6 +380,18 @@ func (c *catchup) scopeNow() string {
 	return scopeAll
 }
 
+// rewarmable reports an evicted file worth warming again: a confirmed play within
+// played_protection_days, and no attempt since that play. A re-warm is an attempt, so
+// a file re-warmed and evicted again (or whose re-warm failed) waits for its next play
+// and the two never loop. Whether it is evicted is the predicate's question.
+func (c *catchup) rewarmable(k warmup.FileKey, w fileWarm) bool {
+	if c.played == nil {
+		return false
+	}
+	at, ok := c.played(k)
+	return ok && w.lastAttemptAt <= at.Unix()
+}
+
 // classify applies the predicate to a group. It returns the pending files by index and
 // the count of every state. A file that is warm on disk but whose record does not say
 // cached gets that record, with no wake.
@@ -376,7 +420,12 @@ func (c *catchup) classify(g *group) ([]warmer.File, map[string]int64) {
 		key := warmup.FileKey{Hash: g.hash, FileIdx: i}
 		f := facts[i]
 		st := catchupState(catchupFile{complete: c.complete(key), warm: f.w, evicted: f.evicted,
-			hashFailedRecently: hashFailed, notStored: notStored, retriesOnly: c.passScope == scopeRetries}, now)
+			hashFailedRecently: hashFailed, notStored: notStored, retriesOnly: c.passScope == scopeRetries,
+			rewarmable: c.rewarmable(key, f.w)}, now)
+		if st == stateRewarm {
+			counts[stateRewarm]++
+			st = statePending // fed and gauged as pending
+		}
 		switch st {
 		case stateWarm:
 			if f.w.cache != cacheCached {
@@ -445,7 +494,7 @@ func (c *catchup) runPass() bool {
 		files += len(cd.Files)
 	}
 	c.logLine(map[string]interface{}{"event": "pass_start", "scope": c.passScope, "candidate_hashes": len(cands), "pending": files,
-		"retry_wait": counts[stateRetryWait], "gave_up": counts[stateGaveUp], "evicted": counts[stateEvicted],
+		"retry_wait": counts[stateRetryWait], "gave_up": counts[stateGaveUp], "evicted": counts[stateEvicted], "rewarm": counts[stateRewarm],
 		"not_stored": counts[stateNotStored], "out_of_scope": counts[stateOutOfScope]})
 
 	fd := &warmer.Feeder{

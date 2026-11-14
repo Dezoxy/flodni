@@ -873,8 +873,9 @@ closed torrent and reports the engine's state for it before the pass).
     was full (`file_state.queued_at`, schema 16: written when warm on add
     queues the file, cleared when an attempt records any outcome, and read
     after a restart). A file never attempted by warm on add (no record, or
-    only `cached`), an evicted file and a file warm on disk are never fed,
-    and the gauge counts the never-attempted ones as `out_of_scope`. The
+    only `cached`), a file warm on disk and an evicted file (except the
+    re-warm below, which both scopes run) are never fed, and the gauge
+    counts the never-attempted ones as `out_of_scope`. The
     rest of the rules below (20 hours, the cap, never evicting, the quota
     stop) apply in both scopes. An unknown value is logged and replaced by
     `"all"`. Evidence does not change with the scope: a retried read the
@@ -890,17 +891,35 @@ closed torrent and reports the engine's state for it before the pass).
     after the daemon starts. The default 20 is sized for walking a backlog.
   - **Which files.** A file is skipped when both windows are complete on disk
     (the disk decides, not the record; a record without `cache: cached` is
-    written, with no wake). It is never warmed when its `cache` is `evicted`,
+    written, with no wake). It is not warmed when its `cache` is `evicted`,
     or it carries an eviction mark or time, including a file evicted before
-    schema 14: eviction is left to its next play. A file that failed 4 times
-    is given up on; only a read through the mount that the swarm serves, or an
-    add again, makes it eligible. A file attempted under 20 hours ago waits,
-    and so does its whole title when any file of it failed under 20 hours ago
-    (a no-peers failure skips the rest of a pack without a record). A title the
+    schema 14: eviction is left to its next play, except the re-warm below.
+    A file that failed 4 times is given up on; only a read through the mount
+    that the swarm serves, or an add again, makes it eligible. A file
+    attempted under 20 hours ago waits, and so does its whole title when
+    any file of it failed under 20 hours ago (a no-peers failure skips the
+    rest of a pack without a record). A title the
     engine refused to wake (`not_stored`, for example a stub the engine never
     stored) waits for a play. Everything else is a candidate: no record,
     `dropped_quota`, `dropped_no_evidence`, `lost`, `write_failed`, and a
     record that says `cached` while the disk does not.
+  - **Re-warm after eviction.** An evicted file is fed again when a
+    webhook-confirmed play of it is recorded within the last
+    `played_protection_days` (the same setting that protects it from
+    eviction; `0` means a play counts forever) and no attempt on it has been
+    recorded since that play. It then goes through the same rules as any
+    candidate (the 20-hour wait, the cap, the engine refusing the hash) and
+    the same pace, and, like all catch-up, only into free room: a full
+    cache leaves it, counted `no_room`, never evicting another file. A file
+    never played, or last played longer ago than the protection time, stays
+    evicted until its next play. A re-warm is an attempt, so a file warmed
+    again and evicted again, or one whose re-warm failed, is not fed again
+    until it is played again. Under scope `"retries"` the re-warm is fed too:
+    the file was kept once, so it is a retry, not the cold backlog. There is
+    no state of its own: such a file counts as `pending` in
+    `flodni_warm_catchup_files` (and as `left_no_room` when the pass left it
+    for room), and the `pass_start` line carries `"rewarm"`, how many of the
+    pending files are re-warms. Files left evicted stay `evicted`.
   - **Never evicts.** It checks for room before it wakes anything. At a full
     cache the pass ends: the file is counted `no_room`, nothing is recorded, and
     `flodni_warm_catchup_files{state="left_no_room"}` holds what the pass left.
