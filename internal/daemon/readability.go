@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"log"
+	"strings"
 	"sync"
 	"time"
 
@@ -17,6 +18,19 @@ const (
 	failReasonTimeout   = "timeout"    // peers were connected and the read still gave up
 	failReasonNotActive = "not_active" // the engine did not have the torrent running
 	failReasonUnknown   = "unknown"    // the classification itself timed out
+
+	// failReasonMetainfoTimeout: the wake's wait for the metainfo ran out, so the swarm
+	// could not even deliver it. It counts as a swarm-side failure (a private torrent
+	// with no peers looks like this), once per metainfoTimeoutWindow per torrent.
+	failReasonMetainfoTimeout = "metainfo_timeout"
+
+	// metainfoTimeoutWindow: one occasion. A wake waits 45s and a player retries, so a
+	// burst runs several minutes; the 2-minute session close would split it into two
+	// or three counts. Failures that prove a dead swarm are spread over time anyway.
+	metainfoTimeoutWindow = 10 * time.Minute
+
+	// failSourceWake: a wake, from a mount open or a warm-up, whose metainfo never arrived.
+	failSourceWake = "wake"
 
 	// failSourceMount: a reader through the FUSE mount. The verdict comes from any
 	// mount session of sessionVerdictFloor or more, scanners included.
@@ -34,11 +48,15 @@ var deadSwarmVerdicts = struct {
 	sync.Mutex
 	n map[[2]string]int64
 }{n: map[[2]string]int64{
-	{failReasonNoPeers, failSourceMount}:   0,
-	{failReasonTimeout, failSourceMount}:   0,
-	{failReasonNotActive, failSourceMount}: 0,
-	{failReasonUnknown, failSourceMount}:   0,
+	{failReasonNoPeers, failSourceMount}:        0,
+	{failReasonTimeout, failSourceMount}:        0,
+	{failReasonNotActive, failSourceMount}:      0,
+	{failReasonUnknown, failSourceMount}:        0,
+	{failReasonMetainfoTimeout, failSourceWake}: 0,
 }}
+
+// readabilityNow is the clock of the metainfo-timeout window; tests replace it.
+var readabilityNow = time.Now
 
 func countDeadSwarmVerdict(reason, source string) {
 	deadSwarmVerdicts.Lock()
@@ -95,6 +113,23 @@ type readabilityStore interface {
 // readability record. Only bytes from the swarm stamp a read; a metainfo taken from it
 // only ends the streak.
 func newReachabilityRecorder(store readabilityStore, logger *log.Logger) func(native.Outcome) {
+	var mu sync.Mutex
+	lastTimeout := map[string]time.Time{} // hash -> last metainfo timeout counted
+	// countTimeout reports whether this timeout starts a new occasion for hash.
+	countTimeout := func(hash string, at time.Time) bool {
+		mu.Lock()
+		defer mu.Unlock()
+		if last, ok := lastTimeout[hash]; ok && at.Sub(last) < metainfoTimeoutWindow {
+			return false
+		}
+		for h, last := range lastTimeout { // bounded: only occasions inside the window stay
+			if at.Sub(last) >= metainfoTimeoutWindow {
+				delete(lastTimeout, h)
+			}
+		}
+		lastTimeout[hash] = at
+		return true
+	}
 	return func(o native.Outcome) {
 		var err error
 		switch o.Kind {
@@ -106,6 +141,13 @@ func newReachabilityRecorder(store readabilityStore, logger *log.Logger) func(na
 			// Deliberately not countDeadSwarmVerdict and not RecordMetadataFailure: the
 			// swarm was never asked.
 			err = store.RecordNotStored(o.Hash, o.Source, time.Now())
+		case native.OutcomeMetainfoTimeout:
+			at := readabilityNow()
+			if !countTimeout(strings.ToLower(o.Hash), at) {
+				return
+			}
+			countDeadSwarmVerdict(failReasonMetainfoTimeout, failSourceWake)
+			err = store.RecordMetadataFailure(o.Hash, failReasonMetainfoTimeout, failSourceWake, at)
 		case native.OutcomeFailed:
 			short := o.Hash
 			if len(short) > 8 {

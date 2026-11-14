@@ -58,6 +58,10 @@ const (
 	// OutcomeNotStored: the engine refused to wake the torrent because it keeps no
 	// record of it. Not a failed read and not a dead swarm: Source is set, Reason is not.
 	OutcomeNotStored
+	// OutcomeMetainfoTimeout: the metainfo did not arrive within the wake's wait. The
+	// swarm could not even deliver it. Source and Reason are not set; the recorder
+	// owns both and counts one per torrent per occasion, not one per attempt.
+	OutcomeMetainfoTimeout
 )
 
 // Outcome is one reachability observation. Reason and Source are set for
@@ -75,9 +79,10 @@ type Outcome struct {
 // Two reporters, and both watch something a single read cannot show:
 //
 //   - Wake reports the metainfo kind when the metainfo had to be waited for and
-//     arrived, which is the one thing that proves peers are there right now. It
-//     never condemns: a metainfo that never arrives fails the Open with EIO before
-//     any session exists, so that case is not counted.
+//     arrived, which is the one thing that proves peers are there right now. When
+//     it never arrives the Open fails with EIO before any session exists, so Wake
+//     reports a metainfo timeout instead. It reports every attempt; the recorder
+//     counts one per torrent per occasion.
 //   - The session layer reports a swarm read on bytes served straight from the
 //     swarm, and a failure for a whole playback session that ends with a read that
 //     gave up and nothing served.
@@ -207,11 +212,13 @@ func (c *NativeClient) Wake(ctx context.Context, magnetUrl string, fileIdx int) 
 				// instead of holding the semaphore token for the full 45s.
 				return fmt.Errorf("torrent closed while waiting for metadata: %s", hash)
 			case <-timer.C:
-				// Not reported: the metainfo never arrived, so the Open fails with EIO
-				// before the FUSE layer registers a session (it registers one only after
-				// a successful wake), and no session exists to condemn. Reporting here
-				// would count every retry of a player, because each 45s wait would write
-				// its own failure; the counter counts occasions, not attempts.
+				// The Open fails with EIO before the FUSE layer registers a session (it
+				// registers one only after a successful wake), so no session exists to
+				// condemn. Every attempt is reported; the recorder counts occasions, not
+				// attempts, because a player retries.
+				if ReachabilityOutcome != nil {
+					ReachabilityOutcome(Outcome{Hash: hash, Kind: OutcomeMetainfoTimeout})
+				}
 				log.Printf("[NativeBridge] Metadata timeout for %s", hash)
 				return fmt.Errorf("torrent metadata timeout (45s): %s", hash)
 			case <-ctx.Done():

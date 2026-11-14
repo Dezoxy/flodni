@@ -105,6 +105,13 @@ that had to wait for the metainfo and got it from the swarm (`Wake` in
 `internal/gostorm/native/native.go`). Every new writer of the readability
 record follows the same rule.
 
+**The metainfo timeout.** A wake whose metainfo does not arrive within its
+45 s wait fails the open before any session exists, so `Wake` itself reports
+it (`OutcomeMetainfoTimeout`) and the recorder writes reason
+`metainfo_timeout`, source `wake`, counting it as a swarm-side failure. It is
+counted at most once per torrent per 10 minutes, because a player retries and
+each retry is another 45 s wait.
+
 **The failure rule.** A failure is counted once per session, and only when
 a read gave up, the swarm served nothing and the session lasted at least
 `sessionVerdictFloor` (25 s). A read Flodni refuses on purpose is not a

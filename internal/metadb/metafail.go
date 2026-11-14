@@ -12,7 +12,7 @@ import (
 // the current streak: it is kept while the count runs and restarted after a reset,
 // so a burst inside one window cannot reach a threshold: what proves a dead swarm
 // is failures spread over time, not their number. A metainfo that never arrives is
-// not counted today. The table name predates the readability record and is kept
+// counted by the daemon's recorder as reason metainfo_timeout, once per occasion. The table name predates the readability record and is kept
 // for the databases already in production.
 func (d *DB) RecordMetadataFailure(hash, reason, source string, at time.Time) error {
 	now := at.Unix()
