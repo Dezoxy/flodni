@@ -772,6 +772,7 @@ func Run() {
 		shutdownStarted.Store(true)
 
 		code := shutdown(shutdownSteps{
+			closeSessions: closeAllSessions,
 			saveState: func() {
 				if globalInodeMap == nil {
 					return

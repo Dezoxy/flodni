@@ -1,9 +1,11 @@
 package daemon
 
 import (
+	"bytes"
 	"encoding/json"
 	"flodni/internal/gostorm/native"
 	"fmt"
+	"log"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -281,5 +283,58 @@ func TestSessionConfirmedAtRegister(t *testing.T) {
 	u, _ := sessions.Load("/m/u.mkv")
 	if !c.(*TTFFSession).record(time.Time{}, false).Confirmed || u.(*TTFFSession).record(time.Time{}, false).Confirmed {
 		t.Fatal("confirmed at register wrong")
+	}
+}
+
+// Sessions open at shutdown get their [Session] line and verdict once, through the
+// normal close path; a young failed session is not condemned, and a close racing the
+// shutdown records once.
+func TestCloseAllSessions(t *testing.T) {
+	resetSessionState(t)
+	prev := native.ReachabilityOutcome
+	t.Cleanup(func() { native.ReachabilityOutcome = prev })
+	var outcomes []native.OutcomeKind
+	native.ReachabilityOutcome = func(o native.Outcome) { outcomes = append(outcomes, o.Kind) }
+	var buf bytes.Buffer
+	prevLog := logger
+	t.Cleanup(func() { logger = prevLog })
+	logger = log.New(&buf, "", 0)
+
+	mk := func(path string, age time.Duration, fail bool) *TTFFSession {
+		s := &TTFFSession{path: path, size: 1, hash: "h" + path}
+		s.openedAt.Store(time.Now().Add(-age).UnixNano())
+		s.lastOff.Store(-1)
+		sessions.Store(path, s)
+		if fail {
+			ttffReadFailed(path)
+		}
+		return s
+	}
+	old := mk("/m/old.mkv", time.Minute, false)
+	young := mk("/m/young.mkv", 5*time.Second, true)
+
+	closeAllSessions()
+	old.closeSession() // release racing shutdown
+
+	got := closedSessions.newestFirst()
+	if len(got) != 2 {
+		t.Fatalf("closed %d sessions, want 2: %+v", len(got), got)
+	}
+	if n := strings.Count(buf.String(), sessionLogPrefix); n != 2 {
+		t.Fatalf("%d [Session] lines, want 2:\n%s", n, buf.String())
+	}
+	for _, r := range got {
+		if r.Outcome == outcomeDeadSwarm {
+			t.Fatalf("%s condemned at shutdown: %+v", r.Path, r)
+		}
+	}
+	if len(outcomes) != 0 {
+		t.Fatalf("verdicts %v, want none", outcomes)
+	}
+	if !young.closed.Load() || !old.closed.Load() {
+		t.Fatal("session left open")
+	}
+	if _, ok := sessions.Load("/m/young.mkv"); ok {
+		t.Fatal("session still registered")
 	}
 }

@@ -545,6 +545,22 @@ func ttffReleaseClose(path string) {
 	}
 }
 
+// closeAllSessions closes every open session through the normal close path, so each
+// gets its verdict, counters and [Session] line once (closeOnce) and the usual rules
+// apply: a session younger than sessionVerdictFloor is never condemned just because
+// we stopped. Runs synchronously inside the shutdown deadline, before state is saved.
+func closeAllSessions() {
+	n := 0
+	sessions.Range(func(_, val any) bool {
+		val.(*TTFFSession).closeSession()
+		n++
+		return true
+	})
+	if n > 0 {
+		logger.Printf("[Sessions] closed %d open session(s) at shutdown", n)
+	}
+}
+
 // Test-only overrides of the session idle close and the cleanup tick, read once at
 // start. They exist so the end-to-end variants that wait for a session to close do not
 // wait minutes; they are not configuration.

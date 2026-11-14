@@ -27,6 +27,7 @@ func deferToShutdown() bool { return shutdownStarted.Load() }
 
 // shutdownSteps holds the shutdown actions, so tests can replace them.
 type shutdownSteps struct {
+	closeSessions   func() // give open sessions their verdict while the state DB is open
 	saveState       func() // persist state first: it is the part that matters
 	stopBackground  func()
 	unmount         func() error
@@ -47,7 +48,7 @@ func shutdown(s shutdownSteps, deadline, detachAfter time.Duration) int {
 		code = restartExitCode
 	}
 	var current atomic.Value
-	current.Store("save state")
+	current.Store("close sessions")
 	done := make(chan struct{})
 
 	run := func(name string, f func()) {
@@ -59,6 +60,7 @@ func shutdown(s shutdownSteps, deadline, detachAfter time.Duration) int {
 
 	go func() {
 		defer close(done)
+		run("close sessions", s.closeSessions)
 		run("save state", s.saveState)
 		run("stop background work", s.stopBackground)
 

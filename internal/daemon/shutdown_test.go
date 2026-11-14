@@ -36,6 +36,7 @@ func (r *shutdownRecorder) joined() (string, string) {
 
 func (r *shutdownRecorder) stepsFor(restart bool) shutdownSteps {
 	return shutdownSteps{
+		closeSessions:   func() { r.step("sessions") },
 		saveState:       func() { r.step("save") },
 		stopBackground:  func() { r.step("stop") },
 		unmount:         func() error { r.step("unmount"); return nil },
@@ -54,7 +55,7 @@ func TestShutdownNormal(t *testing.T) {
 		if got := shutdown(r.stepsFor(tc.restart), time.Second, 500*time.Millisecond); got != tc.want {
 			t.Errorf("restart=%v: exit code = %d, want %d", tc.restart, got, tc.want)
 		}
-		if order, _ := r.joined(); order != "save,stop,unmount" {
+		if order, _ := r.joined(); order != "sessions,save,stop,unmount" {
 			t.Errorf("restart=%v: steps = %q, want save,stop,unmount (no detach)", tc.restart, order)
 		}
 	}
@@ -76,7 +77,7 @@ func TestShutdownDetachUnblocksUnmount(t *testing.T) {
 		t.Errorf("took %v, want well under the 2s deadline", took)
 	}
 	order, logs := r.joined()
-	if order != "save,stop,unmount,detach" {
+	if order != "sessions,save,stop,unmount,detach" {
 		t.Errorf("steps = %q, want save,stop,unmount,detach", order)
 	}
 	if !strings.Contains(logs, "WARNING: unmount still running") {
@@ -133,7 +134,7 @@ func TestShutdownSlowSaveWithinDeadline(t *testing.T) {
 		t.Errorf("exit code = %d, want 0", code)
 	}
 	order, logs := r.joined()
-	if order != "save,stop,unmount" {
+	if order != "sessions,save,stop,unmount" {
 		t.Errorf("steps = %q, want save,stop,unmount", order)
 	}
 	if strings.Contains(logs, "ERROR") {

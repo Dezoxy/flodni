@@ -60,8 +60,9 @@ paths with `FLODNI_ROOT_PATH`, `FLODNI_SOURCE_PATH`, `FLODNI_MOUNT_PATH`,
 `FLODNI_*` ones. Existing state carries over: the database is still
 `tiramisu.db` and the log file `tiramisu.log`.
 
-Shutdown saves state, then unmounts; a mount that will not unmount is
-detached lazily after 5 s, and the process exits by 8 s at the latest. That
+Shutdown first closes every open session, so each gets its verdict and
+`[Session]` line, then saves state and unmounts; a mount that will not
+unmount is detached lazily after 5 s, and the process exits by 8 s at the latest. That
 fits inside Docker's default 10 s `stop_grace_period`. A longer grace period
 is fine; do not set it below 10 s, or Docker kills the process before the
 deadline.
@@ -390,7 +391,8 @@ also written to the log as one line, so a log store keeps the history. The
 image tees the log to `tiramisu.log` under `$FLODNI_LOG_DIR` (default
 `/state/logs`); that file survives a container recreate only when its
 directory is on a mounted volume, and it is not rotated. Without the log FIFO the line
-goes to stdout only.
+goes to stdout only. A session still open at shutdown is closed then, with
+the same rules: one younger than 25 s is never condemned as a dead swarm.
 
 ```text
 [GoProxy] 2026/11/12 09:02:10 [Session] {"path":"/mnt/flodni-real/tv/Example/Example.S01E01_0123abcd.mkv","hash":"0123456789abcdef0123456789abcdef01234567","size":31461601,"opened_at":"2026-11-12T09:00:05Z","closed_at":"2026-11-12T09:02:10Z","bytes_served":31461601,"first_byte_ms":12,"reads":241,"failed_reads":0,"outcome":"served","file_index":1,"bytes_fetch_block":135393,"bytes_racache_hit":31326208,"bytes_warmup_head":0,"bytes_warmup_tail":0,"swarm_served":true,"duration_ms":125000,"failure_reason":null,"reopens":0,"stalls":0,"max_stall_ms":0,"confirmed":false}
