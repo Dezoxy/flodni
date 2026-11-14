@@ -120,8 +120,8 @@ func TestSessionLogContractKeys(t *testing.T) {
 	sort.Strings(keys)
 	want := []string{"bytes_fetch_block", "bytes_racache_hit", "bytes_served", "bytes_warmup_head",
 		"bytes_warmup_tail", "confirmed", "duration_ms", "failed_reads", "failure_reason", "file_index",
-		"first_byte_ms", "hash", "max_stall_ms", "opened_at", "outcome", "path", "reads", "reopens",
-		"size", "stalls", "swarm_served"}
+		"first_byte_ms", "hash", "id", "max_stall_ms", "opened_at", "outcome", "path", "reads", "reopens",
+		"resumed_from", "size", "stalls", "swarm_served"}
 	// closed_at is omitted while a session is open; the log line always has it.
 	if !reflect.DeepEqual(keys, want) {
 		t.Fatalf("keys = %v, want %v", keys, want)
@@ -215,23 +215,6 @@ func TestFileIndexStoredAndKeptOnReopen(t *testing.T) {
 	}
 	if got := val.(*TTFFSession).fileIndex; got != 3 {
 		t.Fatalf("fileIndex = %d, want 3", got)
-	}
-}
-
-func TestReadsAfterCloseAreNotCounted(t *testing.T) {
-	readabilityEnv(t, 1, true)
-	s := newTestSession(time.Minute)
-	s.recordRead(srcFetchBlock, time.Millisecond, 10, 0)
-	s.closeSession()
-	before := closedSessions.newestFirst()[0]
-	// Documents a limit (ideas.md): a handle still open after its session closed
-	// feeds nothing until the file is opened again. Fails on purpose when fixed.
-	ttffRead(s.path, srcFetchBlock, time.Millisecond, 500, 0)
-	if _, ok := sessions.Load(s.path); ok {
-		t.Fatal("a read after close created a session")
-	}
-	if s.bytesFetchBlock.Load() != 10 || closedSessions.newestFirst()[0] != before {
-		t.Fatal("a read after close was counted")
 	}
 }
 

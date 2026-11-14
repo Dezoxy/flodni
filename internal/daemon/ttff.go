@@ -142,7 +142,9 @@ type TTFFSession struct {
 	path            string
 	size            int64
 	hash            string
-	fileIndex       int // the index the stub carries (0 = none), for the session log line
+	fileIndex       int    // the index the stub carries (0 = none), for the session log line
+	id              uint64 // process-unique, for the session log and resumed_from
+	resumedFrom     uint64 // id of the session this one continues; 0 = a fresh open
 	warmupHeadReady atomic.Bool
 	warmupTailReady atomic.Bool
 	// coldEvicted: the session opened with no ready head on a file quota eviction had
@@ -355,7 +357,10 @@ func (s *TTFFSession) reportSwarmVerdict() bool {
 func (s *TTFFSession) closeSession() {
 	s.closeOnce.Do(func() {
 		s.closed.Store(true)
-		sessions.CompareAndDelete(s.path, s)
+		if sessions.CompareAndDelete(s.path, s) {
+			lastClosed.Store(s.path, closedInfo{id: s.id, size: s.size, hash: s.hash,
+				fileIndex: s.fileIndex, headReady: s.warmupHeadReady.Load(), tailReady: s.warmupTailReady.Load()})
+		}
 		s.resolveReaderBudget()
 		dead := s.reportSwarmVerdict()
 		// Before the ttffIsReal filter: probes and unserved sessions get a line too.
@@ -462,7 +467,7 @@ func ttffRegister(path string, size int64, hash string, fileIndex int, headReady
 		return
 	}
 	nowN := time.Now().UnixNano()
-	ns := &TTFFSession{path: path, size: size, hash: hash, fileIndex: fileIndex}
+	ns := &TTFFSession{path: path, size: size, hash: hash, fileIndex: fileIndex, id: sessionSeq.Add(1)}
 	confirmed := playbackConfirmed(path)
 	ns.confirmed.Store(confirmed)
 	ns.warmupHeadReady.Store(headReady)
@@ -470,6 +475,8 @@ func ttffRegister(path string, size int64, hash string, fileIndex int, headReady
 	ns.openedAt.Store(nowN)
 	ns.lastReadAt.Store(nowN)
 	ns.lastOff.Store(-1)
+	// A fresh open is not a continuation of whatever closed before it.
+	lastClosed.Delete(path)
 	if actual, loaded := sessions.LoadOrStore(path, ns); loaded {
 		s := actual.(*TTFFSession)
 		if s.closed.Load() {
@@ -508,16 +515,15 @@ func ttffRead(path string, src ttffSource, d time.Duration, n int, off int64) {
 	if d > ttffStallDuration {
 		countStall(path)
 	}
-	if val, ok := sessions.Load(path); ok {
-		val.(*TTFFSession).recordRead(src, d, n, off)
+	if s := sessionForRead(path); s != nil {
+		s.recordRead(src, d, n, off)
 	}
 }
 
 // ttffReadFailed marks the session behind path as having had a read give up. Only
 // the two exits that mean the swarm did not deliver call it (EAGAIN, EIO).
 func ttffReadFailed(path string) {
-	if val, ok := sessions.Load(path); ok {
-		s := val.(*TTFFSession)
+	if s := sessionForRead(path); s != nil {
 		s.failedReads.Add(1)
 		// Classified before the flag is set: a session closing meanwhile then sees
 		// either no failure or a failure that already has its reason.
@@ -525,6 +531,59 @@ func ttffReadFailed(path string) {
 		s.failReason.Store(&reason)
 		s.readFailed.Store(true)
 	}
+}
+
+// closedInfo is what a closed session leaves behind so a later read on a handle that
+// is still open can continue it: the identity to link to and the file's facts.
+type closedInfo struct {
+	id                   uint64
+	size                 int64
+	hash                 string
+	fileIndex            int
+	headReady, tailReady bool
+}
+
+var (
+	sessionSeq atomic.Uint64
+	// lastClosed holds the newest closed session per path until a read resumes it, a
+	// fresh Open replaces it, or a release closes the path's last handle. A path that
+	// closes and is never touched again keeps one small entry.
+	lastClosed sync.Map // path -> closedInfo
+	resumeMu   sync.Mutex
+)
+
+// sessionForRead returns the session a read on path belongs to. A session closes
+// after 60s idle (30s past ttffMaxLife) or when a probe releases, while a handle may
+// still be open: a paused playback. The first read after such a close opens a new
+// session on the same handle, linked to the one that closed (resumed_from), so the
+// pause is one session per stretch of reads and each verdict judges its own reads.
+// Only a read gets here: a probe's release never opens one. resumeMu is taken only
+// when no session exists, never on the hot path.
+func sessionForRead(path string) *TTFFSession {
+	if val, ok := sessions.Load(path); ok {
+		return val.(*TTFFSession)
+	}
+	resumeMu.Lock()
+	defer resumeMu.Unlock()
+	if val, ok := sessions.Load(path); ok { // another read resumed it first
+		return val.(*TTFFSession)
+	}
+	v, ok := lastClosed.LoadAndDelete(path)
+	if !ok {
+		return nil
+	}
+	ci := v.(closedInfo)
+	nowN := time.Now().UnixNano()
+	ns := &TTFFSession{path: path, size: ci.size, hash: ci.hash, fileIndex: ci.fileIndex,
+		id: sessionSeq.Add(1), resumedFrom: ci.id}
+	ns.confirmed.Store(playbackConfirmed(path))
+	ns.warmupHeadReady.Store(ci.headReady)
+	ns.warmupTailReady.Store(ci.tailReady)
+	ns.openedAt.Store(nowN)
+	ns.lastReadAt.Store(nowN)
+	ns.lastOff.Store(-1)
+	sessions.Store(path, ns)
+	return ns
 }
 
 // ttffReleaseClose closes the session immediately on Release when nothing was
@@ -541,6 +600,8 @@ func ttffReleaseClose(path string) {
 	if val, ok := sessions.Load(path); ok {
 		if s := val.(*TTFFSession); s.bytesRead.Load() == 0 {
 			s.closeSession()
+			// Nobody has the path open: nothing is left to resume.
+			lastClosed.Delete(s.path)
 		}
 	}
 }

@@ -133,6 +133,7 @@ func resetSessionState(t *testing.T) {
 	t.Helper()
 	clear := func() {
 		sessions.Range(func(k, _ any) bool { sessions.Delete(k); return true })
+		lastClosed.Range(func(k, _ any) bool { lastClosed.Delete(k); return true })
 		closedSessions.mu.Lock()
 		closedSessions.next, closedSessions.n = 0, 0
 		closedSessions.mu.Unlock()

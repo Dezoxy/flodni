@@ -67,6 +67,10 @@ type sessionRecord struct {
 	Stalls     int64 `json:"stalls"`
 	MaxStallMS int64 `json:"max_stall_ms"`
 	Confirmed  bool  `json:"confirmed"`
+	// Added with resumed sessions. A read after a close opens a new session; ids are
+	// per process (they restart at 1), resumed_from is 0 for a session opened fresh.
+	ID          uint64 `json:"id"`
+	ResumedFrom uint64 `json:"resumed_from"`
 }
 
 // record snapshots the session. closedAt is the zero time for an open session.
@@ -93,6 +97,8 @@ func (s *TTFFSession) record(closedAt time.Time, dead bool) sessionRecord {
 		Stalls:          s.stallCount.Load(),
 		MaxStallMS:      s.maxStallMS.Load(),
 		Confirmed:       s.confirmed.Load(),
+		ID:              s.id,
+		ResumedFrom:     s.resumedFrom,
 	}
 	end := time.Now()
 	if fd := s.firstDataAt.Load(); fd > 0 {
