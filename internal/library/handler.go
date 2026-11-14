@@ -118,6 +118,21 @@ func (h *Handler) List(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, items)
 }
 
+// Audit serves GET /api/library/audit: stubs whose index disagrees with the engine's
+// stored file list. Read-only, on demand.
+func (h *Handler) Audit(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeError(w, http.StatusMethodNotAllowed, "GET only")
+		return
+	}
+	rep, err := h.mgr.Audit()
+	if err != nil {
+		writeAPIError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, rep)
+}
+
 // readBody reads at most maxBodyBytes+1: reading exactly the cap accepts a valid JSON
 // value followed by arbitrary excess, which mutates state on an effectively unsized
 // request.

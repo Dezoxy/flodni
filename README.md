@@ -747,6 +747,35 @@ left alone. The call reads each stub under both folders. A stub with no
 readable hash is skipped and logged once per call. The torrent is dropped once
 no stub links to it.
 
+## Auditing stubs against the engine's file list
+
+`GET /api/library/audit` (control port, behind `api_token` like the other
+routes) checks every stub's `index` against the file list saved with its
+torrent's record, using the engine's own ids. It reads the stubs the list
+route reads and the records without waking any torrent; it changes no stub,
+record or state, and it runs only when asked, never at start.
+
+```json
+{"checked": 120, "mismatched_total": 1, "truncated": false,
+ "mismatched": [{"path": "...", "hash": "...", "index": 3, "stub_size": 200,
+                 "engine_length": 100, "reason": "length_differs"}],
+ "no_file_list": {"stubs": 2, "torrents": 1, "hashes": ["..."]},
+ "unreadable": 0}
+```
+
+| Field | Meaning |
+|---|---|
+| `checked` | Stubs compared against a stored file list. |
+| `reason` `no_such_file` | The index names no file in the list (`engine_length` is `null`). |
+| `reason` `length_differs` | The index names a file of another length than the stub's `size`. |
+| `no_file_list` | Stubs whose record holds no file list (saved before the metainfo arrived). They cannot be checked until one wake stores the list; the audit does not wake them. |
+| `unreadable` | Stubs with no readable hash. |
+
+`mismatched` and `no_file_list.hashes` hold at most 200 entries each;
+`mismatched_total` and `truncated` give the full count. Repair a reported
+stub with `POST /api/library/remove` for its hash, then `POST /api/library/add`
+again, which writes the stub from the engine's current list.
+
 ## Warm on add
 
 **Experimental, off by default.** With `warm_on_add` set (and `warmup_dir`

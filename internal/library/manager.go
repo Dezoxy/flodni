@@ -60,8 +60,12 @@ type Config struct {
 	// Gaps, when set, reports the episodes the reaper removed and has not been able to
 	// replace. Read-only: what to do about a hole is a decision for the client, which
 	// can ask the user; the engine only says which ones are open.
-	Gaps   func() ([]Gap, error)
-	Logger *log.Logger
+	Gaps func() ([]Gap, error)
+	// StoredFiles, when set, is the file list saved with a torrent's record (engine
+	// ids), read without waking the torrent; nil when there is none. GET
+	// /api/library/audit needs it.
+	StoredFiles func(hash string) []TorrentFile
+	Logger      *log.Logger
 	// MediaServer, when set, is asked to rescan the section a stub was added to or
 	// removed from. MovieSection and TVSection are its library ids.
 	MediaServer  MediaServer
