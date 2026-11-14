@@ -561,3 +561,77 @@ func TestAStubWithoutAnIndexIsNotACandidate(t *testing.T) {
 		t.Fatalf("fed %v: engine file ids start at 1, a stub with no index is not a file", got)
 	}
 }
+
+// ---- pack-level give-up ----
+
+// giveUp records four failed swarm reads of a file, the last attemptAgo ago.
+func giveUp(e *catchupEnv, hash string, idx int, attemptAgo time.Duration) {
+	for i := 0; i < catchupMaxFailed; i++ {
+		e.x.RecordWarm(warmUpdate{key: fk(hash, idx), readability: readFailed, attemptAt: e.now.Add(-attemptAgo)})
+	}
+}
+
+func TestAPackWhoseFirstFileGaveUpIsNotAttemptedForItsOtherFiles(t *testing.T) {
+	e := newCatchupEnv(t)
+	e.items = []library.Item{stub("aa", 1, 100), stub("aa", 2, 100), stub("aa", 3, 100), stub("ok", 1, 50)}
+	giveUp(e, "aa", 1, 90*time.Hour) // long past the 20 h wait: file 2 and 3 would be pending
+	e.c.runPass()
+	if got := e.tg.feeds(); len(got) != 1 || got[0] != "ok/1" {
+		t.Fatalf("fed %v, want only ok/1", got)
+	}
+	if g := e.gauge.get(); g[stateGaveUp] != 3 || g[stateRetryWait] != 0 {
+		t.Fatalf("gauge = %v, want gave_up 3 (the file and its two siblings)", g)
+	}
+}
+
+func TestASwarmDeliveryOnAnyFileOfTheHashLiftsThePackGiveUp(t *testing.T) {
+	e := newCatchupEnv(t)
+	e.items = []library.Item{stub("aa", 1, 100), stub("aa", 2, 100), stub("aa", 3, 100)}
+	giveUp(e, "aa", 1, 90*time.Hour)
+	// A delivery before the give-up is old news.
+	e.x.RecordWarm(warmUpdate{key: fk("aa", 3), readability: readWarmed, cache: cacheCached, deliveredAt: e.now.Add(-100 * time.Hour)})
+	e.c.runPass()
+	if got := e.tg.feeds(); len(got) != 0 {
+		t.Fatalf("fed %v, want none: the delivery is older than the give-up", got)
+	}
+	// A delivery after it, on a sibling, lifts the pack; the given-up file stays given up.
+	e.x.RecordWarm(warmUpdate{key: fk("aa", 3), readability: readWarmed, cache: cacheCached, deliveredAt: e.now.Add(-time.Hour)})
+	e.c.runPass()
+	if got := e.tg.feeds(); len(got) != 1 || got[0] != "aa/2" {
+		t.Fatalf("fed %v, want aa/2 (file 1 stays given up, file 3 is cached in the record only)", got)
+	}
+}
+
+func TestCacheSideFailuresDoNotGiveUpAPack(t *testing.T) {
+	e := newCatchupEnv(t)
+	e.items = []library.Item{stub("aa", 1, 100), stub("aa", 2, 100)}
+	for i := 0; i < 2*catchupMaxFailed; i++ {
+		e.x.RecordWarm(warmUpdate{key: fk("aa", 1), cache: cacheWriteFailed, attemptAt: e.now.Add(-90 * time.Hour)})
+		e.x.RecordWarm(warmUpdate{key: fk("aa", 1), cache: cacheLost, attemptAt: e.now.Add(-90 * time.Hour)})
+	}
+	e.c.runPass()
+	if got := e.tg.feeds(); len(got) != 1 || got[0] != "aa/1,2" {
+		t.Fatalf("fed %v, want the whole pack: lost and write_failed are no swarm give-up", got)
+	}
+}
+
+func TestPackGaveUpTable(t *testing.T) {
+	failed := fileWarm{readability: readFailed, failedAttempts: catchupMaxFailed, lastAttemptAt: 1000}
+	cases := []struct {
+		name string
+		ws   []fileWarm
+		want bool
+	}{
+		{"nothing recorded", []fileWarm{{}, {}}, false},
+		{"three failures", []fileWarm{{readability: readFailed, failedAttempts: 3, lastAttemptAt: 1000}, {}}, false},
+		{"four failures", []fileWarm{failed, {}}, true},
+		{"cache-side outcomes only", []fileWarm{{cache: cacheLost, failedAttempts: 9, lastAttemptAt: 1000}, {}}, false},
+		{"delivery after the give-up", []fileWarm{failed, {readability: readWarmed, lastDeliveryAt: 1001}}, false},
+		{"delivery before the give-up", []fileWarm{failed, {readability: readWarmed, lastDeliveryAt: 999}}, true},
+	}
+	for _, c := range cases {
+		if got := packGaveUp(c.ws); got != c.want {
+			t.Errorf("%s: %v, want %v", c.name, got, c.want)
+		}
+	}
+}

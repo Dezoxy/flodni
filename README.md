@@ -899,11 +899,17 @@ closed torrent and reports the engine's state for it before the pass).
     or it carries an eviction mark or time, including a file evicted before
     schema 14: eviction is left to its next play. A file that failed 4 times
     is given up on; only a read through the mount that the swarm serves, or an
-    add again, makes it eligible. A file attempted under 20 hours ago waits,
-    and so does its whole title when any file of it failed under 20 hours ago
-    (a no-peers failure skips the rest of a pack without a record). A title the
-    engine refused to wake (`not_stored`, for example a stub the engine never
-    stored) waits for a play. Everything else is a candidate: no record,
+    add again, makes it eligible. Once one file of a title has given up through
+    failed swarm reads (`lost` and `write_failed` do not count, nor `not_stored`),
+    the title's other files are given up too, so a dead pack costs one wake a
+    day for four days, not for four days per file; any swarm delivery for a
+    file of the title after that give-up makes them eligible again. Warm on add
+    of a new file is not affected: an add still tries once. A file attempted
+    under 20 hours ago waits, and so does its whole title when any file of
+    it failed under 20 hours ago (a no-peers failure skips the rest of a pack
+    without a record). A title the engine refused to wake (`not_stored`, for
+    example a stub the engine never stored) waits for a play. Everything
+    else is a candidate: no record,
     `dropped_quota`, `dropped_no_evidence`, `lost`, `write_failed`, and a
     record that says `cached` while the disk does not.
   - **Never evicts.** It checks for room before it wakes anything. At a full
@@ -927,8 +933,9 @@ closed torrent and reports the engine's state for it before the pass).
   `flodni_warm_cache_failures_total{reason}`, `flodni_warm_queue_files`,
   `flodni_warm_paused` and `flodni_warm_catchup_files{state}`, the backlog as
   of the last pass: `pending` (also what a pass left because it was stopped, the
-  pace was set to 0 or its disk failed), `retry_wait`, `gave_up`, `evicted`,
-  `not_stored`, `out_of_scope` (scope `retries` only) and `left_no_room`.
+  pace was set to 0 or its disk failed), `retry_wait`, `gave_up` (a file's own
+  4 failed attempts, or a pack-level give-up), `evicted`, `not_stored`,
+  `out_of_scope` (scope `retries` only) and `left_no_room`.
   Already warm files and files a pass found no longer candidates are not
   counted. `flodni_warm_catchup_scope{scope}` says which scope the last pass
   ran.

@@ -61,6 +61,7 @@ type catchupFile struct {
 	warm               fileWarm // the per-file record, zero when none
 	evicted            bool     // the eviction mark or the time of an eviction is set
 	hashFailedRecently bool     // some file of the same hash failed under 20 h ago
+	packGaveUp         bool     // another file of the hash gave up on swarm reads and no delivery since
 	notStored          bool     // WakeStored refused the hash in this process
 	retriesOnly        bool     // warm_catchup_scope is "retries"
 }
@@ -85,6 +86,32 @@ func failedRecently(w fileWarm, now time.Time) bool {
 		now.Sub(time.Unix(w.lastAttemptAt, 0)) < catchupRetryWait
 }
 
+// packGaveUp reports a torrent whose swarm is dead for catch-up: some file gave up
+// through failed swarm reads (readFailed, 4 attempts; the cache-side outcomes lost and
+// write_failed never set readFailed) and no file of the hash has had a swarm delivery
+// since that file's last attempt. A delivery on any file, the given-up one included,
+// lifts it. The siblings are then given up too, so a dead pack is not probed file by
+// file for days. Warm on add of a new file does not read this: an add still tries once.
+func packGaveUp(ws []fileWarm) bool {
+	var gaveUpAt int64
+	gave := false
+	for _, w := range ws {
+		if w.readability == readFailed && w.failedAttempts >= catchupMaxFailed {
+			gave = true
+			gaveUpAt = max(gaveUpAt, w.lastAttemptAt)
+		}
+	}
+	if !gave {
+		return false
+	}
+	for _, w := range ws {
+		if w.lastDeliveryAt > gaveUpAt {
+			return false
+		}
+	}
+	return true
+}
+
 // catchupState is the predicate, in the order of the list under "Catch-up" in the README.
 // It is pure: the pass reads the facts and acts on the answer.
 func catchupState(f catchupFile, now time.Time) string {
@@ -97,6 +124,8 @@ func catchupState(f catchupFile, now time.Time) string {
 		return stateOutOfScope // before the waits: the cold backlog is not waiting, it is not ours
 	case f.warm.readability == readFailed && f.warm.failedAttempts >= catchupMaxFailed:
 		return stateGaveUp
+	case f.packGaveUp:
+		return stateGaveUp // a sibling gave up on the swarm: the pack is dead until a delivery
 	case f.warm.lastAttemptAt > 0 && now.Sub(time.Unix(f.warm.lastAttemptAt, 0)) < catchupRetryWait:
 		return stateRetryWait
 	case f.hashFailedRecently:
@@ -171,7 +200,7 @@ func collectCatchupProm(w *promtext.Writer, g *catchupGauge) {
 		promSample(b2i(sc == scopeAll), lbl("scope", scopeAll)),
 		promSample(b2i(sc == scopeRetries), lbl("scope", scopeRetries)))
 	w.Gauge("flodni_warm_catchup_files",
-		"Library files catch-up has not warmed, as of the last pass, by state: pending (candidates, also those a pass left because it was stopped, the pace was set to 0 or its disk failed), retry_wait (attempted under 20 hours ago, or a file of the same torrent failed), gave_up (4 failed attempts), evicted (quota eviction removed it: left to play), not_stored (the engine refused to wake the torrent), out_of_scope (scope retries only: files warm on add never attempted, left to a play or to scope all) and left_no_room (candidates the last pass left because the cache was full). Already warm files are not counted.",
+		"Library files catch-up has not warmed, as of the last pass, by state: pending (candidates, also those a pass left because it was stopped, the pace was set to 0 or its disk failed), retry_wait (attempted under 20 hours ago, or a file of the same torrent failed), gave_up (4 failed attempts, or a file of the same torrent gave up on the swarm and nothing was delivered since), evicted (quota eviction removed it: left to play), not_stored (the engine refused to wake the torrent), out_of_scope (scope retries only: files warm on add never attempted, left to a play or to scope all) and left_no_room (candidates the last pass left because the cache was full). Already warm files are not counted.",
 		s...)
 }
 
@@ -364,11 +393,14 @@ func (c *catchup) classify(g *group) ([]warmer.File, map[string]int64) {
 	}
 	facts := make(map[int]fact, len(idx))
 	hashFailed := false
+	warms := make([]fileWarm, 0, len(idx))
 	for _, i := range idx {
 		w, ev := c.facts(warmup.FileKey{Hash: g.hash, FileIdx: i})
 		facts[i] = fact{w, ev}
+		warms = append(warms, w)
 		hashFailed = hashFailed || failedRecently(w, now)
 	}
+	packDead := packGaveUp(warms)
 	notStored := c.target.NotStored(g.hash)
 	counts := map[string]int64{}
 	var pending []warmer.File
@@ -376,7 +408,7 @@ func (c *catchup) classify(g *group) ([]warmer.File, map[string]int64) {
 		key := warmup.FileKey{Hash: g.hash, FileIdx: i}
 		f := facts[i]
 		st := catchupState(catchupFile{complete: c.complete(key), warm: f.w, evicted: f.evicted,
-			hashFailedRecently: hashFailed, notStored: notStored, retriesOnly: c.passScope == scopeRetries}, now)
+			hashFailedRecently: hashFailed, packGaveUp: packDead, notStored: notStored, retriesOnly: c.passScope == scopeRetries}, now)
 		switch st {
 		case stateWarm:
 			if f.w.cache != cacheCached {
