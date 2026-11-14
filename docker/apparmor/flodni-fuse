@@ -1,0 +1,64 @@
+# AppArmor profile for the Flodni container: Docker's default profile
+# (docker-default) with its blanket "deny mount" replaced by one narrow rule
+# that lets the FUSE mount happen on the Flodni mount path and nothing else.
+#
+# DESIGNED, NOT VERIFIED ON A HOST. Not loaded or exercised yet; see
+# docs/deploy/least-privilege.md before using it. Opt-in: the default
+# deployment (SYS_ADMIN and apparmor:unconfined) does not use this file.
+#
+# The default mount path is /mnt/flodni-virtual. If FLODNI_MOUNT_PATH points
+# elsewhere, change the two paths below to match.
+#
+# Load:    sudo apparmor_parser -r -W docker/apparmor/flodni-fuse
+# Syntax:  apparmor_parser -QT docker/apparmor/flodni-fuse
+# Use:     docker run --security-opt apparmor=flodni-fuse ...
+# Unload:  sudo apparmor_parser -R docker/apparmor/flodni-fuse
+
+#include <tunables/global>
+
+profile flodni-fuse flags=(attach_disconnected,mediate_deleted) {
+  #include <abstractions/base>
+
+  # Same as docker-default: the capability bounding set Docker applies
+  # (cap_drop/cap_add) is the real gate, not this profile.
+  network,
+  capability,
+  file,
+
+  # The one mount Flodni needs: fusermount3 mounting the FUSE view. The fstype
+  # is "fuse" (go-fuse sets no subtype), "fuse.*" covers a subtype later.
+  mount fstype=fuse options in (rw, nosuid, nodev) -> /mnt/flodni-virtual/,
+  mount fstype=fuse.* options in (rw, nosuid, nodev) -> /mnt/flodni-virtual/,
+  # Never a block-device FUSE or the FUSE control filesystem.
+  deny mount fstype=fuseblk,
+  deny mount fstype=fusectl,
+
+  # fusermount3 -u / -uz on the same path (entrypoint and shutdown).
+  # docker-default allows every umount; this allows one.
+  umount /mnt/flodni-virtual/,
+
+  # Signals: docker stop and docker kill come from the daemon, which runs
+  # unconfined on a normal host. Same intent as docker-default.
+  signal (receive) peer=unconfined,
+  signal (send,receive) peer=flodni-fuse,
+  ptrace (trace,read,tracedby,readby) peer=flodni-fuse,
+
+  # The rest is docker-default's hardening, unchanged except for "deny mount".
+  deny @{PROC}/* w,
+  deny @{PROC}/{[^1-9],[^1-9][^0-9],[^1-9s][^0-9y][^0-9s],[^1-9][^0-9][^0-9][^0-9]*}/** w,
+  deny @{PROC}/sys/[^k]** w,
+  deny @{PROC}/sys/kernel/{?,??,[^s][^h][^m]**} w,
+  deny @{PROC}/sysrq-trigger rwklx,
+  deny @{PROC}/mem rwklx,
+  deny @{PROC}/kmem rwklx,
+  deny @{PROC}/kcore rwklx,
+
+  deny /sys/[^f]*/** wklx,
+  deny /sys/f[^s]*/** wklx,
+  deny /sys/fs/[^c]*/** wklx,
+  deny /sys/fs/c[^g]*/** wklx,
+  deny /sys/fs/cg[^r]*/** wklx,
+  deny /sys/firmware/** rwklx,
+  deny /sys/devices/virtual/powercap/** rwklx,
+  deny /sys/kernel/security/** rwklx,
+}

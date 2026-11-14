@@ -27,6 +27,7 @@ and no support.
 | [docs/ideas.md](docs/ideas.md) | What could be improved, not yet planned. |
 | [docs/architecture/README.md](docs/architecture/README.md) | The C4 model, its views and the decisions. |
 | [README.upstream.md](README.upstream.md) | Tiramisu's user guide as inherited: install, configuration, API. |
+| [docs/deploy/least-privilege.md](docs/deploy/least-privilege.md) | A narrower container profile than `SYS_ADMIN` with AppArmor unconfined. Designed, not verified on a host. |
 | [SECURITY.md](SECURITY.md) | How to report a vulnerability. |
 
 ## Building
