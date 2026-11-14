@@ -737,6 +737,35 @@ What Flodni does in each case:
 - **Full.** Failed creates and writes are logged, nothing false is recorded,
   and a fill reports that the file was evicted.
 
+## Filing and naming
+
+`POST /api/library/add` names what it writes from the request, not from the
+release. These rules apply to new adds only: a stub already on disk is never
+renamed and its registry row is never re-keyed, and stubs are found by the
+`link=` hash in their content, not by name.
+
+- **Specials.** A pack file named `S00E01` is filed as season 0, under
+  `Season.00` (the folder Plex reads as Specials), never as the requested
+  season's episode 1. A single-episode add does not take a special's file for
+  the requested episode either.
+- **Samples.** A video file is skipped when "sample" is a word in its name or
+  in the folder directly above it (not the release's root folder) and it is
+  under 50 MiB, even when no larger file names the same episode. Each skip is
+  logged (`ignored sample`). An explicit `file_index` still files the file it
+  names. A single-episode add whose torrent does not name the episode takes
+  the largest file that names no episode at all, never one named for another
+  episode or a special.
+- **Movie year.** The year in a movie's stub name is the request's
+  `release_date` year. A number in the title (`Blade Runner 2049`,
+  `Dune (2021)`) is part of the title and is not read as a second year. A title
+  with no ASCII letter or digit is named with the first eight hash characters
+  instead of an empty base with a leading underscore.
+- **Episode key.** The registry key folds Latin letters with diacritics to
+  their base letters (`Élite` gives `elite_s01e01`; before, the accented letter
+  vanished and `Lite` shared the key). A show whose rows were registered under
+  the old form keeps them: an add finds the row by the old key when the new one
+  has none, and replaces it in place.
+
 ## Removing a title
 
 `POST /api/library/remove` takes a `path` or a `hash`. A hash removes every

@@ -7,6 +7,7 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"path"
 	"path/filepath"
 	"regexp"
 	"sort"
@@ -314,7 +315,16 @@ func (m *Manager) Add(ctx context.Context, req AddRequest) (*AddResponse, error)
 		show := "show:" + EpisodeKey(req.Title, 0, 0)
 		if req.Episode > 0 {
 			defer m.showLocks.RLock(show)()
-			defer m.hashLocks.Lock("ep:" + EpisodeKey(req.Title, req.Season, req.Episode))()
+			// The legacy row may be written too (see episodeKey), so its lock is taken
+			// as well, always in key order.
+			keys := []string{EpisodeKey(req.Title, req.Season, req.Episode)}
+			if legacy := legacyEpisodeKey(req.Title, req.Season, req.Episode); legacy != keys[0] {
+				keys = append(keys, legacy)
+				sort.Strings(keys)
+			}
+			for _, k := range keys {
+				defer m.hashLocks.Lock("ep:" + k)()
+			}
 		} else {
 			defer m.showLocks.Lock(show)()
 		}
@@ -538,12 +548,18 @@ func (m *Manager) pickFile(index int, files []FileStat) (*FileStat, error) {
 	}
 
 	var best *FileStat
+	skipped := 0
 	for i := range files {
-		if IsVideoFile(files[i].Path) && (best == nil || files[i].Length > best.Length) {
+		if m.usable(files[i]) && (best == nil || files[i].Length > best.Length) {
 			best = &files[i]
+		} else if IsVideoFile(files[i].Path) && isSample(files[i]) {
+			skipped++
 		}
 	}
 	if best == nil {
+		if skipped > 0 {
+			return nil, errf(http.StatusUnprocessableEntity, "the torrent holds only a sample")
+		}
 		return nil, errf(http.StatusUnprocessableEntity, "the torrent holds no video file")
 	}
 	return best, nil
@@ -554,6 +570,7 @@ func (m *Manager) addEpisodes(ctx context.Context, req AddRequest, hash, magnet 
 		file    FileStat
 		season  int
 		episode int
+		key     string
 	}
 	var wanted []episodeFile
 
@@ -562,20 +579,19 @@ func (m *Manager) addEpisodes(ctx context.Context, req AddRequest, hash, magnet 
 		if err != nil {
 			return nil, err
 		}
-		wanted = append(wanted, episodeFile{*file, req.Season, req.Episode})
+		wanted = append(wanted, episodeFile{file: *file, season: req.Season, episode: req.Episode})
 	} else {
 		for _, f := range info.FileStats {
-			if !IsVideoFile(f.Path) {
+			if !m.usable(f) {
 				continue
 			}
+			// Season 0 with an episode is an explicit S00Exx special: it keeps season 0
+			// and is filed under Season.00, never under the requested season.
 			season, episode := PackEpisode(f.Path, req.Season)
 			if episode == 0 {
 				continue
 			}
-			if season == 0 {
-				season = req.Season
-			}
-			wanted = append(wanted, episodeFile{f, season, episode})
+			wanted = append(wanted, episodeFile{file: f, season: season, episode: episode})
 		}
 		if len(wanted) == 0 {
 			return nil, errf(http.StatusUnprocessableEntity, "no episode file could be named in this torrent")
@@ -603,6 +619,17 @@ func (m *Manager) addEpisodes(ctx context.Context, req AddRequest, hash, magnet 
 		return wanted[i].episode < wanted[j].episode
 	})
 
+	// The registry key of each episode, read once: it is the folded key unless the
+	// show was registered under the older form (see episodeKey).
+	for i := range wanted {
+		key, err := m.episodeKey(req.Title, wanted[i].season, wanted[i].episode)
+		if err != nil {
+			return nil, errf(http.StatusServiceUnavailable, "cannot read the registry entry for %s: %v",
+				EpisodeKey(req.Title, wanted[i].season, wanted[i].episode), err)
+		}
+		wanted[i].key = key
+	}
+
 	showDir := filepath.Join(m.cfg.TVDir, ShowFolderName(req.Title, req.FirstAirDate))
 
 	// The new release wins, but only once it has shown it can deliver bytes: a dead
@@ -612,10 +639,9 @@ func (m *Manager) addEpisodes(ctx context.Context, req AddRequest, hash, magnet 
 	for _, w := range wanted {
 		path := filepath.Join(showDir, fmt.Sprintf("Season.%02d", w.season),
 			EpisodeFilename(req.Title, w.season, w.episode, hash[:8]))
-		prev, ok, err := m.cfg.Registry.GetEpisode(EpisodeKey(req.Title, w.season, w.episode))
+		prev, ok, err := m.cfg.Registry.GetEpisode(w.key)
 		if err != nil {
-			return nil, errf(http.StatusServiceUnavailable, "cannot read the registry entry for %s: %v",
-				EpisodeKey(req.Title, w.season, w.episode), err)
+			return nil, errf(http.StatusServiceUnavailable, "cannot read the registry entry for %s: %v", w.key, err)
 		}
 		if !ok || prev == nil || prev.FilePath == "" || prev.FilePath == path {
 			continue
@@ -642,6 +668,7 @@ func (m *Manager) addEpisodes(ctx context.Context, req AddRequest, hash, magnet 
 		hadEntry bool
 		hadStub  bool
 		path     string
+		key      string
 	}
 	var prior []previous
 
@@ -652,7 +679,7 @@ func (m *Manager) addEpisodes(ctx context.Context, req AddRequest, hash, magnet 
 					m.cfg.Logger.Printf("[LibraryAPI] WARNING: cannot undo %s: %v", f.Path, err)
 				}
 			}
-			key := EpisodeKey(req.Title, f.Season, f.Episode)
+			key := prior[i].key
 			var err error
 			if prior[i].hadEntry {
 				err = m.cfg.Registry.UpsertEpisode(key, prior[i].entry)
@@ -668,12 +695,12 @@ func (m *Manager) addEpisodes(ctx context.Context, req AddRequest, hash, magnet 
 	for _, w := range wanted {
 		seasonDir := filepath.Join(showDir, fmt.Sprintf("Season.%02d", w.season))
 		path := filepath.Join(seasonDir, EpisodeFilename(req.Title, w.season, w.episode, hash[:8]))
-		key := EpisodeKey(req.Title, w.season, w.episode)
+		key := w.key
 
 		// Read the previous state before touching anything: a registry we cannot read
 		// is a registry we cannot restore, so the add stops here rather than
 		// overwriting a row blind.
-		p := previous{path: path}
+		p := previous{path: path, key: key}
 		prev, ok, err := m.cfg.Registry.GetEpisode(key)
 		if err != nil {
 			rollback()
@@ -715,8 +742,17 @@ func (m *Manager) addEpisodes(ctx context.Context, req AddRequest, hash, magnet 
 		// The episode is back on disk: an open gap for it is stale, and a client that
 		// read the gap list and added it here would otherwise keep seeing its own hole.
 		if gc, ok := m.cfg.Registry.(interface{ ClearEpisodeGap(string) error }); ok {
-			if err := gc.ClearEpisodeGap(key); err != nil {
-				m.cfg.Logger.Printf("[LibraryAPI] WARNING: cannot clear the gap for %s: %v", key, err)
+			// A gap stored under the other key form is this episode's too.
+			keys := []string{key}
+			if folded := EpisodeKey(req.Title, w.season, w.episode); folded != key {
+				keys = append(keys, folded)
+			} else if legacy := legacyEpisodeKey(req.Title, w.season, w.episode); legacy != key {
+				keys = append(keys, legacy)
+			}
+			for _, k := range keys {
+				if err := gc.ClearEpisodeGap(k); err != nil {
+					m.cfg.Logger.Printf("[LibraryAPI] WARNING: cannot clear the gap for %s: %v", k, err)
+				}
 			}
 		}
 	}
@@ -787,7 +823,8 @@ func (m *Manager) dropTorrentIfUnused(ctx context.Context, hash string) bool {
 }
 
 // pickFileForEpisode prefers the file whose name carries the requested episode number;
-// a single-episode torrent that does not name it falls back to the largest video file.
+// a single-episode torrent that does not name it falls back to the largest video file
+// that names no episode.
 // Of several files that name it, the largest wins: a release's Sample/ clip names the
 // episode too, and when the torrent listed it first it was filed as the episode
 // (Dezoxy fork). Season packs already keep the largest file per episode.
@@ -797,18 +834,31 @@ func (m *Manager) pickFileForEpisode(req AddRequest, files []FileStat) (*FileSta
 	}
 	var best *FileStat
 	for i := range files {
-		if !IsVideoFile(files[i].Path) {
+		if !m.usable(files[i]) {
 			continue
 		}
 		if season, episode := ParseSeasonEpisode(filepath.Base(files[i].Path)); episode == req.Episode &&
-			(season == req.Season || season == 0) && (best == nil || files[i].Length > best.Length) {
+			season == req.Season && (best == nil || files[i].Length > best.Length) {
 			best = &files[i]
 		}
 	}
 	if best != nil {
 		return best, nil
 	}
-	return m.pickFile(0, files)
+	// Nothing names the episode: the largest video file that names no episode at all.
+	// One that names another episode (or a special) is that episode's, never this one.
+	var unnamed []FileStat
+	for _, f := range files {
+		if _, episode := ParseSeasonEpisode(filepath.Base(f.Path)); episode == 0 {
+			unnamed = append(unnamed, f)
+		}
+	}
+	file, err := m.pickFile(0, unnamed)
+	if err != nil {
+		return nil, errf(http.StatusUnprocessableEntity, "no file in the torrent names S%02dE%02d or names no episode: %v",
+			req.Season, req.Episode, err)
+	}
+	return file, nil
 }
 
 func (m *Manager) section(kind string) int {
@@ -1153,4 +1203,70 @@ func readStub(path string) stub {
 		out.FileIndex, _ = strconv.Atoi(m[1])
 	}
 	return out
+}
+
+// minVideoSize is the size below which a file named as a sample is dropped: a fixed
+// 50 MiB, since release samples run to a few tens of MiB. It is separate from the VFS's
+// own size floor for video stubs (internal/vfs/metadata_test.go), which guards opening.
+const minVideoSize int64 = 50 << 20
+
+var reSampleFolder = regexp.MustCompile(`(?i)^samples?$`)
+
+var reSampleName = regexp.MustCompile(`(?i)(?:^|[^a-z0-9])samples?(?:$|[^a-z0-9])`)
+
+// isSample reports a file that is a sample by name (its own name or its immediate parent
+// folder; not the root folder, which usually carries the title) and below minVideoSize.
+// Samples were only dropped when a larger file named the same episode; a lone one was
+// filed as the episode.
+func isSample(f FileStat) bool {
+	if f.Length >= minVideoSize {
+		return false
+	}
+	p := filepath.ToSlash(f.Path)
+	if reSampleName.MatchString(path.Base(p)) {
+		return true
+	}
+	dir := path.Dir(p)
+	parent := path.Base(dir)
+	// A folder named just "Sample" is one anywhere. Any other parent counts only below
+	// the root folder, which is the release's own name.
+	if reSampleFolder.MatchString(parent) {
+		return true
+	}
+	return strings.Contains(dir, "/") && reSampleName.MatchString(parent)
+}
+
+// usable reports whether f is a video file the add may file, logging a sample it skips.
+func (m *Manager) usable(f FileStat) bool {
+	if !IsVideoFile(f.Path) {
+		return false
+	}
+	if isSample(f) {
+		m.cfg.Logger.Printf("[LibraryAPI] ignored sample %s (%d bytes)", f.Path, f.Length)
+		return false
+	}
+	return true
+}
+
+// episodeKey returns the registry key to use for an episode of title. It is the folded
+// key, except when the show was registered under the older form: its row is then
+// replaced in place, not duplicated or re-keyed. The old key drops accented letters, so
+// it is also another show's proper key (Elite's "lite" is Lite's). The legacy row is
+// reused only when its stub sits in a show folder that folds to this title's key; any
+// other row is someone else's and the folded key is used, which at worst leaves a
+// duplicate, never a deleted stub.
+func (m *Manager) episodeKey(title string, season, episode int) (string, error) {
+	key := EpisodeKey(title, season, episode)
+	legacy := legacyEpisodeKey(title, season, episode)
+	if legacy == key {
+		return key, nil
+	}
+	prev, ok, err := m.cfg.Registry.GetEpisode(legacy)
+	if err != nil {
+		return key, err
+	}
+	if ok && prev != nil && EpisodeKey(ShowNameFromEpisodePath(prev.FilePath), season, episode) == key {
+		return legacy, nil
+	}
+	return key, nil
 }

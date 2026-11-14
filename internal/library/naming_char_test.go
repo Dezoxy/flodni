@@ -33,21 +33,24 @@ func TestMovieFilenameFromTitleYearAndHash(t *testing.T) {
 		{"non-ASCII letters become underscores",
 			MovieName{Title: "Amélie", ReleaseDate: "2001", Hash: charHash},
 			"Am_lie_2001_1080p_55555555.mkv"},
-		{"only non-ASCII letters leave an empty base and a leading underscore",
+		{"only non-ASCII letters leave an empty base: the hash prefix names it, with no leading underscore",
 			MovieName{Title: "千と千尋の神隠し", ReleaseDate: "2001", Hash: charHash},
-			"_2001_1080p_55555555.mkv"},
+			"11111111_2001_1080p_55555555.mkv"},
 		{"no year anywhere",
 			MovieName{Title: "Untitled", Hash: charHash},
 			"Untitled_1080p_55555555.mkv"},
 		{"date shorter than four chars gives no year",
 			MovieName{Title: "Untitled", ReleaseDate: "202", Hash: charHash},
 			"Untitled_1080p_55555555.mkv"},
-		{"year taken from a parenthesised year in the title",
+		{"a parenthesised year in the title stays part of the title and is not read twice",
 			MovieName{Title: "Dune (2021)", Hash: charHash},
-			"Dune_2021_2021_1080p_55555555.mkv"},
-		{"a year-like number in the title counts as the year",
+			"Dune_2021_1080p_55555555.mkv"},
+		{"a year-like number in the title is part of the title, not the release year",
 			MovieName{Title: "Blade Runner 2049", Hash: charHash},
-			"Blade_Runner_2049_2049_1080p_55555555.mkv"},
+			"Blade_Runner_2049_1080p_55555555.mkv"},
+		{"an explicit release date still adds its year after such a title",
+			MovieName{Title: "Blade Runner 2049", ReleaseDate: "2017-10-04", Hash: charHash},
+			"Blade_Runner_2049_2017_1080p_55555555.mkv"},
 		{"release date wins over a year in the title",
 			MovieName{Title: "Dune (2021)", ReleaseDate: "1984-12-14", Hash: charHash},
 			"Dune_2021_1984_1080p_55555555.mkv"},
@@ -163,8 +166,8 @@ func TestEpisodeNaming(t *testing.T) {
 			"Show_NamePart", "Show_NamePart_S01E01_11111111.mkv", "shownamepart_s01e01"},
 		{"ampersand is removed", "Tom & Jerry", "", 1, 1,
 			"Tom_Jerry", "Tom_Jerry_S01E01_11111111.mkv", "tomjerry_s01e01"},
-		{"non-ASCII letters survive in the path but not in the key", "Élite", "2018-10-05", 1, 1,
-			"Élite (2018)", "Élite_S01E01_11111111.mkv", "lite_s01e01"},
+		{"non-ASCII letters survive in the path and fold to their base letter in the key", "Élite", "2018-10-05", 1, 1,
+			"Élite (2018)", "Élite_S01E01_11111111.mkv", "elite_s01e01"},
 		{"specials: season 0 and episode 0 format as two digits", "Doctor Who", "", 0, 0,
 			"Doctor_Who", "Doctor_Who_S00E00_11111111.mkv", "doctorwho_s00e00"},
 		{"three-digit episodes keep all digits", "One Piece", "1999-10-20", 21, 1015,
@@ -230,5 +233,29 @@ func TestMagnetHelpers(t *testing.T) {
 	}
 	if got := HashFromMagnet("magnet:?dn=nothing"); got != "" {
 		t.Fatalf("hash from a magnet without one = %q", got)
+	}
+}
+
+// The key folds Latin diacritics to their base letters so an accented title
+// neither loses a letter nor shares a key with a different title. The old form
+// stays available as legacyEpisodeKey: rows already registered carry it.
+func TestEpisodeKeyFoldsLatinLettersAndKeepsTheLegacyForm(t *testing.T) {
+	for _, c := range []struct {
+		show, key, legacy string
+	}{
+		{"Élite", "elite_s01e01", "lite_s01e01"},
+		{"Lite", "lite_s01e01", "lite_s01e01"},
+		{"Ångström", "angstrom_s01e01", "ngstrm_s01e01"},
+		{"Łódź Straße", "lodzstrasse_s01e01", "dstrae_s01e01"},
+		{"Œuvre Æon", "oeuvreaeon_s01e01", "uvreon_s01e01"},
+		{"Plain Show", "plainshow_s01e01", "plainshow_s01e01"},
+		{"千と千尋", "_s01e01", "_s01e01"},
+	} {
+		if got := EpisodeKey(c.show, 1, 1); got != c.key {
+			t.Errorf("%q: key = %q, want %q", c.show, got, c.key)
+		}
+		if got := legacyEpisodeKey(c.show, 1, 1); got != c.legacy {
+			t.Errorf("%q: legacy key = %q, want %q", c.show, got, c.legacy)
+		}
 	}
 }

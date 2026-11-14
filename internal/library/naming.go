@@ -23,8 +23,7 @@ var (
 	re51    = regexp.MustCompile(`(?i)5\.1|dts|ddp5|ddp|dd\+|eac3|ac3`)
 	// No separator required before the word: "BDRemux" and "UHDRemux" are common
 	// spellings, and requiring one dropped the tag from names that announce it.
-	reRemux     = regexp.MustCompile(`(?i)remux(?:$|[^A-Za-z0-9])`)
-	reTitleYear = regexp.MustCompile(`(.+?)[._\s]\(?((?:19|20)\d{2})\)?`)
+	reRemux = regexp.MustCompile(`(?i)remux(?:$|[^A-Za-z0-9])`)
 
 	reMovieUnsafe = regexp.MustCompile(`[^a-zA-Z0-9._-]`)
 	reUnderscores = regexp.MustCompile(`_+`)
@@ -54,14 +53,22 @@ func SanitizeMovieName(s string) string {
 // BuildMovieFilename returns the stub name for a movie. The trailing 8 chars are the
 // tail of the info hash: that suffix is how an already-present title is recognised.
 func BuildMovieFilename(n MovieName) string {
+	// The year is the release date's, when the request carries one. A number in the
+	// title ("Blade Runner 2049", "Dune (2021)") belongs to the title as given and is
+	// not read a second time as the release year.
 	year := ""
 	if len(n.ReleaseDate) >= 4 {
 		year = n.ReleaseDate[:4]
-	} else if m := reTitleYear.FindStringSubmatch(n.Title); len(m) > 2 {
-		year = m[2]
 	}
 
 	base := SanitizeMovieName(n.Title)
+	if base == "" {
+		// No ASCII letter or digit survives (a title in another script): the hash
+		// prefix keeps the name non-empty, without a leading underscore, and stable.
+		if base = HashPrefix(n.Hash); base == "" {
+			base = "untitled"
+		}
+	}
 	if year != "" {
 		base = fmt.Sprintf("%s_%s", base, year)
 	}
@@ -135,7 +142,51 @@ func EpisodeFilename(show string, season, episode int, hash8 string) string {
 
 // EpisodeKey is the TV registry key. The sync deletes every stub under the TV dir whose
 // path is not registered, so an API-created episode must use this exact form.
+//
+// Latin letters with diacritics fold to their base letters (Élite gives "elite"), so an
+// accented letter neither vanishes nor lets two titles share a key. Keys registered
+// before this folded are still read through legacyEpisodeKey.
 func EpisodeKey(show string, season, episode int) string {
+	return fmt.Sprintf("%s_s%02de%02d", reNonWord.ReplaceAllString(foldLatin(strings.ToLower(show)), ""), season, episode)
+}
+
+// latinFold is a persisted key format: it decides the registry key of every accented
+// show, so editing an entry silently re-keys shows already filed (the legacy alias
+// covers only the form from before folding existed).
+// latinFold maps lower-case Latin-1 and Latin Extended-A letters to ASCII. A table, not
+// golang.org/x/text: the module is only an indirect dependency, and NFD would still
+// leave ø, ł, đ, ß and the ligatures.
+var latinFold = func() map[rune]string {
+	m := map[rune]string{}
+	for folded, letters := range map[string]string{
+		"a": "àáâãäåāăą", "ae": "æ", "c": "çćĉċč", "d": "ďđð", "e": "èéêëēĕėęě",
+		"g": "ĝğġģ", "h": "ĥħ", "i": "ìíîïĩīĭįı", "ij": "ĳ", "j": "ĵ", "k": "ķĸ",
+		"l": "ĺļľŀł", "n": "ñńņňŉ", "ng": "ŋ", "o": "òóôõöøōŏő", "oe": "œ",
+		"r": "ŕŗř", "s": "śŝşš", "ss": "ß", "t": "ţťŧ", "th": "þ",
+		"u": "ùúûüũūŭůűų", "w": "ŵ", "y": "ýÿŷ", "z": "źżž",
+	} {
+		for _, r := range letters {
+			m[r] = folded
+		}
+	}
+	return m
+}()
+
+func foldLatin(s string) string {
+	var b strings.Builder
+	for _, r := range s {
+		if f, ok := latinFold[r]; ok {
+			b.WriteString(f)
+		} else {
+			b.WriteRune(r)
+		}
+	}
+	return b.String()
+}
+
+// legacyEpisodeKey is the key form EpisodeKey produced before accents were folded:
+// letters outside a-z dropped. Rows registered under it are still read as an alias.
+func legacyEpisodeKey(show string, season, episode int) string {
 	return fmt.Sprintf("%s_s%02de%02d", reNonWord.ReplaceAllString(strings.ToLower(show), ""), season, episode)
 }
 

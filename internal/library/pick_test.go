@@ -1,11 +1,15 @@
 package library
 
-import "testing"
+import (
+	"io"
+	"log"
+	"testing"
+)
 
 // Dezoxy fork: a single-episode release whose Sample/ clip is listed first must file
 // the episode, not the clip; both name the episode.
 func TestPickFileForEpisodeSkipsTheSample(t *testing.T) {
-	m := &Manager{}
+	m := New(Config{Logger: log.New(io.Discard, "", 0)})
 	files := []FileStat{
 		{ID: 1, Path: "South.Park.S29E01.1080p.WEB.h264-GRACE/Sample/south.park.s29e01.1080p.web.h264-grace-sample.mkv", Length: 33856278},
 		{ID: 2, Path: "South.Park.S29E01.1080p.WEB.h264-GRACE/south.park.s29e01.1080p.web.h264-grace.mkv", Length: 612345678},
