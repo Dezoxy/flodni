@@ -47,16 +47,20 @@ the same hostname but another port is not stopped. With no token both servers
 also refuse `Sec-Fetch-Site: cross-site`; browsers send it only over https or to
 `localhost`, so it is a second signal, not a gate.
 
-DNS rebinding is open by default. The attacker's name is in both `Origin` and
-`Host`, so only a Host allowlist stops it: set `allowed_hosts` (or
-`MKV_PROXY_ALLOWED_HOSTS`, a comma list) to the names clients use, and both
-servers answer 403 to any other `Host`, token or not. Empty (the default) is
-off; a list with no valid entry stays on, admitting only the always-allowed
-hosts. With no token, `POST /api/config` refuses to change it (403), as for
-`api_token`. IP literals, `localhost`, the machine's own hostname and the hostname of
-`gostorm_url` are always allowed; scripts and containers that call by name, such
-as `http://flodni:9080`, and the name in Plex's webhook URL must be listed.
-Set it on any deployment reachable by name. A
+DNS rebinding is open by default, IP-only deployments included. The
+attacker's name is in both `Origin` and `Host`, so only a Host allowlist stops
+it: set `allowed_hosts` (or `MKV_PROXY_ALLOWED_HOSTS`, a comma list) on every
+deployment to the names clients use (an IP-only one uses `["localhost"]`), and
+both servers answer 403 to any other `Host`, token or not. Empty (the default)
+is off; a list with no valid entry, or of the wrong type, stays on and admits
+only the always-allowed hosts. With no token, `POST /api/config` refuses to
+change what the next start enforces (403): the list and a new `gostorm_url`
+host. IP literals, `localhost` and the machine's own hostname are always
+allowed, and the engine port also admits the `gostorm_url` host (a change there
+needs a restart). Scripts and containers that call by name, such as
+`http://flodni:9080`, must be listed; behind a gateway that rewrites `Host`,
+list the name the gateway sends. Without a token, a cross-site navigation to a
+data route is refused; `/control`, `/api/health` and `/echo` are exempt. A
 reverse proxy in front of the control port must keep the `Host` header, or the
 panel's saves get 403. The engine sends no CORS headers; `/shutdown` and the
 Plex webhook take POST only. GoStorm's server

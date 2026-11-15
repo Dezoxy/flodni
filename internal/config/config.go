@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net"
+	"net/netip"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -75,6 +76,10 @@ type Config struct {
 	// hostsOn is true when the list was non-empty as written, so a list with no valid
 	// entry keeps the check on (only the always-allowed hosts) instead of turning it off.
 	hostsOn bool
+	// hostsForce makes the list count as non-empty as written when its text is not
+	// usable as a list: a value of the wrong type in config.json, or an environment
+	// value with no entry. The check then stays on with only the always-allowed hosts.
+	hostsForce bool
 	// fileAllowedHosts is the list as config.json holds it, before the environment
 	// override and normalisation, so a panel save never writes the environment's list.
 	fileAllowedHosts []string
@@ -376,6 +381,15 @@ func LoadConfig() Config {
 		// V138: Support comments in JSON by stripping them before unmarshaling
 		cleanData := stripJSONComments(data)
 		if err := json.Unmarshal(cleanData, &cfg); err != nil {
+			// json fills every key it can before it reports a type error, so the list is
+			// still enforced; keep its text so a save does not write null over it.
+			cfg.fileAllowedHosts = append([]string(nil), cfg.AllowedHosts...)
+			var raw map[string]json.RawMessage
+			if json.Unmarshal(cleanData, &raw) == nil {
+				if v, ok := raw["allowed_hosts"]; ok && string(v) != "null" && json.Unmarshal(v, new([]string)) != nil {
+					cfg.hostsForce = true
+				}
+			}
 			ParseFailed.Store(true)
 			flog.Printf(flog.Std, parseFailedFmt, cfg.ConfigPath, err)
 		} else {
@@ -460,6 +474,7 @@ func (c *Config) applyEnvOverrides() {
 	}
 	if v := os.Getenv("MKV_PROXY_ALLOWED_HOSTS"); v != "" {
 		c.AllowedHosts = strings.Split(v, ",")
+		c.hostsForce = true // set but with no entry (",") still means on, not off
 	}
 	if v := os.Getenv("MKV_PROXY_LOG_LEVEL"); v != "" {
 		c.LogLevel = v
@@ -479,21 +494,36 @@ func (c *Config) applyEnvOverrides() {
 	}
 }
 
-// EffectiveAllowedHosts is the list the two servers enforce: AllowedHosts (none valid
-// still means on) plus the
-// hostname of gostorm_url, which flodni's own calls to the engine send as Host, so
-// a name there cannot lock the daemon out of its engine. Nil when the allowlist is off.
+// EffectiveAllowedHosts is the list the control server enforces: AllowedHosts, or
+// only "localhost" when the list is on but has no valid entry (an empty list means
+// off). Nil when the allowlist is off.
 func (c *Config) EffectiveAllowedHosts() []string {
 	if !c.hostsOn {
 		return nil
 	}
-	out := append([]string(nil), c.AllowedHosts...)
-	if u, err := url.Parse(c.GoStormBaseURL); err == nil && u.Hostname() != "" {
-		out = append(out, u.Hostname())
-	}
-	out = normalizeAllowedHosts(out, false)
+	out := normalizeAllowedHosts(c.AllowedHosts, false)
 	if len(out) == 0 {
-		out = []string{"localhost"} // keep the check on: an empty list means off
+		out = []string{"localhost"}
+	}
+	return out
+}
+
+// EngineAllowedHosts is the list the engine's server enforces: the control list plus
+// the hostname of gostorm_url, which flodni's own calls to the engine send as Host,
+// so a name there cannot lock the daemon out of its engine. Nil when the allowlist
+// is off. The control server does not need that name and does not get it.
+func (c *Config) EngineAllowedHosts() []string {
+	out := c.EffectiveAllowedHosts()
+	if out == nil {
+		return nil
+	}
+	// An IP literal and localhost always pass, so they add nothing to the set; leaving
+	// them out keeps a change between two of them from reading as a change of the list.
+	if u, err := url.Parse(c.GoStormBaseURL); err == nil && u.Hostname() != "" {
+		h, _ := normalizeHost(u.Hostname())
+		if _, isIP := netip.ParseAddr(h); isIP != nil && h != "localhost" && h != "" {
+			out = normalizeAllowedHosts(append(out, h), false)
+		}
 	}
 	return out
 }
@@ -646,10 +676,10 @@ func (c *Config) finalize() {
 		c.PlexPathMap = valid
 	}
 
-	c.hostsOn = hasEntry(c.AllowedHosts)
+	c.hostsOn = c.hostsForce || hasEntry(c.AllowedHosts)
 	c.AllowedHosts = normalizeAllowedHosts(c.AllowedHosts, true)
 	if c.hostsOn && len(c.AllowedHosts) == 0 {
-		flog.Std.Warn("[Config] WARNING: allowed_hosts has no valid entry; the allowlist stays ON and admits only IP literals, localhost, this machine's hostname and the gostorm_url host")
+		flog.Std.Warn("[Config] WARNING: allowed_hosts has no valid entry (or is not a list); the allowlist stays ON and admits only IP literals, localhost, this machine's hostname and the gostorm_url host")
 	}
 
 	// Calculate MetadataCacheSize in bytes
@@ -664,7 +694,7 @@ func (c *Config) finalize() {
 
 func warnBadHost(warn bool, raw string) {
 	if warn {
-		flog.Std.Warn(fmt.Sprintf("[Config] WARNING: allowed_hosts entry %q is not a bare hostname (no scheme, path or wildcard); ignoring it", raw), "entry", raw)
+		flog.Std.Warn(fmt.Sprintf("[Config] WARNING: allowed_hosts entry %q is not a bare hostname (no scheme, path, wildcard or leading dot); ignoring it", raw), "entry", raw)
 	}
 }
 
@@ -677,36 +707,83 @@ func hasEntry(in []string) bool {
 	return false
 }
 
-// ResolveAllowedHosts returns the list to persist when the panel posts a config, and
-// whether the post changes it. An absent list, or one equal to what config.json holds
-// (or what is in effect now, the environment's included), keeps the file's own text.
-func (c *Config) ResolveAllowedHosts(posted []string) ([]string, bool) {
-	if posted == nil {
-		return c.fileAllowedHosts, false
+// HostsSaveChanged reports whether saving posted over this config (a fresh load of
+// config.json) would change the engine allowlist a start enforces. It compares the
+// derived list, so every input is covered: allowed_hosts, gostorm_url and the
+// environment. A post whose list is absent keeps the file's; one equal to what the
+// file holds, or to the running config's, is unchanged. Unless it changed, posted's
+// allowed_hosts is replaced by the file's own text, so a hand edit survives a save.
+func (c *Config) HostsSaveChanged(posted, running *Config) bool {
+	if posted.AllowedHosts == nil {
+		posted.AllowedHosts = c.fileAllowedHosts
 	}
-	np := normalizeAllowedHosts(posted, false)
-	if equalStrings(np, normalizeAllowedHosts(c.fileAllowedHosts, false)) || equalStrings(np, c.AllowedHosts) {
-		return c.fileAllowedHosts, false
+	p := *posted
+	if p.GoStormBaseURL == "" { // absent: the file's, as for the list
+		p.GoStormBaseURL = c.GoStormBaseURL
 	}
-	return posted, true
-}
-
-func equalStrings(a, b []string) bool {
-	if len(a) != len(b) {
+	p.applyEnvOverrides() // a start applies the environment to whatever the file holds
+	p.hostsOn = p.hostsForce || hasEntry(p.AllowedHosts)
+	p.AllowedHosts = normalizeAllowedHosts(p.AllowedHosts, false)
+	got := p.EngineAllowedHosts()
+	if sameSet(got, c.EngineAllowedHosts()) || sameSet(got, running.EngineAllowedHosts()) {
+		posted.AllowedHosts = c.fileAllowedHosts
 		return false
-	}
-	for i := range a {
-		if a[i] != b[i] {
-			return false
-		}
 	}
 	return true
 }
 
-// normalizeAllowedHosts returns the entries lowercased, without port, brackets or
-// trailing dot, de-duplicated, in order. A blank entry is skipped; one with a
-// scheme, a path, userinfo, a wildcard or a space is not a hostname and is dropped
-// with a warning (the allowlist then stays stricter, never wider).
+func sameSet(a, b []string) bool {
+	if (a == nil) != (b == nil) {
+		return false
+	}
+	m := map[string]bool{}
+	for _, e := range a {
+		m[e] = true
+	}
+	for _, e := range b {
+		if !m[e] {
+			return false
+		}
+		delete(m, e)
+	}
+	return len(m) == 0
+}
+
+// ValidateAllowedHosts returns an error naming the first non-blank entry that is
+// not a bare hostname, so a post can be refused instead of saved.
+func ValidateAllowedHosts(in []string) error {
+	for _, raw := range in {
+		if e := strings.TrimSpace(raw); e != "" {
+			if _, ok := normalizeHost(e); !ok {
+				return fmt.Errorf("allowed_hosts entry %q is not a bare hostname (no scheme, path, wildcard or leading dot)", raw)
+			}
+		}
+	}
+	return nil
+}
+
+// normalizeHost lowercases a host or host:port and strips port, brackets and one
+// trailing dot. ok is false for anything that is not a bare hostname or IP literal.
+func normalizeHost(e string) (string, bool) {
+	if strings.ContainsAny(e, "/\\@*? #%") {
+		return "", false
+	}
+	host := e
+	if h, _, err := net.SplitHostPort(e); err == nil {
+		host = h
+	}
+	host = strings.TrimSuffix(strings.TrimPrefix(host, "["), "]")
+	host = strings.TrimSuffix(strings.ToLower(host), ".")
+	if host == "" || strings.HasPrefix(host, ".") || strings.Contains(host, ":") && net.ParseIP(host) == nil {
+		return "", false
+	}
+	return host, true
+}
+
+// normalizeAllowedHosts returns the entries normalised (see normalizeHost) and
+// de-duplicated, in order. A blank entry is skipped; one that is not a bare hostname
+// is dropped with a warning (the allowlist then stays stricter, never wider). A
+// non-ASCII name is kept but warned about: browsers send the xn-- form.
 func normalizeAllowedHosts(in []string, warn bool) []string {
 	var out []string
 	seen := map[string]bool{}
@@ -715,19 +792,13 @@ func normalizeAllowedHosts(in []string, warn bool) []string {
 		if e == "" {
 			continue
 		}
-		if strings.ContainsAny(e, "/\\@*? #%") {
+		host, ok := normalizeHost(e)
+		if !ok {
 			warnBadHost(warn, raw)
 			continue
 		}
-		host := e
-		if h, _, err := net.SplitHostPort(e); err == nil {
-			host = h
-		}
-		host = strings.TrimSuffix(strings.TrimPrefix(host, "["), "]")
-		host = strings.TrimSuffix(strings.ToLower(host), ".")
-		if host == "" || strings.Contains(host, ":") && net.ParseIP(host) == nil {
-			warnBadHost(warn, raw)
-			continue
+		if warn && !isASCII(host) {
+			flog.Std.Warn(fmt.Sprintf("[Config] WARNING: allowed_hosts entry %q is not ASCII; a browser sends the xn-- form, so list that", raw), "entry", raw)
 		}
 		if !seen[host] {
 			seen[host] = true
@@ -737,7 +808,15 @@ func normalizeAllowedHosts(in []string, warn bool) []string {
 	return out
 }
 
-// parseBytes parses byte size strings like "80MB", "128KB", "1GB"
+func isASCII(s string) bool {
+	for i := 0; i < len(s); i++ {
+		if s[i] >= 0x80 {
+			return false
+		}
+	}
+	return true
+}
+
 func parseBytes(s string) (int64, error) {
 	if n, err := strconv.ParseInt(s, 10, 64); err == nil {
 		return n, nil

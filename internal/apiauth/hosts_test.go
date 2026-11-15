@@ -184,3 +184,46 @@ func TestOnlyAlwaysAllowedHostsRefusesNames(t *testing.T) {
 		}
 	}
 }
+
+// Navigations to the routes the gate treats as open (the panel page, the health
+// probe, the engine's /echo) are not refused as cross-site; data routes still are.
+func TestCrossSiteNavigationToOpenRoutes(t *testing.T) {
+	hdr := map[string]string{"Sec-Fetch-Site": "cross-site", "Sec-Fetch-Mode": "navigate"}
+	cases := []struct {
+		wrap         string
+		method, path string
+		want         int
+	}{
+		{"control", "GET", "/control", 200},
+		{"control", "GET", "/api/health", 200},
+		{"control", "POST", "/api/config", 403},
+		{"control", "GET", "/api/config", 403},
+		{"control", "POST", "/control", 403},
+		{"gostorm", "GET", "/echo", 200},
+		{"gostorm", "GET", "/stream", 403},
+		{"gostorm", "POST", "/echo", 403},
+	}
+	for _, tc := range cases {
+		called := false
+		req := httptest.NewRequest(tc.method, tc.path, nil)
+		req.Host = "x.example"
+		for k, v := range hdr {
+			req.Header.Set(k, v)
+		}
+		rec := httptest.NewRecorder()
+		wrappers[tc.wrap]("", nil, http.HandlerFunc(func(http.ResponseWriter, *http.Request) { called = true })).ServeHTTP(rec, req)
+		if rec.Code != tc.want || called != (tc.want == 200) {
+			t.Errorf("%s %s %s: status %d called=%v, want %d", tc.wrap, tc.method, tc.path, rec.Code, called, tc.want)
+		}
+	}
+}
+
+// The refusal log names the Host, quoted: the only way to see which name to list.
+func TestHostRefusalLogsTheHost(t *testing.T) {
+	for hname, wrap := range wrappers {
+		_, _, logs := do(t, wrap, "", []Option{WithAllowedHosts([]string{"x.example"})}, "evil.example:9080", nil)
+		if !strings.Contains(logs, "evil.example:9080") {
+			t.Errorf("%s: refusal does not name the Host: %q", hname, logs)
+		}
+	}
+}

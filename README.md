@@ -141,8 +141,9 @@ TLS: see `SECURITY.md`.
 
 **DNS rebinding is open by default.** The `Origin` check cannot stop it: the
 attacker's hostname resolves to your LAN address, so `Origin` and `Host` both
-carry the attacker's name and match. If the control panel or the engine port is
-reachable by a name (a DNS name, a tunnel, an mDNS name), set a Host allowlist:
+carry the attacker's name and match. An IP-only deployment is just as exposed,
+because the server accepts any name as `Host`. Set a Host allowlist everywhere;
+an IP-only deployment uses `["localhost"]`:
 
 | Key | Env | Values | Default |
 | --- | --- | --- | --- |
@@ -150,30 +151,40 @@ reachable by a name (a DNS name, a tunnel, an mDNS name), set a Host allowlist:
 
 When the list is not empty, both servers (control port and engine port) answer
 403 with `host not allowed` to a request whose `Host` hostname is not listed,
-with a token or without, and log it with method, path and address. The match
-ignores case, the port and a trailing dot. Entries are lowercased and stripped
-of a port at load; an entry with a scheme, a path or a wildcard is not a
-hostname and is dropped with a warning. A list that is not empty as
-written but has no valid entry fails closed: the check stays on and admits only
-the always-allowed hosts below, with a warning at start. Only an empty list is
-off. With no token enforced, `POST /api/config` refuses (403) a body that
-changes `allowed_hosts` from what `config.json` holds now, like `api_token`:
-edit the file or the environment and restart. The effective list is logged
-once at start, and a save from the panel needs a restart to apply. Always
-allowed in addition: IP literals (v4 and v6), `localhost`, this machine's own
-hostname and the hostname of `gostorm_url`.
-Every other name a client uses must be listed: a script or a container that
-calls `http://flodni:9080` needs `flodni` in the list, and so does the name Plex
-puts in the webhook URL. Wildcards are not supported. Reach the panel by IP and
-nothing needs listing; reach it by name and list that name. Set it on any
-deployment that is reachable by name.
+with a token or without, and log it with method, path, address and the refused
+Host. The match ignores case, the port and a trailing dot. Entries are
+lowercased and stripped of a port at load; an entry with a scheme, a path, a
+wildcard or a leading dot is not a hostname and is dropped with a warning
+(a non-ASCII name is kept with a warning: list the `xn--` form a browser
+sends). A list that is not empty as written but has no valid entry, or that has
+the wrong type in `config.json`, or an environment value with no entry, fails
+closed: the check stays on and admits only the always-allowed hosts below, with
+a warning at start. Only an empty list is off. With no token enforced,
+`POST /api/config` refuses (403) a body that would change what the next start
+enforces: `allowed_hosts`, or a `gostorm_url` host that adds a new name. Edit
+the file or the environment and restart. An invalid posted list is refused
+with 400. The effective list is logged once at start, and a save from the
+panel needs a restart to apply; so does a `gostorm_url` change while the list
+is on, because the engine's list is fixed at start.
+
+Always allowed in addition: IP literals (v4 and v6), `localhost` and this
+machine's own hostname (in Docker the container's hostname, not the service
+name, unless you set `hostname:`). The engine port also admits the hostname of
+`gostorm_url`, which Flodni's own calls use. Every other name a client uses
+must be listed: a script or a container that calls `http://flodni:9080` needs
+`flodni` in the list. Behind a gateway that rewrites `Host`, list the name the
+gateway sends, which may not be the name in the Plex webhook URL; the refusal
+log shows it. Wildcards are not supported.
 
 With no token, both servers also refuse `Sec-Fetch-Site: cross-site` on any
 method, logged like the `Origin` refusals. `same-origin`, `same-site`, `none`
 and a missing header pass, so the panel's own fetches pass, behind a TLS tunnel
 too. A browser sends the header only over https or to `localhost`, so a page
 fetching a plain-http LAN address sends none and only the `Origin` check and the
-allowlist apply: it is a second signal, not a replacement.
+allowlist apply: it is a second signal, not a replacement. The routes that hold
+no data and are open anyway (`/control`, `/api/health`, the engine's `/echo`)
+are exempt, so a link from another site still opens the panel; a cross-site
+navigation to any other route is refused without a token.
 
 `GET /api/health` on the control port reports the mount, the engine and the
 state database, each as `{"ok": ..., "reason": "..."}`, with an overall
