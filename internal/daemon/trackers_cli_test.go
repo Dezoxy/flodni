@@ -447,3 +447,24 @@ func TestSiteName(t *testing.T) {
 		}
 	}
 }
+
+// A flag after the host is a usage error that names the flag and says nothing
+// changed, so it does not read like the safety refusal.
+func TestTrackersTrailingFlagIsNamed(t *testing.T) {
+	dir := trkFixture(t)
+	before, _ := os.ReadFile(filepath.Join(dir, "config.db"))
+	code, _, errOut := runTrk("remove-host", "cross.other.example", "--state", dir)
+	if code != 2 {
+		t.Fatalf("exit %d, want 2", code)
+	}
+	first := strings.SplitN(errOut, "\n", 2)[0]
+	if !strings.Contains(first, "--state must come before <host>") || !strings.Contains(first, "nothing was changed") {
+		t.Errorf("first line does not name the misplaced flag: %q", first)
+	}
+	if after, _ := os.ReadFile(filepath.Join(dir, "config.db")); !bytes.Equal(before, after) {
+		t.Error("config.db changed")
+	}
+	if _, _, errOut := runTrk("remove-host", "cross.other.example", "--dry-run=true"); !strings.Contains(errOut, "--dry-run must come before") {
+		t.Errorf("a --flag=value form is not named: %q", errOut)
+	}
+}

@@ -38,8 +38,11 @@ func scrubStubsMain(args []string, out, errOut io.Writer) int {
 	}
 	// flag stops at the first positional, so a flag after it would be ignored and a
 	// dry run would write: exactly one argument, and it is the path.
+	if f := misplacedFlag(fs.Args()); f != "" {
+		return usage(fmt.Sprintf("usage error, nothing was changed: %s must come before the source path", f))
+	}
 	if fs.NArg() != 1 {
-		return usage("exactly one source path is required, after the flags")
+		return usage("usage error, nothing was changed: exactly one source path is required, after the flags")
 	}
 	source := fs.Arg(0)
 	if len(source) > 0 && source[0] == '-' {
