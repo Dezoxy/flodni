@@ -3,15 +3,17 @@ package library
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
+	"io"
 	"io/fs"
 	"net/url"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
-
-	"flodni/internal/atomicfile"
 )
 
 // maxStubBytes bounds what the scrub reads: a stub is a few hundred bytes, so a
@@ -29,7 +31,12 @@ const (
 	ScrubTimesFailed  = "rewritten but mtime/atime not restored"
 	ScrubOwnerFailed  = "rewritten but owner not restored"
 	ScrubMagnetFormat = "magnet field is not a string"
+	ScrubNotMagnet    = "magnet line is not a magnet"
 )
+
+// scrubBeforeRename is a test hook: it runs after the temp file is complete and
+// before the final re-check and rename.
+var scrubBeforeRename = func(path string) {}
 
 // ScrubError names a stub the scrub could not finish and why (one of the
 // Scrub* reasons).
@@ -51,9 +58,12 @@ type ScrubResult struct {
 // dry run only counts. A stub already without trackers, and any file that is not a
 // stub, is not written.
 //
-// It is safe beside a running daemon: each rewrite is atomic, and a stub that changes
-// between the read and the write is skipped, not overwritten. The one window left is
-// the instant between that check and the rename, so do not run it during an add.
+// Each rewrite is one new file that already carries the stub's mode, owner, atime
+// and mtime, renamed over the stub after a last check that the stub is still the
+// file that was read (same inode, size and mtime). A stub the daemon has removed,
+// replaced or rewritten since is left as it is and counted skipped. The check and
+// the rename are not one step, so the instant between them is the only window left;
+// stopping the daemon closes it.
 func ScrubStubs(roots []string, dryRun bool) ScrubResult {
 	var res ScrubResult
 	for _, root := range roots {
@@ -97,7 +107,7 @@ func scrubOne(path string, dryRun bool, res *ScrubResult) {
 		return
 	}
 	owner := statOwnerTimes(before) // before the read moves the atime
-	data, err := os.ReadFile(path)
+	data, err := readNoFollow(path, before)
 	if err != nil {
 		fail(ScrubReadFailed)
 		return
@@ -117,24 +127,94 @@ func scrubOne(path string, dryRun bool, res *ScrubResult) {
 	case scrubErrMagnet:
 		fail(ScrubMagnetFormat)
 		return
+	case scrubErrNotMagnet:
+		fail(ScrubNotMagnet)
+		return
 	}
 	if dryRun {
 		res.Rewritten++
 		return
 	}
-	// A stub rewritten by the daemon since the read must not be put back.
-	if now, err := os.Lstat(path); err != nil || now.Size() != before.Size() || !now.ModTime().Equal(before.ModTime()) {
+	switch err := replaceStub(path, out, before, owner); err {
+	case nil:
+		res.Rewritten++
+	case errChangedUnderUs:
 		res.Skipped++
-		return
-	}
-	if err := atomicfile.WriteFileKeepMode(path, out, before.Mode().Perm()); err != nil {
-		fail(ScrubWriteFailed)
-		return
-	}
-	res.Rewritten++
-	if err := restoreOwnerTimes(path, owner, before.ModTime()); err != nil {
+	default:
 		fail(err.Error())
 	}
+}
+
+// readNoFollow reads a stub without following a symlink swapped in since the Lstat,
+// and refuses a file that is no longer the one that was examined.
+func readNoFollow(path string, want os.FileInfo) ([]byte, error) {
+	f, err := os.OpenFile(path, os.O_RDONLY|syscall.O_NOFOLLOW, 0)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = f.Close() }() // read-only
+	if fi, err := f.Stat(); err != nil || !os.SameFile(fi, want) {
+		return nil, errors.New("changed")
+	}
+	return io.ReadAll(io.LimitReader(f, maxStubBytes+1))
+}
+
+var errChangedUnderUs = errors.New("stub changed while scrubbing")
+
+// replaceStub puts data in place of the stub as one new file that already has the
+// stub's mode, owner, atime and mtime: write a temp file in the same directory, set
+// all four on it, re-check that the stub is still the file that was read, rename over
+// it, fsync the directory. Nothing touches the final path after the rename, so a
+// lookup from the mount never sees another mtime and no path-based chown or chtimes
+// can follow a link swapped in later. A stub that changed, was replaced or vanished
+// since the read gives errChangedUnderUs and is left as it is.
+func replaceStub(path string, data []byte, before os.FileInfo, o ownerTimes) (err error) {
+	dir := filepath.Dir(path)
+	tmp, err := os.CreateTemp(dir, "."+filepath.Base(path)+".tmp-*") // O_EXCL, never ends in .mkv
+	if err != nil {
+		return errors.New(ScrubWriteFailed)
+	}
+	tmpName := tmp.Name()
+	renamed := false
+	defer func() {
+		if !renamed {
+			_ = tmp.Close() // best effort; the temp file is being discarded
+			_ = os.Remove(tmpName)
+		}
+	}()
+	if _, err = tmp.Write(data); err != nil {
+		return errors.New(ScrubWriteFailed)
+	}
+	if err = tmp.Chmod(before.Mode().Perm()); err != nil {
+		return errors.New(ScrubWriteFailed)
+	}
+	if err = chownFile(tmp, o); err != nil {
+		return errors.New(ScrubOwnerFailed)
+	}
+	if err = tmp.Sync(); err != nil {
+		return errors.New(ScrubWriteFailed)
+	}
+	if err = tmp.Close(); err != nil {
+		return errors.New(ScrubWriteFailed)
+	}
+	// The temp file is this call's own, created with O_EXCL a moment ago.
+	if err = os.Chtimes(tmpName, o.atime, before.ModTime()); err != nil {
+		return errors.New(ScrubTimesFailed)
+	}
+	scrubBeforeRename(path)
+	now, err := os.Lstat(path)
+	if err != nil || !os.SameFile(before, now) || now.Size() != before.Size() || !now.ModTime().Equal(before.ModTime()) {
+		return errChangedUnderUs
+	}
+	if err = os.Rename(tmpName, path); err != nil {
+		return errors.New(ScrubWriteFailed)
+	}
+	renamed = true
+	if d, derr := os.Open(dir); derr == nil {
+		_ = d.Sync() // best effort: the rename has happened
+		_ = d.Close()
+	}
+	return nil
 }
 
 type scrubOutcome int
@@ -146,6 +226,7 @@ const (
 	scrubErrNoHash
 	scrubErrLayout
 	scrubErrMagnet
+	scrubErrNotMagnet
 )
 
 // scrubStubBytes returns the stub with its magnet replaced, or says why it did not.
@@ -179,6 +260,13 @@ func scrubJSONStub(data []byte) ([]byte, scrubOutcome) {
 	if magnet == "" || magnetIsBare(magnet) {
 		return nil, scrubClean
 	}
+	// With no imdb field the id is found by a regex over the whole stub, magnet
+	// included; rewriting would lose an id that only the old magnet holds.
+	var imdb string
+	_ = json.Unmarshal(fields["imdb"], &imdb) // absent or not a string: no id
+	if imdb == "" && reStubIMDB.MatchString(magnet) {
+		return nil, scrubClean
+	}
 	// The rewrite goes through the stub encoder, so it is only trusted when the
 	// encoder reproduces the file as it is: any other layout would change bytes
 	// besides the magnet.
@@ -207,18 +295,21 @@ func scrubLegacyStub(data []byte) ([]byte, scrubOutcome) {
 		return nil, scrubNotStub
 	}
 	magnet := strings.TrimSpace(lines[2])
-	if !strings.HasPrefix(strings.ToLower(magnet), "magnet:") || magnetIsBare(magnet) {
+	if magnet == "" || magnetIsBare(magnet) {
+		return nil, scrubClean
+	}
+	if !strings.HasPrefix(strings.ToLower(magnet), "magnet:") {
+		return nil, scrubErrNotMagnet
+	}
+	// readStub takes the id from line 4, else by a regex over the whole stub.
+	if !(len(lines) > 3 && strings.HasPrefix(strings.TrimSpace(lines[3]), "tt")) && reStubIMDB.MatchString(magnet) {
 		return nil, scrubClean
 	}
 	clean, ok := scrubbedMagnet(magnet, strings.TrimSpace(lines[0]))
 	if !ok {
 		return nil, scrubErrNoHash
 	}
-	cr := ""
-	if strings.HasSuffix(lines[2], "\r") {
-		cr = "\r"
-	}
-	lines[2] = clean + cr
+	lines[2] = strings.Replace(lines[2], magnet, clean, 1)
 	return []byte(strings.Join(lines, "\n")), scrubRewrite
 }
 
@@ -226,15 +317,10 @@ func isHTTPURL(s string) bool {
 	return strings.HasPrefix(s, "http://") || strings.HasPrefix(s, "https://")
 }
 
-// magnetIsBare reports a magnet whose only parameter is xt: nothing to scrub.
-func magnetIsBare(magnet string) bool {
-	_, q, ok := strings.Cut(magnet, "?")
-	if !ok {
-		return false
-	}
-	vals, err := url.ParseQuery(q)
-	return err == nil && len(vals) == 1 && len(vals["xt"]) == 1
-}
+var reBareMagnet = regexp.MustCompile(`^magnet:\?xt=urn:btih:[a-f0-9]{40}$`)
+
+// magnetIsBare reports exactly the form StubMagnet writes: nothing to scrub.
+func magnetIsBare(magnet string) bool { return reBareMagnet.MatchString(magnet) }
 
 // scrubbedMagnet rebuilds the magnet from the hash the old one carried, or from the
 // stream link when the old one has none.

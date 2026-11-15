@@ -1167,47 +1167,69 @@ no `tr=`, `dn=` or `xs=`. A request's magnet, or the announce list of an
 uploaded `.torrent`, goes to the engine and no further, because a private
 tracker's announce URL carries the account's passkey. Nothing reads the stub's
 magnet back (a wake takes the hash from the stream link and the engine's stored
-record), so nothing is lost. `library.WriteStub` takes the hash, not a magnet,
+record). The one indirect reader is the id lookup described under the scrub:
+a stub with no `imdb` field gets its id from a regex over the whole file, so an
+id that only an old `dn=` held is not carried by a new stub.
+`library.WriteStub` takes the hash, not a magnet,
 so no add path (magnet, `.torrent`, pack, replace) can write a tracker. Stubs
 are written with mode 0644, as before.
 
 Stubs written by older versions may still hold the full magnet. `flodni
-scrub-stubs [--dry-run] [source_path]` rewrites those once, on request; the
-daemon never does it on its own. `source_path` is the directory the daemon is
-given as its source (it holds `movies/` and `tv/`), or `physical_source_path`
-from `config.json` when omitted.
+scrub-stubs [--dry-run] [--allow-root] <source_path>` rewrites those once, on
+request; the daemon never does it on its own. `source_path` is required and is
+the directory the daemon is given as its source (it holds `movies/` and `tv/`),
+not the mount path. It is not read from `config.json`, because the daemon's own
+command-line source wins over the config and the two can differ. Flags go
+before the path: a flag after it is refused, never ignored.
 
 - **What it changes.** Only the `magnet` field, rebuilt from the hash the old
   one carried. Every other field and its bytes stay as written, because the
   rewrite goes through the stub encoder and a stub the encoder would not
   reproduce byte for byte is left alone and reported. A line-based legacy stub
-  has its magnet line replaced the same way.
-- **What it leaves.** A stub whose magnet is already bare or empty is not
-  written. A file that is not a stub (not JSON or line-format with an
-  `http(s)` link and a size, or larger than 64 KiB) is never opened for
-  writing. Only `.mkv` files are looked at.
-- **mtime guarantee.** Each rewrite is an atomic replace (`atomicfile`) that
-  keeps the mode and owner, then puts the original mtime and atime back with
-  `utimensat`, because the mount reports the stub's mtime to the media server
-  and a changed mtime makes it rescan the title. The new file is visible with
-  the new mtime for the instant between the rename and the restore.
+  has only its magnet line replaced.
+- **What it leaves.** A stub is clean only when its magnet is exactly
+  `magnet:?xt=urn:btih:<40 lowercase hex>`, or empty; it is not written. A
+  stub with no `imdb` field whose old magnet holds an IMDb-looking id
+  (`tt` and 7 to 10 digits) is left alone and counted skipped, because the
+  reader finds that stub's id by a regex over the whole file, magnet included,
+  and a rewrite would lose it. A line-based stub whose third line is not a
+  magnet is reported. Files that are not stubs (not JSON or line format with an
+  `http(s)` link and a size, or larger than 64 KiB), symlinks and non-`.mkv`
+  files are never written or followed.
+- **mtime guarantee.** Each rewrite is one new file in the stub's directory
+  that already has the stub's mode, owner, atime and mtime (set on the file
+  before it replaces the stub), renamed over the stub after a last check that
+  the stub is still the file that was read. The stub never exists with another
+  mtime, which matters because the mount reports it to the media server and a
+  change makes it rescan. Nothing touches the final path after the rename. The
+  owner is set by the scrub, not by `atomicfile`: when it cannot be set (a
+  non-root run over files of another user) that stub is reported, not rewritten.
 - **Dry run.** `--dry-run` writes nothing; `rewritten` counts the stubs a real
   run would rewrite.
-- **Output.** One line, `scrub-stubs: scanned=N rewritten=N skipped=N errors=N`,
-  and one `scrub-stubs: <path>: <reason>` line per error on stderr, with a fixed
-  reason. It never prints a magnet or a URL. Exit 0, 1 when any error was
-  reported, 2 on a bad path.
-- **With the daemon running.** It is safe to run beside the daemon, for
-  example with `docker exec <container> flodni scrub-stubs /path/to/source`:
-  each file is replaced atomically and a stub that changed since the scrub read
-  it is skipped, not overwritten. The remaining window is the instant between
-  that check and the rename, so do not run it during an add. Run it as the
-  daemon's user, or the ownership restore may fail and is reported.
+- **Output and exit codes.** One line, `scrub-stubs: scanned=N rewritten=N
+  skipped=N errors=N`, and one `scrub-stubs: <path>: <reason>` line per error
+  on stderr, with a fixed reason. It never prints a magnet or a URL. Exit 0:
+  stubs were scanned and nothing failed. Exit 1: at least one stub was
+  reported. Exit 2: a bad invocation (a flag after the path, no or several
+  paths), neither `movies/` nor `tv/` under the path, a run as root without
+  `--allow-root`, or no stub scanned at all (which also catches the mount path
+  given by mistake).
+- **Run it as the daemon's user.** As root it refuses unless `--allow-root` is
+  given: a root run over a tree another user can write is the case to avoid. For
+  example `docker exec --user <daemon uid> <container> flodni scrub-stubs
+  /path/to/source`.
+- **With the daemon running.** Safe, with one small window. A stub the daemon
+  removed, replaced or rewrote since the scrub read it (a different inode, size
+  or mtime) is skipped and never recreated or overwritten; that check runs
+  immediately before the rename. The check and the rename are two steps, so a
+  removal or a replace in between is still lost to the scrub. The only way to
+  close it is to stop the daemon first, which is the recommended way for a
+  library that is being changed.
 
-The engine's own record of a torrent (its saved `config.db` entry) still holds
-the magnet or `.torrent` it was added with, trackers included: a closed torrent
-wakes from it. The stub scrub does not touch it, and no library, health, audit
-or file-facts response returns it.
+The engine's own record of a torrent (its saved `config.db` entry) holds the
+magnet or `.torrent` it was added with, trackers included: a closed torrent
+wakes from it. After the scrub it is the only copy of a private torrent's
+trackers, so back it up. No library route returns it.
 
 ## Removing a title
 

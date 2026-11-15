@@ -2,17 +2,8 @@
 
 package library
 
-import (
-	"errors"
-	"os"
-	"time"
-)
+import "os"
 
 func statOwnerTimes(fi os.FileInfo) ownerTimes { return ownerTimes{atime: fi.ModTime()} }
 
-func restoreOwnerTimes(path string, o ownerTimes, mtime time.Time) error {
-	if err := os.Chtimes(path, o.atime, mtime); err != nil {
-		return errors.New(ScrubTimesFailed)
-	}
-	return nil
-}
+func chownFile(*os.File, ownerTimes) error { return nil }

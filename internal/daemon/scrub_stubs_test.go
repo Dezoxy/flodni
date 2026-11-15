@@ -33,9 +33,9 @@ func TestScrubStubsCommandSummarisesWithoutALeak(t *testing.T) {
 		args []string
 		want string
 	}{
-		{[]string{"--dry-run", src}, "scanned=1 rewritten=1 skipped=0 errors=0 (dry run"},
-		{[]string{src}, "scanned=1 rewritten=1 skipped=0 errors=0\n"},
-		{[]string{src}, "scanned=1 rewritten=0 skipped=1 errors=0\n"},
+		{[]string{"--allow-root", "--dry-run", src}, "scanned=1 rewritten=1 skipped=0 errors=0 (dry run"},
+		{[]string{"--allow-root", src}, "scanned=1 rewritten=1 skipped=0 errors=0\n"},
+		{[]string{"--allow-root", src}, "scanned=1 rewritten=0 skipped=1 errors=0\n"},
 	} {
 		var out, errOut bytes.Buffer
 		if code := scrubStubsMain(tc.args, &out, &errOut); code != 0 {
@@ -64,9 +64,46 @@ func TestScrubStubsCommandSummarisesWithoutALeak(t *testing.T) {
 	}
 }
 
-func TestScrubStubsCommandRefusesAMissingSource(t *testing.T) {
-	var out, errOut bytes.Buffer
-	if code := scrubStubsMain([]string{filepath.Join(t.TempDir(), "nope")}, &out, &errOut); code != 2 {
-		t.Fatalf("exit %d, want 2", code)
+func TestScrubStubsCommandRefusesBadInvocations(t *testing.T) {
+	src := t.TempDir()
+	p := filepath.Join(src, "tv", "S", "a.mkv")
+	if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	old := `{"imdb":"","magnet":"magnet:?xt=urn:btih:` + scrubTestHash + `&tr=http%3A%2F%2Fseeder.example%2Fannounce","size":9,"url":"http://engine/stream?link=` + scrubTestHash + `"}`
+	old = strings.ReplaceAll(old, "&", "\\"+"u0026") // the way encoding/json writes it
+	if err := os.WriteFile(p, []byte(old), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	empty := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(empty, "movies"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	asRoot := func() int { return 0 }
+	for _, tc := range []struct {
+		name string
+		args []string
+		euid func() int
+	}{
+		{"missing source", []string{"--allow-root", filepath.Join(t.TempDir(), "nope")}, nil},
+		{"no source", []string{"--allow-root"}, nil},
+		{"trailing flag", []string{"--allow-root", src, "--dry-run"}, nil},
+		{"two sources", []string{"--allow-root", src, src}, nil},
+		{"no movies or tv", []string{"--allow-root", t.TempDir()}, nil},
+		{"nothing scanned", []string{"--allow-root", empty}, nil},
+		{"root without --allow-root", []string{src}, asRoot},
+	} {
+		if tc.euid != nil {
+			old := scrubEuid
+			scrubEuid = tc.euid
+			t.Cleanup(func() { scrubEuid = old })
+		}
+		var out, errOut bytes.Buffer
+		if code := scrubStubsMain(tc.args, &out, &errOut); code != 2 {
+			t.Errorf("%s: exit %d, want 2 (out %q err %q)", tc.name, code, out.String(), errOut.String())
+		}
+		if got, _ := os.ReadFile(p); string(got) != old {
+			t.Errorf("%s: the stub was written", tc.name)
+		}
 	}
 }

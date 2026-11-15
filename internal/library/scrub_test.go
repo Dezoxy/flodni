@@ -8,6 +8,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"flodni/internal/atomicfile"
 )
 
 var scrubOldTime = time.Date(2024, 3, 4, 5, 6, 7, 123456789, time.UTC)
@@ -207,4 +209,200 @@ func TestScrubLeavesAnUnexpectedLayoutAlone(t *testing.T) {
 	if b, _ := json.Marshal(res.Errors); strings.Contains(string(b), "passkey") {
 		t.Error("an error carries file content")
 	}
+}
+
+// stubFields writes a stub in the written layout with the given magnet value.
+func stubFields(t *testing.T, path string, fields map[string]interface{}) {
+	t.Helper()
+	data, err := marshalStub(fields)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, data, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chtimes(path, scrubOldTime, scrubOldTime); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func withBeforeRename(t *testing.T, f func(path string)) {
+	t.Helper()
+	old := scrubBeforeRename
+	scrubBeforeRename = f
+	t.Cleanup(func() { scrubBeforeRename = old })
+}
+
+// The new file already has the old times when it is renamed over the stub: a mount
+// that looks the stub up right after the rename never sees another mtime.
+func TestScrubSetsTheTimesBeforeTheRename(t *testing.T) {
+	root := t.TempDir()
+	p := filepath.Join(root, "a.mkv")
+	oldStub(t, p, charHash, "tt0000001", 0o644)
+	checked := false
+	withBeforeRename(t, func(path string) {
+		ents, _ := os.ReadDir(root)
+		for _, e := range ents {
+			if strings.Contains(e.Name(), ".tmp-") {
+				fi, err := os.Lstat(filepath.Join(root, e.Name()))
+				if err != nil || !fi.ModTime().Equal(scrubOldTime) {
+					t.Errorf("temp file mtime = %v (%v), want the stub's", fi.ModTime(), err)
+				}
+				checked = true
+			}
+		}
+		if strings.Contains(readFile(t, path), "passkey") != true {
+			t.Error("the stub changed before the rename")
+		}
+	})
+	if res := ScrubStubs([]string{root}, false); res.Rewritten != 1 {
+		t.Fatalf("result = %+v", res)
+	}
+	if !checked {
+		t.Fatal("no temp file seen before the rename")
+	}
+	if fi, _ := os.Lstat(p); !fi.ModTime().Equal(scrubOldTime) {
+		t.Errorf("mtime = %v", fi.ModTime())
+	}
+}
+
+func TestScrubDoesNotRecreateAStubRemovedBeforeTheRename(t *testing.T) {
+	root := t.TempDir()
+	p := filepath.Join(root, "a.mkv")
+	oldStub(t, p, charHash, "", 0o644)
+	withBeforeRename(t, func(path string) { _ = os.Remove(path) })
+	res := ScrubStubs([]string{root}, false)
+	if res.Rewritten != 0 || res.Skipped != 1 || len(res.Errors) != 0 {
+		t.Fatalf("result = %+v", res)
+	}
+	if ents, _ := os.ReadDir(root); len(ents) != 0 {
+		t.Errorf("directory holds %d entries, want none (no stub, no temp file)", len(ents))
+	}
+}
+
+func TestScrubDoesNotOverwriteAReplacedStub(t *testing.T) {
+	root := t.TempDir()
+	p := filepath.Join(root, "a.mkv")
+	oldStub(t, p, charHash, "", 0o644)
+	var daemonWrote string
+	withBeforeRename(t, func(path string) {
+		// The daemon's write: a new file, a new inode, the same size and mtime.
+		data := []byte(readFile(t, path))
+		if err := atomicfile.WriteFile(path, data, 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Chtimes(path, scrubOldTime, scrubOldTime); err != nil {
+			t.Fatal(err)
+		}
+		daemonWrote = readFile(t, path)
+	})
+	res := ScrubStubs([]string{root}, false)
+	if res.Rewritten != 0 || res.Skipped != 1 {
+		t.Fatalf("result = %+v", res)
+	}
+	if readFile(t, p) != daemonWrote {
+		t.Error("the replaced stub was overwritten")
+	}
+	if ents, _ := os.ReadDir(root); len(ents) != 1 {
+		t.Errorf("directory holds %d entries, want only the stub", len(ents))
+	}
+}
+
+func TestScrubRestoresTheOwner(t *testing.T) {
+	if os.Geteuid() != 0 {
+		t.Skip("needs root to give a file to another owner")
+	}
+	root := t.TempDir()
+	p := filepath.Join(root, "a.mkv")
+	oldStub(t, p, charHash, "", 0o644)
+	if err := os.Chown(p, 12345, 12346); err != nil {
+		t.Fatal(err)
+	}
+	if res := ScrubStubs([]string{root}, false); res.Rewritten != 1 || len(res.Errors) != 0 {
+		t.Fatalf("result = %+v", res)
+	}
+	o := statOwnerTimes(mustLstat(t, p))
+	if o.uid != 12345 || o.gid != 12346 {
+		t.Errorf("owner = %d:%d, want 12345:12346", o.uid, o.gid)
+	}
+}
+
+func mustLstat(t *testing.T, p string) os.FileInfo {
+	t.Helper()
+	fi, err := os.Lstat(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return fi
+}
+
+func TestScrubNeverFollowsASymlink(t *testing.T) {
+	outside, root := t.TempDir(), t.TempDir()
+	target := filepath.Join(outside, "t.mkv")
+	oldStub(t, target, charHash, "", 0o644)
+	want := readFile(t, target)
+	link := filepath.Join(root, "link.mkv")
+	if err := os.Symlink(target, link); err != nil {
+		t.Fatal(err)
+	}
+	res := ScrubStubs([]string{root}, false)
+	if res.Scanned != 0 || res.Rewritten != 0 || len(res.Errors) != 0 {
+		t.Fatalf("result = %+v", res)
+	}
+	if readFile(t, target) != want || mustLstat(t, link).Mode()&os.ModeSymlink == 0 {
+		t.Error("the symlink or its target was touched")
+	}
+}
+
+func TestScrubReportsWhatItCannotRebuild(t *testing.T) {
+	root := t.TempDir()
+	cases := map[string]struct {
+		fields map[string]interface{}
+		reason string
+	}{
+		"nohash.mkv": {map[string]interface{}{"url": "http://e/s", "size": 1, "imdb": "", "magnet": "magnet:?tr=http%3A%2F%2Fx"}, ScrubNoHash},
+		"number.mkv": {map[string]interface{}{"url": "http://e/s?link=" + charHash, "size": 1, "imdb": "", "magnet": 5}, ScrubMagnetFormat},
+	}
+	for name, c := range cases {
+		stubFields(t, filepath.Join(root, name), c.fields)
+	}
+	legacy := filepath.Join(root, "legacy.mkv")
+	if err := os.WriteFile(legacy, []byte("http://e/s?link="+charHash+"\n10\nnot a magnet at all\ntt1234567"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	res := ScrubStubs([]string{root}, false)
+	got := map[string]string{}
+	for _, e := range res.Errors {
+		got[filepath.Base(e.Path)] = e.Reason
+	}
+	want := map[string]string{"nohash.mkv": ScrubNoHash, "number.mkv": ScrubMagnetFormat, "legacy.mkv": ScrubNotMagnet}
+	for k, v := range want {
+		if got[k] != v {
+			t.Errorf("%s: reason %q, want %q (all: %v)", k, got[k], v, got)
+		}
+	}
+	if res.Rewritten != 0 {
+		t.Errorf("rewritten = %d", res.Rewritten)
+	}
+}
+
+// A stub with no imdb field is matched for an id by a regex over its whole content,
+// the magnet included: its magnet is left alone so that id is not lost.
+func TestScrubLeavesTheMagnetOfAStubWhoseImdbComesFromIt(t *testing.T) {
+	root := t.TempDir()
+	keep := filepath.Join(root, "keep.mkv")
+	stubFields(t, keep, map[string]interface{}{"url": "http://e/s?link=" + charHash, "size": 1, "imdb": "",
+		"magnet": "magnet:?xt=urn:btih:" + charHash + "&dn=Title.tt1234567&tr=http%3A%2F%2Fx"})
+	rewrite := filepath.Join(root, "rewrite.mkv")
+	stubFields(t, rewrite, map[string]interface{}{"url": "http://e/s?link=" + charHash, "size": 1, "imdb": "tt7654321",
+		"magnet": "magnet:?xt=urn:btih:" + charHash + "&dn=Title.tt1234567&tr=http%3A%2F%2Fx"})
+	want := readFile(t, keep)
+	res := ScrubStubs([]string{root}, false)
+	if res.Rewritten != 1 || res.Skipped != 1 || len(res.Errors) != 0 {
+		t.Fatalf("result = %+v", res)
+	}
+	if readFile(t, keep) != want {
+		t.Error("the stub whose id lives in its magnet was rewritten")
+	}
+	assertCleanStub(t, rewrite, charHash)
 }

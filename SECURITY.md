@@ -51,13 +51,22 @@ in the [threat model](docs/architecture/security/threat-model.md).
 
 A private tracker's announce URL carries the account's passkey. Stubs no longer
 store it: every new stub's `magnet` is the bare info hash. Stubs written by
-older versions may still hold the request's magnet with its trackers, mode 0644;
-run `flodni scrub-stubs --dry-run` to count them and `flodni scrub-stubs` to
-rewrite them (see "Stub contents and the stub scrub" in the README). The scrub
-keeps each stub's mtime and atime. Copies of the library directory made before
-the scrub (backups, snapshots) still hold the old magnets. The engine's own
-stored record of a torrent keeps its trackers, because a wake needs them; it is
-not served by any library route.
+older versions may still hold the request's magnet with its trackers, mode 0644.
+Run `flodni scrub-stubs --dry-run <source_path>` to count them and
+`flodni scrub-stubs <source_path>` to rewrite them, as the daemon's user (see
+"Stub contents and the stub scrub" in the README for the flags, the exit codes
+and the stubs it leaves alone). Each rewrite keeps the stub's mode, owner, mtime
+and atime, set on the new file before it replaces the stub.
+
+What this does not cover:
+
+- Copies of the library directory made before the scrub (backups, snapshots)
+  still hold the old magnets.
+- The engine's own stored record of a torrent (`config.db`) keeps its trackers,
+  because a wake needs them. After the scrub it is the only copy of a private
+  torrent's trackers: back it up. Its file mode follows the umask.
+- The engine can print a link or tracker URL in its own log lines. Redacting
+  those is separate work and not done here.
 
 ## Secrets
 
