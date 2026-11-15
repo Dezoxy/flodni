@@ -304,7 +304,8 @@ others are designed, not built.
    `flodni_wake_refused_total` and recorded as the reason `not_stored`, never as
    a dead swarm); and a load, a save and a removal are serialised in the engine,
    so a removal racing a wake leaves the torrent neither loaded nor stored.
-   Explicit adds (`add`, upload, `/stream?link=`) stay adds. The end-to-end
+   Explicit adds (`add`, upload) stay adds; `GET /stream` adds only with a
+   token (Durable records step 10). The end-to-end
    variant `removal` runs it against the real mount and engine: four movies are
    filed, one is read in the background, a descriptor is open on a second, and
    two are removed through the library API back to back and the third with `rm`
@@ -556,10 +557,8 @@ switch them on. Steps 1 to 19 and 22 to 26 are merged; steps 20 (`slog`) and 21
     decision helpers, the cache hit, short-read repair, `Release`, and the
     fetch, prefetch and pump branches through a fake engine behind the
     `engineBridge` interface, so the prerequisites are met. Built: those seven
-    maps, the control token, the startup reporter and five reader-budget
-    counters (overshoot, attributed fills, refused reads, holds, confirmed after
-    refusal) are fields of `App`; `unconfirmedReadBytes`, `unconfirmedSessions`
-    and the two webhook-match counters are still package-level. The `App` is
+    maps, the control token, the startup reporter and all nine reader-budget
+    counters are fields of `App` (the last four moved in #212). The `App` is
     created once in `Run()`; tests install a fresh one with `newTestApp`.
 
 **Gated on measurement (built opt-in, off by default)**
@@ -642,60 +641,125 @@ Requests from running v0.2.0 on a real host.
 
 ## Durable records (after v0.2.2)
 
-From a review after v0.2.2. Steps 1 to 3 are must-fix: data loss and an
-open-port gap. Designed, not built.
+From a review after v0.2.2 and from running it. Steps 1 to 3 were must-fix:
+data loss and an open-port gap. Steps 1 to 17 are built; 18 to 20 are
+designed, not built.
 
-1. **Make the engine database durable.** The engine's `config.db` is opened with
-    `NoSync` and mode 0666, and is neither synced nor closed at shutdown. Since
-    the strict wake it holds the only copy of every torrent's metainfo, so an OS
-    crash or power loss that corrupts it leaves every stub answering EIO until
-    each torrent is re-added. Open it with fsync and mode 0600, sync and close
-    it at shutdown, and measure wake latency during a library scan before and
-    after. If the fsync shows, keep `NoSync` and write a periodic hot snapshot
-    (`tx.WriteTo` to a temporary file, fsync, rename) instead. Document a
-    restore. A test kills the process mid-save and reopens the file.
-2. **Remove the engine's `wipe` action.** `POST /torrents` with
+1. **Make the engine database durable.** [FINISHED] The engine's `config.db` is
+    opened with `NoSync` and mode 0666, and is neither synced nor closed at
+    shutdown. Since the strict wake it holds the only copy of every torrent's
+    metainfo, so an OS crash or power loss that corrupts it leaves every stub
+    answering EIO until each torrent is re-added. Open it with fsync and mode
+    0600, sync and close it at shutdown, and measure wake latency during a
+    library scan before and after. If the fsync shows, keep `NoSync` and write a
+    periodic hot snapshot (`tx.WriteTo` to a temporary file, fsync, rename)
+    instead. Document a restore. A test kills the process mid-save and reopens
+    the file. Built (#202): fsync on every commit (two fdatasyncs), mode 0600
+    with a wider file tightened at start, a clean close at shutdown, the read
+    cache holding committed data only, and an unchanged record not rewritten;
+    #213 made a failed commit reach its caller.
+2. **Remove the engine's `wipe` action.** [FINISHED] `POST /torrents` with
     `"action":"wipe"` removes every stored torrent in one request, and nothing
     calls it. Delete the case and the function; a test pins that the action is
-    refused.
-3. **Refuse cross-origin requests on an open port.** With no token set, both
-    servers pass every request, the engine allows all origins and
+    refused. Built (#204); `GET /shutdown` and the play webhook became POST-only
+    in the same change.
+3. **Refuse cross-origin requests on an open port.** [FINISHED] With no token
+    set, both servers pass every request, the engine allows all origins and
     private-network CORS, and the JSON handlers do not check `Content-Type`, so
     a page in a browser on the network can post to the library and engine
     routes. With no token set, refuse a request whose `Origin` does not match
     its `Host` (a request without `Origin`, such as a media server's webhook or
     a script, is unchanged), and drop the permissive CORS. The threat model
     gains the browser actor. Tests pin the refusal and the unchanged cases.
-4. **Keep tracker passkeys out of stubs.** Each stub stores the request's magnet
-    or the `.torrent`'s announce list, passkeys included, at mode 0644, and
-    nothing reads the field. A new stub carries the bare info hash only. An
-    opt-in scrub, run by the owner, rewrites existing stubs and restores each
-    file's mtime, so the media server sees no change. Confirm first that no
-    external tool reads the field.
-5. **Tell "engine not ready" from "not stored".** A wake before the engine is up
-    is reported as not stored, recorded as `not_stored` and latched by the
-    warmer, which can tell an operator to re-add a healthy torrent. It gets its
-    own error that records and latches nothing, and the fixed start-up sleep
-    becomes a bounded wait for readiness. The start-up warning that says an
-    unstored torrent is re-added from its bare magnet is corrected.
-6. **Keep a torrent when a stub could not be read.** The check whether a torrent
-    is still used skips a stub it cannot read, so removing one episode can drop
-    the record its sibling episodes still need. An unreadable stub keeps the
-    torrent; a test injects the read error.
-7. **Report what nothing links to.** The library list says whether a library
-    symlink points at each stub (true, false, or null before the first walk),
-    with a count gauge, and the audit lists engine records no stub uses. Report
-    only: what to remove stays the deployment's decision. The new fields are
-    additive.
-8. **One fuzzy matcher for play and stop.** The webhook handler carries the same
-    fuzzy pass twice and logs every registered path at INFO on each play.
-    Extract one tie-finding function with table tests, log the registry at
-    DEBUG, and cache a webhook's IMDb id only on an exact match.
-9. **Evict to a low-water mark, and fuzz the bencode decoder.** At quota,
-    eviction frees exactly enough, so every new head walks the cache directory
-    again; evict a little under the quota instead. The hand-written bencode
-    decoder that parses tracker responses gets a fuzz target seeded from its
-    test vectors.
+    Built (#204): the check compares host names only, because a TLS-terminating
+    tunnel keeps the original Host; #209 added the Host allowlist (step 11).
+4. **Keep tracker passkeys out of stubs.** [FINISHED] Each stub stores the
+    request's magnet or the `.torrent`'s announce list, passkeys included, at
+    mode 0644, and nothing reads the field. A new stub carries the bare info
+    hash only. An opt-in scrub, run by the owner, rewrites existing stubs and
+    restores each file's mtime, so the media server sees no change. Confirm
+    first that no external tool reads the field. Built (#207), with `flodni
+    scrub-stubs`: it sets the times and owner on its own temporary file before
+    the rename, re-checks the stub just before it, and refuses root without
+    `--allow-root`.
+5. **Tell "engine not ready" from "not stored".** [FINISHED] A wake before the
+    engine is up is reported as not stored, recorded as `not_stored` and latched
+    by the warmer, which can tell an operator to re-add a healthy torrent. It
+    gets its own error that records and latches nothing, and the fixed start-up
+    sleep becomes a bounded wait for readiness. The start-up warning that says
+    an unstored torrent is re-added from its bare magnet is corrected. Built
+    (#206).
+6. **Keep a torrent when a stub could not be read.** [FINISHED] The check
+    whether a torrent is still used skips a stub it cannot read, so removing one
+    episode can drop the record its sibling episodes still need. An unreadable
+    stub keeps the torrent; a test injects the read error. Built (#203).
+7. **Report what nothing links to.** [FINISHED] The library list says whether a
+    library symlink points at each stub (true, false, or null before the first
+    walk), with a count gauge, and the audit lists engine records no stub uses.
+    Report only: what to remove stays the deployment's decision. The new fields
+    are additive. Built (#203).
+8. **One fuzzy matcher for play and stop.** [FINISHED] The webhook handler
+    carries the same fuzzy pass twice and logs every registered path at INFO on
+    each play. Extract one tie-finding function with table tests, log the
+    registry at DEBUG, and cache a webhook's IMDb id only on an exact match.
+    Built (#205).
+9. **Evict to a low-water mark, and fuzz the bencode decoder.** [FINISHED] At
+    quota, eviction frees exactly enough, so every new head walks the cache
+    directory again; evict a little under the quota instead. The hand-written
+    bencode decoder that parses tracker responses gets a fuzz target seeded from
+    its test vectors. Built (#208): eviction goes down to 95% of the quota, the
+    headroom from never-played files only.
+10. **`GET /stream` never adds from a link.** [FINISHED] With no token, a GET or
+    HEAD `/stream` refuses a link whose hash the engine does not hold, any link
+    without an inline hash (`http(s)`, `file:`), and `&save` or `&preload`, so a
+    page cannot make Flodni add, fetch or download. A stored hash wakes from its
+    record in both modes, so a link's trackers never reach it; `/play` takes a
+    strict hash and never fetches. Built (#210).
+11. **An optional Host allowlist against DNS rebinding.** [FINISHED]
+    `allowed_hosts` (empty means off) refuses a request whose Host is not
+    listed, on both servers; IP literals, `localhost`, the machine's name and
+    the engine URL's host always pass; an all-invalid or mistyped list keeps the
+    check on. With no token, `Sec-Fetch-Site: cross-site` is refused except on
+    the open routes, and the API cannot change the effective list. Built (#209).
+12. **Keep tracker passkeys out of logs.** [FINISHED] One redactor keeps only
+    scheme and host of every URL in a log line, including URLs inside errors,
+    and the engine's own logger is routed through it, so the vendored code is
+    untouched; the media server token is redacted at the source of its request
+    errors. Built (#211).
+13. **A stored private torrent's own trackers win over an add's (hard rule 3).**
+    [FINISHED] An add of a hash the engine stores or holds no longer merges the
+    request's trackers into a record or a live torrent that is not known public;
+    a record without metainfo counts as private, and changing trackers is
+    remove, then add. Built (#214).
+14. **Audit and remove foreign trackers in stored records.** [FINISHED] `flodni
+    trackers audit` lists, per stored record, the tracker hosts outside its
+    primary tracker's domain (hosts and hashes only, never a URL), and `flodni
+    trackers remove-host` removes one named host, refusing a record's primary;
+    both run with the daemon stopped. Built (#215).
+15. **Keep the media server token out of the API.** [FINISHED] `GET /api/config`
+    blanks the Plex token, an empty post keeps the file's, an environment token
+    is never written to the file, a changed `plex.url` needs the token typed
+    again, and an open port cannot change either. Built (#216).
+16. **A failed engine-database commit reaches its caller.** [FINISHED] A failed
+    save no longer stamps the debounce, the read cache never holds an
+    uncommitted value through the router, and
+    `flodni_engine_db_write_errors_total{op}` counts failures. Built (#213).
+17. **Make the `App` test isolation enforced.** [FINISHED] The last four
+    counters moved onto `App`, and a test that leaves pumps, prefetches or
+    timers registered on its `App` fails. Built (#212).
+18. **Harden the fetches an add makes.** `POST /torrents` still fetches an
+    `http(s)` link with the default client (redirects followed, unbounded body)
+    and reads a `file:` path; the poster check has no timeout. Bound the body,
+    refuse cross-host redirects, drop `file:` from the API, and give the poster
+    check a timeout. Designed, not built.
+19. **Answer an add once its record exists.** The engine add answers 200 before
+    the record is saved, and a failed save or a metadata timeout never reaches
+    the caller. Needs an API decision: an accepted status, or a saved-state
+    field. Designed, not built.
+20. **A string-aware comment stripper for `config.json`.** The `//` stripper is
+    line-based, so a hand-edited line holding two URLs is cut at the second;
+    panel saves write one value per line and are unaffected. Designed, not
+    built.
 
 ## Done
 
@@ -1092,7 +1156,17 @@ open-port gap. Designed, not built.
   `POST /api/library/confirm` records a manual play (fail closed without an
   enforced token).
 - 2026-11-14, ideas round, steps 24 and 25 (#190): opt-in reader-budget
-  follow-ups (fill attribution, separate floors, a read-ahead clamp), a
-  change-only wake of idle peers, and a private torrent's redial of its last
-  tracker peer, all off by default. The wake cost on a large public swarm is
-  not measured.
+  follow-ups (fill attribution, separate floors, a read-ahead clamp) and a
+  private torrent's redial of its last tracker peer, both off by default, and a
+  change-only wake of idle peers, which is always on. The wake cost on a large
+  public swarm is not measured.
+- 2026-11-15, durable records steps 1 to 17: a durable engine database whose
+  failed commits reach the caller; `wipe` removed; an Origin check, an optional
+  Host allowlist and `Sec-Fetch-Site` on an open port, with `/shutdown`, the
+  play webhook and adds by `GET /stream` closed; no tracker passkeys in stubs or
+  logs, and the media server token kept out of the API; a stored private
+  torrent's own trackers win over an add's (hard rule 3), with an offline audit
+  and remove for foreign trackers already stored; engine-not-ready kept apart
+  from not stored; a fail-closed drop check; linked and orphan reporting; one
+  fuzzy matcher; eviction to a low-water mark; and enforced `App` test isolation
+  (#202 to #216).
