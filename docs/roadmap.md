@@ -640,6 +640,63 @@ Requests from running v0.2.0 on a real host.
     id, one linked: the linked one wins, for a play and for a stop. Not urgent:
     an IMDb match is exact while one stub holds the id.
 
+## Durable records (after v0.2.2)
+
+From a review after v0.2.2. Steps 1 to 3 are must-fix: data loss and an
+open-port gap. Designed, not built.
+
+1. **Make the engine database durable.** The engine's `config.db` is opened with
+    `NoSync` and mode 0666, and is neither synced nor closed at shutdown. Since
+    the strict wake it holds the only copy of every torrent's metainfo, so an OS
+    crash or power loss that corrupts it leaves every stub answering EIO until
+    each torrent is re-added. Open it with fsync and mode 0600, sync and close
+    it at shutdown, and measure wake latency during a library scan before and
+    after. If the fsync shows, keep `NoSync` and write a periodic hot snapshot
+    (`tx.WriteTo` to a temporary file, fsync, rename) instead. Document a
+    restore. A test kills the process mid-save and reopens the file.
+2. **Remove the engine's `wipe` action.** `POST /torrents` with
+    `"action":"wipe"` removes every stored torrent in one request, and nothing
+    calls it. Delete the case and the function; a test pins that the action is
+    refused.
+3. **Refuse cross-origin requests on an open port.** With no token set, both
+    servers pass every request, the engine allows all origins and
+    private-network CORS, and the JSON handlers do not check `Content-Type`, so
+    a page in a browser on the network can post to the library and engine
+    routes. With no token set, refuse a request whose `Origin` does not match
+    its `Host` (a request without `Origin`, such as a media server's webhook or
+    a script, is unchanged), and drop the permissive CORS. The threat model
+    gains the browser actor. Tests pin the refusal and the unchanged cases.
+4. **Keep tracker passkeys out of stubs.** Each stub stores the request's magnet
+    or the `.torrent`'s announce list, passkeys included, at mode 0644, and
+    nothing reads the field. A new stub carries the bare info hash only. An
+    opt-in scrub, run by the owner, rewrites existing stubs and restores each
+    file's mtime, so the media server sees no change. Confirm first that no
+    external tool reads the field.
+5. **Tell "engine not ready" from "not stored".** A wake before the engine is up
+    is reported as not stored, recorded as `not_stored` and latched by the
+    warmer, which can tell an operator to re-add a healthy torrent. It gets its
+    own error that records and latches nothing, and the fixed start-up sleep
+    becomes a bounded wait for readiness. The start-up warning that says an
+    unstored torrent is re-added from its bare magnet is corrected.
+6. **Keep a torrent when a stub could not be read.** The check whether a torrent
+    is still used skips a stub it cannot read, so removing one episode can drop
+    the record its sibling episodes still need. An unreadable stub keeps the
+    torrent; a test injects the read error.
+7. **Report what nothing links to.** The library list says whether a library
+    symlink points at each stub (true, false, or null before the first walk),
+    with a count gauge, and the audit lists engine records no stub uses. Report
+    only: what to remove stays the deployment's decision. The new fields are
+    additive.
+8. **One fuzzy matcher for play and stop.** The webhook handler carries the same
+    fuzzy pass twice and logs every registered path at INFO on each play.
+    Extract one tie-finding function with table tests, log the registry at
+    DEBUG, and cache a webhook's IMDb id only on an exact match.
+9. **Evict to a low-water mark, and fuzz the bencode decoder.** At quota,
+    eviction frees exactly enough, so every new head walks the cache directory
+    again; evict a little under the quota instead. The hand-written bencode
+    decoder that parses tracker responses gets a fuzz target seeded from its
+    test vectors.
+
 ## Done
 
 - 2026-11-11, trim step 1: telemetry, the update check, the MCP server and
