@@ -22,6 +22,7 @@ import (
 	"flodni/internal/gostorm/torr/storage/torrstor"
 	"flodni/internal/gostorm/torr/utils"
 	"flodni/internal/gostorm/version"
+	"flodni/internal/redact"
 )
 
 type BTServer struct {
@@ -221,6 +222,8 @@ func (bt *BTServer) configure(ctx context.Context) {
 	cliVers := userAgent
 
 	bt.config.Debug = settings.BTsets.EnableDebug
+	// The engine's lines carry tracker URLs; this routes them through the redactor.
+	bt.config.Logger = engineLogger()
 	bt.config.DisableIPv6 = !settings.BTsets.EnableIPv6
 	bt.config.DisableTCP = settings.BTsets.DisableTCP
 	bt.config.DisableUTP = settings.BTsets.DisableUTP
@@ -322,7 +325,7 @@ func (bt *BTServer) configure(ctx context.Context) {
 		log.Println("Proxy configuration error:", err)
 	}
 
-	log.Println("Client config:", settings.BTsets)
+	log.Println("Client config:", redact.String(fmt.Sprint(settings.BTsets))) // BlockListURL may hold a key
 
 	var err error
 
