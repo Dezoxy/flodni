@@ -70,8 +70,11 @@ their URL, replaces a `torrs://` link whole, and masks stray
 `passkey=`-style values. It is applied at the add API (the link and its parse
 and add errors), the wake and activation failure lines, the discovery boost's
 announce failures and, through the engine client's logger, every line the
-engine writes, including the debug lines `EnableDebug` turns on. The tracker
-scrape has its own cleaner for what a tracker sends back. Not covered: lines
+engine writes, including the debug lines `EnableDebug` turns on. The Plex
+library refresh puts `X-Plex-Token` in its request URL, and `net/http` errors embed
+the URL, so that error is redacted where it is built and again where it is logged.
+The engine's `Client config:` line is redacted too (`BlockListURL` can hold a key).
+The tracker scrape has its own cleaner for what a tracker sends back. Not covered: lines
 of code that does not go through these paths, such as a new `log` call that
 prints a link directly; the redactor is a net, not a license to log URLs.
 

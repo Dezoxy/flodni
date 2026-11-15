@@ -22,6 +22,7 @@ import (
 	"flodni/internal/gostorm/torr/storage/torrstor"
 	"flodni/internal/gostorm/torr/utils"
 	"flodni/internal/gostorm/version"
+	"flodni/internal/redact"
 )
 
 type BTServer struct {
@@ -324,7 +325,7 @@ func (bt *BTServer) configure(ctx context.Context) {
 		log.Println("Proxy configuration error:", err)
 	}
 
-	log.Println("Client config:", settings.BTsets)
+	log.Println("Client config:", redact.String(fmt.Sprint(settings.BTsets))) // BlockListURL may hold a key
 
 	var err error
 

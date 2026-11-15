@@ -3,6 +3,7 @@ package torr
 import (
 	"bytes"
 	"context"
+	stdlog "log"
 	"strings"
 	"testing"
 
@@ -52,5 +53,35 @@ func TestConfigureRoutesEngineLogs(t *testing.T) {
 	bt.configure(context.Background())
 	if bt.config.Logger.IsZero() {
 		t.Fatal("the engine client config has no Logger, so it logs through the library default")
+	}
+}
+
+// "Client config:" prints every setting; BlockListURL is a URL a user may have put a
+// key in.
+func TestClientConfigLineHoldsNoBlocklistKey(t *testing.T) {
+	prev, prevArgs, prevIP := settings.BTsets, settings.Args, settings.PubIPv4
+	prevW, prevF := stdlog.Writer(), stdlog.Flags()
+	var buf bytes.Buffer
+	stdlog.SetOutput(&buf)
+	t.Cleanup(func() {
+		settings.BTsets, settings.Args, settings.PubIPv4 = prev, prevArgs, prevIP
+		stdlog.SetOutput(prevW)
+		stdlog.SetFlags(prevF)
+	})
+	settings.Args = &settings.ExecArgs{}
+	settings.PubIPv4 = "93.184.216.34"
+	settings.BTsets = &settings.BTSets{CacheSize: 1 << 20, ConnectionsLimit: 5,
+		BlockListURL: "https://lists.example/u/BLOCKKEY0123/list.gz?apikey=BLOCKKEY0123"}
+
+	NewBTS().configure(context.Background())
+	out := buf.String()
+	if !strings.Contains(out, "Client config:") {
+		t.Fatalf("no config line: %q", out)
+	}
+	if strings.Contains(out, "BLOCKKEY0123") {
+		t.Errorf("config line holds the blocklist key:\n%s", out)
+	}
+	if !strings.Contains(out, "lists.example") {
+		t.Errorf("config line lost the blocklist host:\n%s", out)
 	}
 }
