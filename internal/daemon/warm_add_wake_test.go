@@ -31,3 +31,16 @@ func TestWakeStoredDepMapsNotStoredToTheWarmerSentinel(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+// A wake before the engine is up is not a refusal: the warmer must see it as a plain
+// (busy) error, so it latches nothing.
+func TestWakeStoredDepLeavesEngineNotReadyUnlatched(t *testing.T) {
+	old := warmWake
+	t.Cleanup(func() { warmWake = old })
+	deps := addWarmerDeps(nil, nil)
+	warmWake = func(context.Context, string) error { return fmt.Errorf("add: %w", native.ErrEngineNotReady) }
+	err := deps.WakeStored(context.Background(), "aa")
+	if !errors.Is(err, native.ErrEngineNotReady) || errors.Is(err, warmer.ErrNotStored) {
+		t.Fatalf("err = %v, want engine-not-ready, not warmer.ErrNotStored", err)
+	}
+}

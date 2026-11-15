@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sync/atomic"
 	"syscall"
 	"testing"
 	"time"
@@ -241,5 +242,89 @@ func TestOtherWakeErrorsAreNotLatchedAndNotASwarmFailure(t *testing.T) {
 	}
 	if rows := records(t, db); len(rows) != 0 {
 		t.Errorf("records = %+v, want none", rows)
+	}
+}
+
+// A wake before the engine is up is transient: the read answers the same EIO, but
+// the handle is not latched, nothing reaches the readability record, no refusal is
+// counted and a read after the engine is up wakes as usual.
+func TestEngineNotReadyReadIsTransientAndRecordsNothing(t *testing.T) {
+	newTestApp(t)
+	fe, db, s, h, _ := refusedEnv(t, false)
+	var ready atomic.Bool
+	fe.wakeFn = func(context.Context, string, int) error {
+		if !ready.Load() {
+			return fmt.Errorf("add torrent: %w", native.ErrEngineNotReady)
+		}
+		return nil
+	}
+	refused := wakeRefusedCount.Load()
+
+	for i := range 2 {
+		res, errno := h.Read(context.Background(), make([]byte, 256*1024), wireOff)
+		if res != nil || errno != syscall.EIO {
+			t.Fatalf("read %d = (%v, %v), want (nil, EIO)", i, res, errno)
+		}
+	}
+	settled(t)
+	if h.wakeRefused.Load() {
+		t.Fatal("engine not ready latched the handle")
+	}
+	if fe.wakeCount() != 2 {
+		t.Errorf("wakes = %d, want 2 (not latched, the second read asks again)", fe.wakeCount())
+	}
+	if got := wakeRefusedCount.Load() - refused; got != 0 {
+		t.Errorf("flodni_wake_refused_total rose by %d, want 0", got)
+	}
+	if s.readFailed.Load() || s.failedReads.Load() != 0 {
+		t.Errorf("session marked a failed read")
+	}
+	if rows := records(t, db); len(rows) != 0 {
+		t.Fatalf("records = %+v, want none", rows)
+	}
+
+	// After the engine is up the same handle wakes as usual.
+	ready.Store(true)
+	h.Read(context.Background(), make([]byte, 256*1024), wireOff+4*mb)
+	settled(t)
+	if h.wakeRefused.Load() {
+		t.Error("a wake after ready was refused")
+	}
+	if rows := records(t, db); len(rows) != 0 {
+		for _, r := range rows {
+			if r.LastReason == "not_stored" {
+				t.Errorf("record %+v marked not_stored", r)
+			}
+		}
+	}
+}
+
+func TestNoteEngineNotReadyIsRateLimited(t *testing.T) {
+	engineNotReadyLast.Store(0)
+	t.Cleanup(func() { engineNotReadyLast.Store(0) })
+	if !noteEngineNotReady("/m/a.mkv", "read") {
+		t.Fatal("the first call must log")
+	}
+	if noteEngineNotReady("/m/b.mkv", "open") {
+		t.Fatal("a second call within the window must not log")
+	}
+}
+
+func TestOpenBeforeTheEngineIsUpRecordsNothing(t *testing.T) {
+	fe := useEngineReadPath(t)
+	fe.wakeFn = func(context.Context, string, int) error { return native.ErrEngineNotReady }
+	db := readabilityEnv(t, 0, false)
+	url := "http://127.0.0.1:8090/stream?link=" + rHash + "&index=1&play"
+	n := &VirtualMkvNode{vMeta: &vfs.Metadata{URL: url, Path: filepath.Join(t.TempDir(), "x.mkv"), Size: 1 << 20}, wake: fe.Wake}
+	before := wakeRefusedCount.Load()
+	_, _, errno := n.Open(context.Background(), 0)
+	if errno != syscall.EIO {
+		t.Fatalf("Open = %v, want EIO", errno)
+	}
+	if wakeRefusedCount.Load() != before {
+		t.Error("an engine not ready was counted as a refused wake")
+	}
+	if rows := records(t, db); len(rows) != 0 {
+		t.Fatalf("records = %+v, want none", rows)
 	}
 }

@@ -360,3 +360,51 @@ func TestSkippedSaveDoesNotDebounceTheNextOne(t *testing.T) {
 		t.Fatal("the re-added torrent was not saved: a skipped save stamped the debounce")
 	}
 }
+
+// A wake before the engine is up is ErrEngineNotReady, never ErrNotStored: it says
+// nothing about the hash, and nothing is added.
+func TestLoadStoredBeforeTheEngineIsUpIsNotReadyNotUnstored(t *testing.T) {
+	warmupFixture(t)
+	a := useFakeAdder(t, false)
+	InitApiHelper(nil)
+	_, err := LoadStored(lifeHash(1).HexString())
+	if !errors.Is(err, ErrEngineNotReady) {
+		t.Fatalf("LoadStored = %v, want ErrEngineNotReady", err)
+	}
+	if errors.Is(err, ErrNotStored) {
+		t.Fatal("ErrEngineNotReady must not match ErrNotStored")
+	}
+	if a.calls.Load() != 0 {
+		t.Fatalf("the adder was called %d times, want 0", a.calls.Load())
+	}
+}
+
+func TestWaitSignalReturnsAtReadyAndAtTheBound(t *testing.T) {
+	ready := make(chan struct{})
+	start := time.Now()
+	if waitSignal(ready, 50*time.Millisecond) {
+		t.Fatal("waitSignal = true before ready")
+	}
+	if time.Since(start) < 40*time.Millisecond {
+		t.Fatal("waitSignal returned before the bound")
+	}
+	go func() { time.Sleep(20 * time.Millisecond); close(ready) }()
+	start = time.Now()
+	if !waitSignal(ready, 10*time.Second) {
+		t.Fatal("waitSignal = false after ready")
+	}
+	if time.Since(start) > 5*time.Second {
+		t.Fatal("waitSignal waited for the bound although ready")
+	}
+	if !waitSignal(ready, 0) {
+		t.Fatal("an already-ready signal must return true at once")
+	}
+}
+
+func TestMarkEngineReadyIsOnceAndWaitSeesIt(t *testing.T) {
+	markEngineReady()
+	markEngineReady() // closing twice must not panic
+	if !WaitEngineReady(0) {
+		t.Fatal("WaitEngineReady = false after markEngineReady")
+	}
+}
