@@ -79,6 +79,20 @@ What this does not cover:
 - The engine can print a link or tracker URL in its own log lines. Redacting
   those is separate work and not done here.
 
+## Foreign trackers in private torrents
+
+A private torrent's own `.torrent` file can carry a second tracker that is not
+the torrent's (a cross-upload, with someone else's key). The engine stores it in
+the torrent's record in `config.db` and announces to it on every wake, which
+sends the info hash to a tracker outside the torrent's own. Find them with
+`flodni trackers audit` and remove a host with
+`flodni trackers remove-host <host>` (try `--dry-run` first). Stop flodni and copy
+`config.db` before either; see "Foreign trackers in stored records" in the README
+for the flags and the approximate own-domain rule. The commands print hosts and
+info hashes only, never a tracker URL or passkey. Removal is owner-triggered; the
+daemon never does it by itself, and a removed host stays removed unless the
+torrent is added again with it.
+
 ## Secrets
 
 The repository holds no secrets; `config.json` is ignored by git and
