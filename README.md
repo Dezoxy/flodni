@@ -180,6 +180,40 @@ arrives), so the counter, not the add response, is where a failed save shows.
 To back it up, stop flodni and copy `config.db`: a cold copy is the safe one.
 To restore, stop flodni, copy `config.db` back and start it.
 
+### Foreign trackers in stored records
+
+Some private trackers' own `.torrent` files carry a second tracker that is not
+theirs (a cross-upload, with someone else's key). It is stored in the record, and
+every wake announces to it. Two offline commands show and remove them. Both open
+`config.db` directly, so **stop flodni first**; if the file is locked they exit 2
+with "config.db is in use: stop flodni first". **Copy `config.db` before running
+`remove-host`.** Pass the engine's state directory with `--state` (the daemon's
+`--path`; without it the binary's directory). Run them as the daemon's user;
+root needs `--allow-root`. They never print a tracker URL, path, query or
+passkey, only hosts and info hashes.
+
+```
+flodni trackers audit [--hashes] [--json] [--state <dir>]
+flodni trackers remove-host [--dry-run] [--hashes] [--state <dir>] <host>
+```
+
+- `audit` is read-only. Per record, the primary tracker is the first tracker of
+  the first tier; its own domain is the last two labels of its host (three under
+  a built-in list of common two-label suffixes such as `co.uk`, `org.uk` and
+  `com.hu`). Every other host in the record is foreign. It prints one line per
+  foreign host, `host  records=N  private=N`, most records first, then a summary
+  `scanned= private= public= foreign_records=`. A record whose metainfo is
+  missing or unreadable counts as private. The domain rule is an approximation,
+  not the Public Suffix List: a suffix missing from the list makes its hosts look
+  like one domain, so a foreign host there can be missed.
+- `remove-host <host>` removes every tracker with that host (case-insensitive,
+  trailing dot ignored) from every record, drops tiers left empty and keeps the
+  order of the rest. Nothing else in the record changes; each changed record is
+  one fsynced transaction. It refuses (exit 2, nothing written) when the host is
+  the primary tracker of any record it would touch. `--dry-run` writes nothing and
+  prints the same summary, `records_changed= trackers_removed= private= public=`.
+  The flags go before the host.
+
 ## Startup report
 
 Once the FUSE mount is up and the startup walk with its prunes has finished, the
