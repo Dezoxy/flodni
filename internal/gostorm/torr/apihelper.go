@@ -127,7 +127,8 @@ func SaveTorrentToDB(torr *Torrent) {
 	}
 }
 
-// saveTorrentToDB reports whether it wrote the record.
+// saveTorrentToDB reports whether it wrote the record; false when it was skipped or the
+// commit failed.
 func saveTorrentToDB(torr *Torrent) bool {
 	// V255: Persist metadata InfoBytes to DB for instant re-activation.
 	// Without this, TorrentSpec.InfoBytes stays nil (from original magnet parse),
@@ -177,7 +178,11 @@ func saveIfHeld(torr *Torrent, posterOK bool) bool {
 		return false
 	}
 	log.TLogln("save to db:", hash)
-	AddTorrentDB(torr, posterOK)
+	if err := AddTorrentDB(torr, posterOK); err != nil {
+		// Not saved: the caller must not stamp the debounce, so the next save retries.
+		log.TLogln("save to db failed, will retry:", hash)
+		return false
+	}
 	return true
 }
 
@@ -323,7 +328,9 @@ func updateRecord(hash metainfo.Hash, title, poster, category, data string, post
 	if data != "" {
 		rec.Data = data
 	}
-	AddTorrentDB(rec, posterOK)
+	if err := AddTorrentDB(rec, posterOK); err != nil {
+		log.TLogln("update record: not saved:", hash)
+	}
 	return rec
 }
 
@@ -339,7 +346,9 @@ func removeUnderLock(hash metainfo.Hash) bool {
 	btsMu.RLock()
 	defer btsMu.RUnlock()
 	removed := engineRemove(bts, hash)
-	RemTorrentDB(hash)
+	if err := RemTorrentDB(hash); err != nil {
+		log.TLogln("remove record: not removed:", hash)
+	}
 	lastSaveTimes.Delete(hash)
 	return removed
 }
