@@ -177,8 +177,52 @@ once per torrent per 30 s and skipped when the record is unchanged; the
 idle-close save and a record update are not debounced. Watch the first-byte
 and wake metrics after upgrading.
 
+A commit that fails (a full disk, an I/O error) is not saved: the wake save
+then reports "not saved" and does not start its 30 s debounce, so the next
+save retries the record at once, and a removal that failed leaves the record in
+place. Every failure is logged and counted in
+`flodni_engine_db_write_errors_total{op}` (`set`, `rem` or `clear`, all present
+from 0). Alert on any increase: a record that did not commit exists only in
+memory and is lost at the next restart. A torrent added through the API is
+answered before its record is written (the save runs after the metadata
+arrives), so the counter, not the add response, is where a failed save shows.
+
 To back it up, stop flodni and copy `config.db`: a cold copy is the safe one.
 To restore, stop flodni, copy `config.db` back and start it.
+
+### Foreign trackers in stored records
+
+Some private trackers' own `.torrent` files carry a second tracker that is not
+theirs (a cross-upload, with someone else's key). It is stored in the record, and
+every wake announces to it. Two offline commands show and remove them. Both open
+`config.db` directly, so **stop flodni first**; if the file is locked they exit 2
+with "config.db is in use: stop flodni first". **Copy `config.db` before running
+`remove-host`.** Pass the engine's state directory with `--state` (the daemon's
+`--path`; without it the binary's directory). Run them as the daemon's user;
+root needs `--allow-root`. They never print a tracker URL, path, query or
+passkey, only hosts and info hashes.
+
+```
+flodni trackers audit [--hashes] [--json] [--state <dir>]
+flodni trackers remove-host [--dry-run] [--hashes] [--state <dir>] <host>
+```
+
+- `audit` is read-only. Per record, the primary tracker is the first tracker of
+  the first tier; its own domain is the last two labels of its host (three under
+  a built-in list of common two-label suffixes such as `co.uk`, `org.uk` and
+  `com.hu`). Every other host in the record is foreign. It prints one line per
+  foreign host, `host  records=N  private=N`, most records first, then a summary
+  `scanned= private= public= foreign_records=`. A record whose metainfo is
+  missing or unreadable counts as private. The domain rule is an approximation,
+  not the Public Suffix List: a suffix missing from the list makes its hosts look
+  like one domain, so a foreign host there can be missed.
+- `remove-host <host>` removes every tracker with that host (case-insensitive,
+  trailing dot ignored) from every record, drops tiers left empty and keeps the
+  order of the rest. Nothing else in the record changes; each changed record is
+  one fsynced transaction. It refuses (exit 2, nothing written) when the host is
+  the primary tracker of any record it would touch. `--dry-run` writes nothing and
+  prints the same summary, `records_changed= trackers_removed= private= public=`.
+  The flags go before the host.
 
 ## Startup report
 
@@ -1206,6 +1250,95 @@ renamed and its registry row is never re-keyed, and stubs are found by the
   the old form keeps them: an add finds the row by the old key when the new one
   has none, and replaces it in place.
 
+## Engine add semantics
+
+An add through the engine (`POST /torrents`, `/stream`, `/torrent/upload`, and
+the library's add and inspect, which call `POST /torrents`) starts from the
+link or file it was given, and for a hash the engine already stores it
+restores the stored metainfo and peers. Trackers follow hard rule 3:
+
+- **Stored, not known public** (a private torrent, or a record without
+  metainfo): the request's trackers are ignored and the record's own are used.
+  The log line carries a count only, since tracker URLs carry passkeys.
+- **Stored and known public:** the request's trackers are merged with the
+  record's, as before.
+- **Already held in memory and not known public:** the add gives the live
+  torrent no tracker.
+- **Re-adding with new trackers** is remove, then add.
+
+## Stub contents and the stub scrub
+
+A stub is a small JSON file: `url` (the engine's stream link, which carries the
+info hash and the file index), `size`, `imdb` and `magnet`, written with sorted
+keys. The `magnet` is always the bare `magnet:?xt=urn:btih:<40-hex info hash>`:
+no `tr=`, `dn=` or `xs=`. A request's magnet, or the announce list of an
+uploaded `.torrent`, goes to the engine and no further, because a private
+tracker's announce URL carries the account's passkey. Nothing reads the stub's
+magnet back (a wake takes the hash from the stream link and the engine's stored
+record). The one indirect reader is the id lookup described under the scrub:
+a stub with no `imdb` field gets its id from a regex over the whole file, so an
+id that only an old `dn=` held is not carried by a new stub.
+`library.WriteStub` takes the hash, not a magnet,
+so no add path (magnet, `.torrent`, pack, replace) can write a tracker. Stubs
+are written with mode 0644, as before.
+
+Stubs written by older versions may still hold the full magnet. `flodni
+scrub-stubs [--dry-run] [--allow-root] <source_path>` rewrites those once, on
+request; the daemon never does it on its own. `source_path` is required and is
+the directory the daemon is given as its source (it holds `movies/` and `tv/`),
+not the mount path. It is not read from `config.json`, because the daemon's own
+command-line source wins over the config and the two can differ. Flags go
+before the path: a flag after it is refused, never ignored.
+
+- **What it changes.** Only the `magnet` field, rebuilt from the hash the old
+  one carried. Every other field and its bytes stay as written, because the
+  rewrite goes through the stub encoder and a stub the encoder would not
+  reproduce byte for byte is left alone and reported. A line-based legacy stub
+  has only its magnet line replaced.
+- **What it leaves.** A stub is clean only when its magnet is exactly
+  `magnet:?xt=urn:btih:<40 lowercase hex>`, or empty; it is not written. A
+  stub with no `imdb` field whose old magnet holds an IMDb-looking id
+  (`tt` and 7 to 10 digits) is left alone and counted skipped, because the
+  reader finds that stub's id by a regex over the whole file, magnet included,
+  and a rewrite would lose it. A line-based stub whose third line is not a
+  magnet is reported. Files that are not stubs (not JSON or line format with an
+  `http(s)` link and a size, or larger than 64 KiB), symlinks and non-`.mkv`
+  files are never written or followed.
+- **mtime guarantee.** Each rewrite is one new file in the stub's directory
+  that already has the stub's mode, owner, atime and mtime (set on the file
+  before it replaces the stub), renamed over the stub after a last check that
+  the stub is still the file that was read. The stub never exists with another
+  mtime, which matters because the mount reports it to the media server and a
+  change makes it rescan. Nothing touches the final path after the rename. The
+  owner is set by the scrub, not by `atomicfile`: when it cannot be set (a
+  non-root run over files of another user) that stub is reported, not rewritten.
+- **Dry run.** `--dry-run` writes nothing; `rewritten` counts the stubs a real
+  run would rewrite.
+- **Output and exit codes.** One line, `scrub-stubs: scanned=N rewritten=N
+  skipped=N errors=N`, and one `scrub-stubs: <path>: <reason>` line per error
+  on stderr, with a fixed reason. It never prints a magnet or a URL. Exit 0:
+  stubs were scanned and nothing failed. Exit 1: at least one stub was
+  reported. Exit 2: a bad invocation (a flag after the path, no or several
+  paths), neither `movies/` nor `tv/` under the path, a run as root without
+  `--allow-root`, or no stub scanned at all (which also catches the mount path
+  given by mistake).
+- **Run it as the daemon's user.** As root it refuses unless `--allow-root` is
+  given: a root run over a tree another user can write is the case to avoid. For
+  example `docker exec --user <daemon uid> <container> flodni scrub-stubs
+  /path/to/source`.
+- **With the daemon running.** Safe, with one small window. A stub the daemon
+  removed, replaced or rewrote since the scrub read it (a different inode, size
+  or mtime) is skipped and never recreated or overwritten; that check runs
+  immediately before the rename. The check and the rename are two steps, so a
+  removal or a replace in between is still lost to the scrub. The only way to
+  close it is to stop the daemon first, which is the recommended way for a
+  library that is being changed.
+
+The engine's own record of a torrent (its saved `config.db` entry) holds the
+magnet or `.torrent` it was added with, trackers included: a closed torrent
+wakes from it. After the scrub it is the only copy of a private torrent's
+trackers, so back it up. No library route returns it.
+
 ## Removing a title
 
 `POST /api/library/remove` takes a `path` or a `hash`. A hash removes every
@@ -1795,6 +1928,18 @@ both formats; `[DeadSwarm]` and `[TTFF]` wording is not a contract. The
 GoStorm engine's own log lines still use the standard logger, so they keep
 their old shape in both formats.
 
+**Tracker credentials in logs.** A private tracker's announce URL carries the
+user's passkey, in its path, its query or its userinfo, and a magnet carries it
+in `tr=` and `xs=`. Every log line that can hold a link, a magnet, an error built
+from one or an announce URL goes through one redactor (`internal/redact`), which
+keeps `scheme://host[:port]` and replaces the rest with `/<redacted>`: the add
+line prints `add torrent https://tracker.example/<redacted>`, a failed announce
+says which tracker failed and why. This covers the add API, the wake and
+activation errors, the discovery boost's failure list and all of the engine's
+own log lines, the debug ones included (the engine's `EnableDebug` setting
+logs every announce, with its URL, redacted). A `torrs://` link is replaced
+whole, since it packs the trackers.
+
 The conversion from `log.Printf` is `scripts/slogify` (see its README); it
 can be run again on a newer tree.
 
@@ -1889,6 +2034,7 @@ scraper on the same host or Docker network.
 | `flodni_engine_short_reads_total` | counter | `path` | Engine reads that ended short and were reported as success: `stream` (the sequential reader) or `fetch` (the stateless block fetch behind the FUSE fallback). 0 from start. |
 | `flodni_engine_short_read_repairs_total` | counter | `result` | Outcome of the stream reader's refill loop, per read that needed it: `repaired` after a reconnect, `unfilled` when a gap stayed. |
 | `flodni_engine_peer_redials_total` | counter | none | Peers the opt-in redial (`redial_dropped_peer`) added back to a private torrent after its only connected peer dropped. 0 with the switch off. See Engine stall gaps. |
+| `flodni_engine_db_write_errors_total` | counter | `op` | Engine database (`config.db`) commits that failed, by `op`: `set` (a record save), `rem` (a removal) or `clear`. Each is a record not saved or not removed; alert on any increase. All three present from 0. See Engine state and backup. |
 | `flodni_engine_hedge_triggers_total` | counter | none | Tail-hedge duplicate requests the engine fired. A process counter: unlike `hedge_trigger_count` in `/metrics`, it does not fall when a torrent expires. |
 | `flodni_engine_peer_ejects_total` | counter | `transport` | Outlier peers the engine dropped for a rate far under the swarm median, `tcp` or `utp`. Process counter. |
 | `flodni_engine_peer_churn_drops_total` | counter | `transport` | Peers dropped by the warmup-probe churn, `tcp` or `utp`. Process counter. |

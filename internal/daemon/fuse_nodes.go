@@ -6,6 +6,7 @@ import (
 	"flodni/internal/gostorm/native"
 	"flodni/internal/gostorm/web"
 	"flodni/internal/library"
+	"flodni/internal/redact"
 	"flodni/internal/registry"
 	"flodni/internal/vfs"
 	"flodni/internal/warmup"
@@ -644,7 +645,7 @@ func (n *VirtualMkvNode) Open(ctx context.Context, flags uint32) (fs.FileHandle,
 						noteEngineNotReady(n.vMeta.Path, "open (background)")
 						return
 					}
-					logger.Info(fmt.Sprintf("[VFS] background activation failed for %s: %v", n.vMeta.Path, err), "path", n.vMeta.Path, "err", err)
+					logActivationFailed("background activation", n.vMeta.Path, err)
 				}
 			})
 		} else {
@@ -661,7 +662,7 @@ func (n *VirtualMkvNode) Open(ctx context.Context, flags uint32) (fs.FileHandle,
 				// A panicking activation must fail the Open, not take the process down.
 				defer func() {
 					if r := recover(); r != nil {
-						logger.Error(fmt.Sprintf("[PANIC] wake goroutine recovered for %s: %v\n%s", magnetCandidate, r, debug.Stack()), "magnet_candidate", magnetCandidate, "r", r)
+						logWakePanic(magnetCandidate, r, debug.Stack())
 						activated <- fmt.Errorf("activation panicked: %v", r)
 					}
 				}()
@@ -682,7 +683,7 @@ func (n *VirtualMkvNode) Open(ctx context.Context, flags uint32) (fs.FileHandle,
 						noteEngineNotReady(n.vMeta.Path, "open")
 						return nil, 0, syscall.EIO
 					}
-					logger.Info(fmt.Sprintf("[VFS] activation failed for %s: %v", n.vMeta.Path, err), "path", n.vMeta.Path, "err", err)
+					logActivationFailed("activation", n.vMeta.Path, err)
 					return nil, 0, syscall.EIO
 				}
 			case <-ctx.Done():
@@ -864,4 +865,18 @@ func getOrReadMeta(path string) (*vfs.Metadata, error) {
 func isStubPath(fullPath string) bool {
 	base := filepath.Base(fullPath)
 	return len(base) > len(".mkv") && strings.HasSuffix(base, ".mkv")
+}
+
+// logActivationFailed logs a failed wake. The error comes from the engine and can
+// carry a link, so it is redacted: a private tracker's announce URL is a credential.
+func logActivationFailed(what, path string, err error) {
+	msg := redact.Err(err)
+	logger.Info(fmt.Sprintf("[VFS] %s failed for %s: %s", what, path, msg), "path", path, "err", msg)
+}
+
+// logWakePanic logs a recovered wake panic. The magnet is the stored link and can hold
+// tracker URLs with a passkey, so it is redacted, as is the panic value.
+func logWakePanic(magnet string, r any, stack []byte) {
+	safeMagnet, val := redact.String(magnet), redact.String(fmt.Sprint(r))
+	logger.Error(fmt.Sprintf("[PANIC] wake goroutine recovered for %s: %s\n%s", safeMagnet, val, stack), "magnet_candidate", safeMagnet, "r", val)
 }

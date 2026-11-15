@@ -9,3 +9,19 @@ f69b768a325f2f3222cb4a223e9557c784ee7c1e:internal/library/audio_test.go:generic-
 # Fake fixtures in the tracker scrape tests, replaced by low-entropy values
 80c81733f303eec2ba7a0e3ede21bedca853e066:internal/daemon/tracker_scrape_test.go:generic-api-key:334
 80c81733f303eec2ba7a0e3ede21bedca853e066:internal/scrape/scraper_test.go:generic-api-key:468
+# Fake passkeys in the stub scrub and stub privacy tests (#207): the privacy test needs a long hex
+# passkey to detect leaks, so the values stay as they are and only these two lines are ignored.
+85a877156b85b442507824f863172365bcd20015:internal/daemon/scrub_stubs_test.go:generic-api-key:21
+85a877156b85b442507824f863172365bcd20015:internal/library/stub_privacy_test.go:generic-api-key:12
+# Fake passkeys and tokens in the log-redaction tests (#211): each test asserts the value is
+# removed from a log line, so it must look like a real secret; only these lines are ignored.
+12f9866f879611f4013332f4f7c4f0342c54e1d9:internal/daemon/wake_log_redact_test.go:generic-api-key:16
+12f9866f879611f4013332f4f7c4f0342c54e1d9:internal/gostorm/torr/enginelog_test.go:generic-api-key:18
+12f9866f879611f4013332f4f7c4f0342c54e1d9:internal/gostorm/web/api/torrents_test.go:generic-api-key:67
+12f9866f879611f4013332f4f7c4f0342c54e1d9:internal/redact/redact_test.go:generic-api-key:14
+12f9866f879611f4013332f4f7c4f0342c54e1d9:internal/tuner/failures_redact_test.go:generic-api-key:11
+a3f2e282f52cd6ef25594fd78d2441b0d7a491e0:internal/catalog/mediaserver/client_redact_test.go:generic-api-key:13
+a3f2e282f52cd6ef25594fd78d2441b0d7a491e0:internal/library/refresh_log_test.go:generic-api-key:38
+# Fake passkeys in the trackers CLI tests (#215): each asserts the passkey is never printed,
+# so it must look real; only these lines are ignored.
+32d659354b5e132d239d86b9e843d779abfd7097:internal/daemon/trackers_cli_test.go:generic-api-key:22

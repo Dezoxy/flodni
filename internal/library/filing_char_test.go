@@ -108,10 +108,10 @@ var movieTorrent = []FileStat{
 
 func TestWriteStubWritesKeySortedJSONWithEscapedAmpersands(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "sub", "x.mkv")
-	if err := WriteStub(path, "http://e/stream?link=h&index=2&play", 1234, "magnet:?xt=urn:btih:h&dn=x", "tt0000001"); err != nil {
+	if err := WriteStub(path, "http://e/stream?link=h&index=2&play", 1234, charHash, "tt0000001"); err != nil {
 		t.Fatal(err)
 	}
-	want := jsonAmp(`{"imdb":"tt0000001","magnet":"magnet:?xt=urn:btih:h&dn=x","size":1234,"url":"http://e/stream?link=h&index=2&play"}`)
+	want := jsonAmp(`{"imdb":"tt0000001","magnet":"magnet:?xt=urn:btih:` + charHash + `","size":1234,"url":"http://e/stream?link=h&index=2&play"}`)
 	if got := readFile(t, path); got != want {
 		t.Fatalf("stub bytes\n got %s\nwant %s", got, want)
 	}
@@ -123,7 +123,7 @@ func TestWriteStubWritesKeySortedJSONWithEscapedAmpersands(t *testing.T) {
 func TestReadStubParsesJSONAndLegacyForms(t *testing.T) {
 	dir := t.TempDir()
 	jsonStub := filepath.Join(dir, "j.mkv")
-	if err := WriteStub(jsonStub, "http://e/stream?link="+strings.ToUpper(charHash)+"&index=7&play", 99, "m", "tt1234567"); err != nil {
+	if err := WriteStub(jsonStub, "http://e/stream?link="+strings.ToUpper(charHash)+"&index=7&play", 99, charHash, "tt1234567"); err != nil {
 		t.Fatal(err)
 	}
 	if got, want := readStubOnly(jsonStub), (stub{Size: 99, Hash: charHash, IMDB: "tt1234567", FileIndex: 7}); got != want {
@@ -179,9 +179,9 @@ func TestMovieAddWritesOneStubForTheLargestVideoFile(t *testing.T) {
 	if got := mkvs(t, e.movies); !reflect.DeepEqual(got, []string{name}) {
 		t.Fatalf("movies dir = %v", got)
 	}
-	// The trailing slash of GoStormURL is trimmed; the magnet is the bare hash plus the title.
+	// The trailing slash of GoStormURL is trimmed; the magnet is the bare hash, no title.
 	wantBytes := jsonAmp(`{"imdb":"tt1375666","magnet":"magnet:?xt=urn:btih:` + charPackHash +
-		`&dn=Inception","size":8589934592,"url":"http://engine/stream?link=` + charPackHash +
+		`","size":8589934592,"url":"http://engine/stream?link=` + charPackHash +
 		`&index=2&play"}`)
 	if got := readFile(t, path); got != wantBytes {
 		t.Fatalf("stub bytes\n got %s\nwant %s", got, wantBytes)
@@ -191,7 +191,7 @@ func TestMovieAddWritesOneStubForTheLargestVideoFile(t *testing.T) {
 	}
 }
 
-func TestMovieAddKeepsTheCallersMagnetVerbatim(t *testing.T) {
+func TestMovieAddWritesTheBareHashNotTheCallersMagnet(t *testing.T) {
 	e := newCharEnv(t, movieTorrent...)
 	magnet := "magnet:?xt=urn:btih:" + strings.ToUpper(charPackHash) + "&dn=Own&tr=udp%3A%2F%2Ft.example%3A1%2Fannounce"
 
@@ -203,8 +203,8 @@ func TestMovieAddKeepsTheCallersMagnetVerbatim(t *testing.T) {
 		t.Fatalf("response = %+v", resp)
 	}
 	got := readFile(t, resp.Files[0].Path)
-	if !strings.Contains(got, `"magnet":"`+jsonAmp(magnet)+`"`) {
-		t.Fatalf("stub does not carry the magnet as sent: %s", got)
+	if !strings.Contains(got, `"magnet":"magnet:?xt=urn:btih:`+charPackHash+`"`) || strings.Contains(got, "t.example") {
+		t.Fatalf("stub must carry the bare hash, not the magnet as sent: %s", got)
 	}
 	if !strings.Contains(got, `"imdb":""`) {
 		t.Fatalf("stub without an imdb id must carry an empty one: %s", got)
@@ -370,7 +370,7 @@ func TestSingleEpisodeAddWritesOneStubAndOneRegistryRow(t *testing.T) {
 	// The request's imdb id is not written: an id here takes the episode out of the
 	// webhook matcher.
 	wantBytes := jsonAmp(`{"imdb":"","magnet":"magnet:?xt=urn:btih:` + charPackHash +
-		`&dn=Marvel%27s+Show","size":2147483648,"url":"http://engine/stream?link=` + charPackHash +
+		`","size":2147483648,"url":"http://engine/stream?link=` + charPackHash +
 		`&index=2&play"}`)
 	if got := readFile(t, path); got != wantBytes {
 		t.Fatalf("stub bytes\n got %s\nwant %s", got, wantBytes)
@@ -671,7 +671,7 @@ func TestAccentedShowKeepsItsLegacyRegistryRow(t *testing.T) {
 	e := newCharEnv(t, FileStat{ID: 1, Path: "Show.S01E02.mkv", Length: 1 << 20})
 	legacy := legacyEpisodeKey("Élite", 1, 2)
 	oldPath := filepath.Join(e.tv, "Élite", "Season.01", EpisodeFilename("Élite", 1, 2, "deadbeef"))
-	if err := WriteStub(oldPath, "http://engine/stream?link="+charOtherHash, 1, "", ""); err != nil {
+	if err := WriteStub(oldPath, "http://engine/stream?link="+charOtherHash, 1, charOtherHash, ""); err != nil {
 		t.Fatal(err)
 	}
 	e.reg.rows[legacy] = metadb.EpisodeEntry{EpisodeKey: legacy, Hash: charOtherHash, FilePath: oldPath, ShowIMDB: "tt0111111"}
@@ -775,7 +775,7 @@ func scatter(t *testing.T, e *charEnv) (stubs [2]string) {
 	for i, h := range []string{oldHash, charOtherHash} {
 		ep := i + 1
 		p := filepath.Join(e.tv, "Show", "Season.01", EpisodeFilename("Show", 1, ep, h[:8]))
-		if err := WriteStub(p, e.m.streamURL(h, 1), 500, "magnet:?xt=urn:btih:"+h, ""); err != nil {
+		if err := WriteStub(p, e.m.streamURL(h, 1), 500, h, ""); err != nil {
 			t.Fatal(err)
 		}
 		key := EpisodeKey("Show", 1, ep)
@@ -903,7 +903,7 @@ func TestRemoveByHashRemovesEveryStubOfTheRelease(t *testing.T) {
 	e, files := filedPack(t)
 	// A movie stub of an unrelated release stays.
 	other := filepath.Join(e.movies, "Other_2000_1080p_deadbeef.mkv")
-	if err := WriteStub(other, e.m.streamURL(charOtherHash, 1), 1, "m", ""); err != nil {
+	if err := WriteStub(other, e.m.streamURL(charOtherHash, 1), 1, charOtherHash, ""); err != nil {
 		t.Fatal(err)
 	}
 
@@ -1033,7 +1033,7 @@ func (e *charEnv) legacyStub(t *testing.T, path, hash string) string {
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if err := WriteStub(path, e.m.streamURL(hash, 1), 1, "m", ""); err != nil {
+	if err := WriteStub(path, e.m.streamURL(hash, 1), 1, hash, ""); err != nil {
 		t.Fatal(err)
 	}
 	return path
@@ -1188,7 +1188,7 @@ func TestLegacyFallbackNeverTakesAnotherShowsRow(t *testing.T) {
 	e := newCharEnv(t, FileStat{ID: 1, Path: "Show.S01E02.mkv", Length: 1 << 20})
 	seed := func(show, key string) string {
 		p := filepath.Join(e.tv, show, "Season.01", EpisodeFilename(show, 1, 2, "deadbeef"))
-		if err := WriteStub(p, "http://engine/stream?link="+charOtherHash, 1, "", ""); err != nil {
+		if err := WriteStub(p, "http://engine/stream?link="+charOtherHash, 1, charOtherHash, ""); err != nil {
 			t.Fatal(err)
 		}
 		e.reg.rows[key] = metadb.EpisodeEntry{EpisodeKey: key, Hash: charOtherHash, FilePath: p}

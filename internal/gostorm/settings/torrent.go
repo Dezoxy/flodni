@@ -24,21 +24,25 @@ type TorrentDB struct {
 
 var mu sync.Mutex
 
-func AddTorrent(torr *TorrentDB) {
+// AddTorrent writes the record and returns the commit error: a record that did not
+// commit is not saved, and the caller must not treat it as saved.
+func AddTorrent(torr *TorrentDB) error {
 	// V270: Only write the single torrent, not the entire list.
 	// Previously this read ALL torrents, then re-wrote ALL of them (O(N) BoltDB transactions).
 	// With 520 torrents, that was 520 fsync calls per add (~5s on SD card).
 	mu.Lock()
+	defer mu.Unlock()
 	buf, err := json.Marshal(torr)
-	if err == nil {
-		key := torr.InfoHash.HexString()
-		// A wake saves the record it has just read: an identical one is not committed
-		// again, which would cost two fdatasyncs under the wake's locks.
-		if !bytes.Equal(tdb.Get("Torrents", key), buf) {
-			tdb.Set("Torrents", key, buf)
-		}
+	if err != nil {
+		return err
 	}
-	mu.Unlock()
+	key := torr.InfoHash.HexString()
+	// A wake saves the record it has just read: an identical one is not committed
+	// again, which would cost two fdatasyncs under the wake's locks.
+	if bytes.Equal(tdb.Get("Torrents", key), buf) {
+		return nil
+	}
+	return trySetOn(tdb, "Torrents", key, buf)
 }
 
 func ListTorrent() []*TorrentDB {
@@ -84,10 +88,12 @@ func GetTorrent(hash metainfo.Hash) *TorrentDB {
 	return torr
 }
 
-func RemTorrent(hash metainfo.Hash) {
+// RemTorrent removes the record and returns the commit error: a record that is still
+// there comes back on the next start.
+func RemTorrent(hash metainfo.Hash) error {
 	mu.Lock()
-	tdb.Rem("Torrents", hash.HexString())
-	mu.Unlock()
+	defer mu.Unlock()
+	return tryRemOn(tdb, "Torrents", hash.HexString())
 }
 
 // TorrentsReady says whether the torrent store is open; it opens in the engine's
