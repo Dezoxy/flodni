@@ -807,6 +807,7 @@ func Run() {
 				return server.Unmount()
 			},
 			detach:          func() error { return lazyDetach(mount) },
+			closeEngine:     torr.StopEngine,
 			restartRequired: restartRequested.Load(),
 			logf:            flog.Logf(logger),
 		}, shutdownDeadline, shutdownDetachAfter)

@@ -2,6 +2,7 @@ package settings
 
 import (
 	"sync"
+	"sync/atomic"
 
 	"flodni/internal/gostorm/log"
 )
@@ -12,6 +13,7 @@ type DBReadCache struct {
 	listCacheMutex sync.RWMutex
 	dataCache      *dataLRU
 	dataCacheMutex sync.Mutex
+	closed         atomic.Bool
 }
 
 func NewDBReadCache(db GoStormDB) GoStormDB {
@@ -23,16 +25,18 @@ func NewDBReadCache(db GoStormDB) GoStormDB {
 	return cdb
 }
 
+// CloseDB closes the database under the cache. Nothing is nilled: a call that races the
+// close still finds a valid object. After it, reads return nothing and writes are refused,
+// so the cache can neither serve a record the closed database does not hold nor keep one
+// it never stored.
 func (v *DBReadCache) CloseDB() {
+	v.closed.Store(true)
 	v.db.CloseDB()
-	v.db = nil
-	v.listCache = nil
-	v.dataCache = nil
 }
 
 func (v *DBReadCache) Get(xPath, name string) []byte {
-	if v.dataCache == nil {
-		return nil // или panic, или возвращаем ошибку
+	if v.closed.Load() {
+		return nil
 	}
 	cacheKey := v.makeDataCacheKey(xPath, name)
 
@@ -47,10 +51,6 @@ func (v *DBReadCache) Get(xPath, name string) []byte {
 	}
 	v.dataCacheMutex.Unlock()
 
-	// Если база данных закрыта, не пытаемся к ней обращаться
-	if v.db == nil {
-		return nil
-	}
 	data := v.db.Get(xPath, name)
 
 	v.dataCacheMutex.Lock()
@@ -69,9 +69,14 @@ func (v *DBReadCache) Set(xPath, name string, value []byte) {
 		}
 		return
 	}
-	// Проверяем, не закрыта ли база
-	if v.dataCache == nil || v.db == nil {
-		log.TLogln("DBReadCache.Set: no dataCache or DB is closed, cannot set", name)
+	if v.closed.Load() {
+		log.TLogln("DBReadCache.Set: DB is closed, cannot set", name)
+		return
+	}
+
+	// The cache holds committed data only: a failed commit leaves it as it was, so the
+	// next identical save differs from it and commits again.
+	if !v.commit(func(c committer) error { return c.trySet(xPath, name, value) }, func(db GoStormDB) { db.Set(xPath, name, value) }) {
 		return
 	}
 
@@ -88,12 +93,20 @@ func (v *DBReadCache) Set(xPath, name string, value []byte) {
 		delete(v.listCache, xPath)
 	}
 	v.listCacheMutex.Unlock()
+}
 
-	v.db.Set(xPath, name, value)
+// commit runs a write on the database under the cache and reports whether it committed.
+// A database that cannot report (not a committer) is assumed to have committed.
+func (v *DBReadCache) commit(try func(committer) error, plain func(GoStormDB)) bool {
+	if c, ok := v.db.(committer); ok {
+		return try(c) == nil
+	}
+	plain(v.db)
+	return true
 }
 
 func (v *DBReadCache) List(xPath string) []string {
-	if v.listCache == nil {
+	if v.closed.Load() {
 		return nil
 	}
 
@@ -103,11 +116,6 @@ func (v *DBReadCache) List(xPath string) []string {
 		return names
 	}
 	v.listCacheMutex.RUnlock()
-
-	// Проверяем, не закрыта ли база
-	if v.db == nil {
-		return nil
-	}
 
 	names := v.db.List(xPath)
 
@@ -127,9 +135,12 @@ func (v *DBReadCache) Rem(xPath, name string) {
 		}
 		return
 	}
-	// Проверяем, не закрыта ли база
-	if v.dataCache == nil || v.db == nil {
-		log.TLogln("DBReadCache.Rem: no dataCache or DB is closed, cannot remove", name)
+	if v.closed.Load() {
+		log.TLogln("DBReadCache.Rem: DB is closed, cannot remove", name)
+		return
+	}
+
+	if !v.commit(func(c committer) error { return c.tryRem(xPath, name) }, func(db GoStormDB) { db.Rem(xPath, name) }) {
 		return
 	}
 
@@ -146,8 +157,6 @@ func (v *DBReadCache) Rem(xPath, name string) {
 		delete(v.listCache, xPath)
 	}
 	v.listCacheMutex.Unlock()
-
-	v.db.Rem(xPath, name)
 }
 
 func (v *DBReadCache) Clear(xPath string) {
@@ -158,9 +167,13 @@ func (v *DBReadCache) Clear(xPath string) {
 		return
 	}
 
-	// Clear from underlying DB first
-	if v.db != nil {
-		v.db.Clear(xPath)
+	if v.closed.Load() {
+		log.TLogln("DBReadCache.Clear: DB is closed, cannot clear", xPath)
+		return
+	}
+	// Clear the underlying DB first; the cache follows only if that committed.
+	if !v.commit(func(c committer) error { return c.tryClear(xPath) }, func(db GoStormDB) { db.Clear(xPath) }) {
+		return
 	}
 
 	// Clear cache

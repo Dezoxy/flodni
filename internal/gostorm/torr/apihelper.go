@@ -549,6 +549,25 @@ func dropAllTorrent() {
 	}
 }
 
+// StopEngine stops the engine and closes the settings database (every commit was already
+// fsynced; the close releases the file). The daemon's shutdown calls it last, after the
+// sessions are closed and the mount is gone. The HTTP servers still run, so a late write
+// is possible: it takes lifeMu first, so a save in flight finishes before the close, and a
+// later write is refused and logged, not applied.
+func StopEngine() {
+	utils.StopTrackerLoader()
+
+	lifeMu.Lock()
+	defer lifeMu.Unlock()
+	btsMu.Lock()
+	if bts != nil {
+		bts.Disconnect()
+	}
+	btsMu.Unlock()
+
+	sets.CloseDB()
+}
+
 func Shutdown() {
 	utils.StopTrackerLoader()
 

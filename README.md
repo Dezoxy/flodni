@@ -154,6 +154,22 @@ it never changes `status` or the HTTP code, so a deployment without a play
 webhook stays healthy. The array is computed from memory, without a check.
 See "Play webhook" below for what raises it.
 
+### Engine state and backup
+
+`config.db`, in the engine's state directory, holds the only copy of each
+torrent's metainfo since the strict wake (see "A stub the engine does not
+store"). Every commit to it is fsynced, so a crash or a power loss keeps the
+records already saved. The file is created with mode 0600; a wider existing
+file is tightened to 0600 at start, with one log line. On shutdown the daemon
+unmounts, then stops the engine and closes the database. A commit costs two
+fdatasyncs (plus a sync when the file grows). The wake save is debounced to
+once per torrent per 30 s and skipped when the record is unchanged; the
+idle-close save and a record update are not debounced. Watch the first-byte
+and wake metrics after upgrading.
+
+To back it up, stop flodni and copy `config.db`: a cold copy is the safe one.
+To restore, stop flodni, copy `config.db` back and start it.
+
 ## Startup report
 
 Once the FUSE mount is up and the startup walk with its prunes has finished, the
@@ -1640,12 +1656,12 @@ with no record, or a record without the metainfo, is refused. This is the
 strict wake (`docs/roadmap.md`, step 1): a wake from a bare magnet would add
 the torrent with the DHT and the public trackers and no private flag known
 until the metainfo arrived (hard rule 3). Such a stub, from a library add made
-before the engine saved it, a lost `config.db` or a raw engine `rem` with the
-stub left, stops opening until it is added again. At startup the daemon logs
-one `WARNING: N of M library torrents have no stored engine record with
-metainfo` line, naming the first five hashes, and exports
-`flodni_library_torrents_unstored` (counted once, after the library walk), so
-read it before deploying the strict wake.
+before the engine saved it, a lost `config.db` (see "Engine state and
+backup") or a raw engine `rem` with the stub left, stops opening until it is
+added again. At startup the daemon logs one `WARNING: N of M library
+torrents have no stored engine record with metainfo` line, naming the first
+five hashes, and exports `flodni_library_torrents_unstored` (counted once,
+after the library walk), so read it before deploying the strict wake.
 
 What a refusal looks like:
 
