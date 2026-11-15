@@ -1,10 +1,15 @@
 package torr
 
 import (
+	"bytes"
+	"mime/multipart"
 	"reflect"
 	"testing"
+	"time"
 
 	sets "flodni/internal/gostorm/settings"
+	"flodni/internal/gostorm/torrshash"
+	apiutils "flodni/internal/gostorm/web/api/utils"
 
 	"github.com/anacrolix/torrent"
 	"github.com/anacrolix/torrent/bencode"
@@ -223,3 +228,229 @@ func TestScrapeTargetsKeepPrivateTorrentsOnTheirOwnTrackers(t *testing.T) {
 		t.Errorf("empty records give targets: %+v", got)
 	}
 }
+
+// Tracker injection (hard rule 3): an add for a stored hash that is not known public
+// must not carry the request's trackers into the engine, the saved record or the next
+// wake. Every add path (POST /torrents with a magnet or a torrs:// link, /stream,
+// /torrent/upload, and the library's add and inspect, which reach the engine through
+// POST /torrents) goes through AddTorrent, so these tests drive it with the specs
+// those parsers build.
+
+const (
+	injectHash = "0123456789abcdef0123456789abcdef01234567"
+	foreignTr  = "http://evil.invalid/announce"
+	ownTr      = "http://seeder.example/announce?passkey=x"
+)
+
+func injectFixture(t *testing.T, private *bool) (h metainfo.Hash, info []byte) {
+	t.Helper()
+	oldPath, oldRO := sets.Path, sets.ReadOnly
+	sets.Path = t.TempDir()
+	sets.InitSets(false, false)
+	InitApiHelper(NewBTS())
+	t.Cleanup(func() {
+		InitApiHelper(nil)
+		sets.Path, sets.ReadOnly = oldPath, oldRO
+	})
+	// The stored record's hash is the hash of its own metainfo, so a .torrent file
+	// for it can be built.
+	info = testInfoBytes(t, private)
+	h = metainfo.HashBytes(info)
+	sets.AddTorrent(&sets.TorrentDB{TorrentSpec: &torrent.TorrentSpec{
+		InfoHash: h, InfoBytes: info, Trackers: [][]string{{ownTr}},
+	}})
+	return h, info
+}
+
+type namedFile struct{ *bytes.Reader }
+
+func (namedFile) Close() error { return nil }
+
+var _ multipart.File = namedFile{}
+
+func TestAddForStoredPrivateHashIgnoresRequestTrackers(t *testing.T) {
+	yes := true
+	h, info := injectFixture(t, &yes)
+	hex := h.HexString()
+
+	torrsTok, err := torrshash.Pack(func() *torrshash.TorrsHash {
+		th := torrshash.New(hex)
+		th.AddField(torrshash.TagTracker, foreignTr)
+		return th
+	}())
+	if err != nil {
+		t.Fatal(err)
+	}
+	mi, err := bencode.Marshal(metainfo.MetaInfo{InfoBytes: info, Announce: foreignTr})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	cases := map[string]func(t *testing.T) *torrent.TorrentSpec{
+		"magnet": func(t *testing.T) *torrent.TorrentSpec {
+			s, err := apiutils.ParseLink("magnet:?xt=urn:btih:" + hex + "&tr=" + foreignTr)
+			if err != nil {
+				t.Fatal(err)
+			}
+			return s
+		},
+		"torrs": func(t *testing.T) *torrent.TorrentSpec {
+			s, _, err := apiutils.ParseTorrsHash("torrs://" + torrsTok)
+			if err != nil {
+				t.Fatal(err)
+			}
+			return s
+		},
+		"upload": func(t *testing.T) *torrent.TorrentSpec {
+			s, err := apiutils.ParseFile(namedFile{bytes.NewReader(mi)})
+			if err != nil {
+				t.Fatal(err)
+			}
+			return s
+		},
+	}
+	for name, mk := range cases {
+		t.Run(name, func(t *testing.T) {
+			spec := mk(t)
+			if !reflect.DeepEqual(spec.Trackers, [][]string{{foreignTr}}) {
+				t.Fatalf("fixture: request trackers = %v", spec.Trackers)
+			}
+			bt := NewBTS()
+			InitApiHelper(bt)
+			var got *torrent.TorrentSpec
+			prev := newTorrent
+			newTorrent = func(s *torrent.TorrentSpec, bt *BTServer) (*Torrent, error) {
+				got = s
+				return register(bt, s), nil
+			}
+			defer func() { newTorrent = prev }()
+
+			tor, err := AddTorrent(spec, "", "", "", "")
+			if err != nil {
+				t.Fatal(err)
+			}
+			want := [][]string{{ownTr}}
+			if !reflect.DeepEqual(got.Trackers, want) {
+				t.Errorf("engine spec trackers = %v, want %v", got.Trackers, want)
+			}
+
+			// The idle close saves the wrapper's spec: the record keeps only its own.
+			tor.expiredTime = time.Now().Add(-time.Second)
+			setOnIdleClose(t, nil)
+			tor.UpdateStats()
+			rec := GetTorrentDB(h)
+			if rec == nil || !reflect.DeepEqual(rec.Trackers, want) {
+				t.Errorf("saved record trackers = %v, want %v", rec.Trackers, want)
+			}
+
+			// The next wake replays the record.
+			got = nil
+			if _, err := LoadStored(hex); err != nil {
+				t.Fatal(err)
+			}
+			if got == nil || !reflect.DeepEqual(got.Trackers, want) {
+				t.Errorf("wake trackers = %v, want %v", got, want)
+			}
+		})
+	}
+}
+
+// A record that is not known public (no metainfo) is treated as private.
+func TestAddForRecordWithoutMetainfoIgnoresRequestTrackers(t *testing.T) {
+	h, _ := injectFixture(t, nil)
+	sets.AddTorrent(&sets.TorrentDB{TorrentSpec: &torrent.TorrentSpec{
+		InfoHash: h, Trackers: [][]string{{ownTr}},
+	}})
+	var got *torrent.TorrentSpec
+	prev := newTorrent
+	newTorrent = func(s *torrent.TorrentSpec, bt *BTServer) (*Torrent, error) {
+		got = s
+		return register(bt, s), nil
+	}
+	defer func() { newTorrent = prev }()
+	InitApiHelper(NewBTS())
+	if _, err := AddTorrent(&torrent.TorrentSpec{InfoHash: h, Trackers: [][]string{{foreignTr}}}, "", "", "", ""); err != nil {
+		t.Fatal(err)
+	}
+	if want := [][]string{{ownTr}}; !reflect.DeepEqual(got.Trackers, want) {
+		t.Errorf("trackers = %v, want %v", got.Trackers, want)
+	}
+}
+
+// A known-public record still merges the request's trackers, as before.
+func TestAddForStoredPublicHashStillMergesTrackers(t *testing.T) {
+	no := false
+	h, _ := injectFixture(t, &no)
+	var got *torrent.TorrentSpec
+	prev := newTorrent
+	newTorrent = func(s *torrent.TorrentSpec, bt *BTServer) (*Torrent, error) {
+		got = s
+		return register(bt, s), nil
+	}
+	defer func() { newTorrent = prev }()
+	InitApiHelper(NewBTS())
+	if _, err := AddTorrent(&torrent.TorrentSpec{InfoHash: h, Trackers: [][]string{{"http://new.example/announce"}}}, "", "", "", ""); err != nil {
+		t.Fatal(err)
+	}
+	want := [][]string{{"http://new.example/announce"}, {ownTr}}
+	if !reflect.DeepEqual(got.Trackers, want) {
+		t.Errorf("trackers = %v, want %v", got.Trackers, want)
+	}
+}
+
+// A torrent the engine already holds (no record yet) takes no tracker from an add
+// unless its metainfo shows it public: AddTorrentSpec would merge them into the live
+// torrent.
+func TestAddToHeldTorrentAddsNoTrackers(t *testing.T) {
+	oldPath, oldRO := sets.Path, sets.ReadOnly
+	sets.Path = t.TempDir()
+	sets.InitSets(false, false)
+	t.Cleanup(func() { sets.Path, sets.ReadOnly = oldPath, oldRO })
+	cfg := torrent.NewDefaultClientConfig()
+	cfg.NoDHT = true
+	cfg.NoUpload = true
+	cfg.ListenPort = 0
+	cfg.DataDir = t.TempDir()
+	cfg.DisableTrackers = true
+	client, err := torrent.NewClient(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer client.Close()
+
+	for _, tc := range []struct {
+		name    string
+		private *bool
+		wantNew bool
+	}{{"private", ptr(true), false}, {"public", ptr(false), true}} {
+		t.Run(tc.name, func(t *testing.T) {
+			info := testInfoBytes(t, tc.private)
+			h := metainfo.HashBytes(info)
+			bt := NewBTS()
+			bt.client = client
+			first, err := NewTorrent(&torrent.TorrentSpec{InfoHash: h, InfoBytes: info, Trackers: [][]string{{ownTr}}}, bt)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := NewTorrent(&torrent.TorrentSpec{InfoHash: h, Trackers: [][]string{{foreignTr}}}, bt); err != nil {
+				t.Fatal(err)
+			}
+			var live []string
+			mi := first.Torrent.Metainfo()
+			for _, tier := range mi.UpvertedAnnounceList() {
+				live = append(live, tier...)
+			}
+			has := false
+			for _, tr := range live {
+				if tr == foreignTr {
+					has = true
+				}
+			}
+			if has != tc.wantNew {
+				t.Errorf("foreign tracker on the live torrent = %v, want %v (trackers %v)", has, tc.wantNew, live)
+			}
+		})
+	}
+}
+
+func ptr(b bool) *bool { return &b }

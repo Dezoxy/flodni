@@ -1196,6 +1196,22 @@ renamed and its registry row is never re-keyed, and stubs are found by the
   the old form keeps them: an add finds the row by the old key when the new one
   has none, and replaces it in place.
 
+## Engine add semantics
+
+An add through the engine (`POST /torrents`, `/stream`, `/torrent/upload`, and
+the library's add and inspect, which call `POST /torrents`) starts from the
+link or file it was given, and for a hash the engine already stores it
+restores the stored metainfo and peers. Trackers follow hard rule 3:
+
+- **Stored, not known public** (a private torrent, or a record without
+  metainfo): the request's trackers are ignored and the record's own are used.
+  The log line carries a count only, since tracker URLs carry passkeys.
+- **Stored and known public:** the request's trackers are merged with the
+  record's, as before.
+- **Already held in memory and not known public:** the add gives the live
+  torrent no tracker.
+- **Re-adding with new trackers** is remove, then add.
+
 ## Stub contents and the stub scrub
 
 A stub is a small JSON file: `url` (the engine's stream link, which carries the

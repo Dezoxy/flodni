@@ -59,6 +59,26 @@ func mergeTrackerTiers(base, extra [][]string) [][]string {
 	return append(base, missing)
 }
 
+// countNewTrackers counts the trackers of req that known lacks. Only a count is ever
+// logged: a tracker URL can carry a passkey.
+func countNewTrackers(req, known [][]string) int {
+	have := map[string]bool{}
+	for _, tier := range known {
+		for _, tr := range tier {
+			have[tr] = true
+		}
+	}
+	n := 0
+	for _, tier := range req {
+		for _, tr := range tier {
+			if !have[tr] {
+				n++
+			}
+		}
+	}
+	return n
+}
+
 // AddTorrent is the explicit add: the caller brings a spec (a magnet, a file, an
 // upload) and the torrent starts from it. A wake of a closed torrent goes through
 // LoadStored instead, which never adds from a caller's link.

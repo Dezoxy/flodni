@@ -69,6 +69,13 @@ Run `flodni scrub-stubs --dry-run <source_path>` to count them and
 and the stubs it leaves alone). Each rewrite keeps the stub's mode, owner, mtime
 and atime, set on the new file before it replaces the stub.
 
+An add never changes the trackers of a private torrent. For a hash the engine
+already stores or holds, and whose metainfo is not known public, the request's
+trackers (a magnet's `tr=`, a `torrs://` link, a `.torrent` file) are ignored
+and the log says how many, never which. Without this one add could point a
+private torrent's info hash at a foreign tracker and save it into the record.
+To change a torrent's trackers, remove it and add it again.
+
 What this does not cover:
 
 - Copies of the library directory made before the scrub (backups, snapshots)
