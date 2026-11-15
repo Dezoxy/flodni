@@ -15,7 +15,12 @@ import (
 func handleConfig(w http.ResponseWriter, r *http.Request) {
 	if r.Method == "GET" {
 		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(gc().Redacted())
+		// The tokens are never returned; plex_token_source tells the panel whether a
+		// Plex token is in use and where it comes from ("env", "file" or "").
+		_ = json.NewEncoder(w).Encode(struct {
+			config.Config
+			PlexTokenSource string `json:"plex_token_source"`
+		}{gc().Redacted(), gc().PlexTokenSource()})
 		return
 	}
 	if r.Method == "POST" {
@@ -49,6 +54,10 @@ func handleConfig(w http.ResponseWriter, r *http.Request) {
 			// The panel never sees the token; an empty post keeps the one in the file.
 			newCfg.APIToken = gc().ResolveAPIToken(newCfg.APIToken)
 		}
+		// The panel never sees the Plex token either. An empty post keeps the one the
+		// file holds now (read fresh, like the api_token hand edit); a typed one is
+		// taken as given. An environment token is never written to the file.
+		newCfg.Plex.Token = onDisk.ResolvePlexToken(newCfg.Plex.Token)
 		// Paths that came from the command line are not written to the
 		// file: keep what the file had.
 		if newCfg.PhysicalSourcePath == physicalSourcePath {

@@ -102,6 +102,15 @@ for example `http://host:9080/plex/webhook?token=<token>`; no other route
 does. `/control` loads without it and asks for the token on its first call,
 then keeps it in the browser's local storage. `GET /api/config` never
 returns the token, and saving from the panel leaves it unchanged.
+It does not return `plex.token` either (empty), but adds
+`plex_token_source` (`env`, `file` or empty) so the panel can say whether a
+Plex token is in use. The panel's token field starts empty: leave it empty to
+keep the stored token, type to replace it. A post with an empty or absent
+`plex.token` keeps the one `config.json` holds at that moment (a hand edit
+included); an environment token (`FLODNI_PLEX_TOKEN`) is never written to the
+file. The panel cannot clear the token; delete `plex.token` from `config.json`.
+Changing the Plex token is allowed on an open port, unlike `api_token`: it is a
+credential for another system, not a say over who may call Flodni.
 With no token enforced (the port is open), two control routes are refused with
 403 and a JSON `error`, because any client that reaches the port could
 otherwise take the service over: `POST /api/config` when the body carries a non-empty
