@@ -740,6 +740,12 @@ pumpSlotResolved:
 				}
 				return nil, errnoWakeRefused
 			}
+			if errors.Is(err, native.ErrEngineNotReady) {
+				// Transient: the engine is not up yet. Nothing is recorded or latched, so
+				// the next read asks again; the caller sees the same EIO.
+				noteEngineNotReady(h.path, "read")
+				return nil, errnoWakeRefused
+			}
 			logger.Info(fmt.Sprintf("[VFS] Re-activation failed for %s: %v", filepath.Base(h.path), err), "file", filepath.Base(h.path), "err", err)
 			if !torrentLive(h.hash) {
 				// The wake is stored-only now, so a failed one (engine busy, not

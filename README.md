@@ -469,7 +469,8 @@ line below is the one log format that is).
 - `not_stored` is not a swarm failure. A read through the mount on a torrent
   the engine refused to wake (see "A stub the engine does not store") sets
   `last_failure_reason` to `not_stored`, `last_failure_source` to `mount` and
-  `last_failure_at`, once per handle. It does not change `consecutive_failures`
+  `last_failure_at`, once per handle. A wake before the engine is up
+  (`engine not ready`) is never recorded. It does not change `consecutive_failures`
   or `first_failure_at`, so such a torrent is not listed by `?failing=1` or
   `?min_failures=N`, and it is never a dead-swarm verdict. A session on it
   reports `failed_reads` 0. A later swarm read or failure replaces the reason.
@@ -1635,6 +1636,13 @@ What a refusal looks like:
 - Neither is a dead swarm. No failed read is marked and no dead-swarm verdict
   follows. The readability record gets its own reason, `not_stored` (see
   "Readability record"), and `flodni_wake_refused_total` counts it.
+- A wake that comes before the engine is up is not a refusal. It is the
+  separate, transient `ErrEngineNotReady`: an open or a read answers the same
+  `EIO`, logs `engine not ready` (at most one line per 10 s), and writes
+  nothing: no `not_stored` in the readability record, no latch on the handle
+  or in warm on add, no `flodni_wake_refused_total`. The next read asks again.
+  Start-up waits for the engine to come up (up to 60 s, then logs a WARNING and
+  goes on) instead of a fixed 2 s.
 
 The library adds the engine now saves at once (`save_to_db`), so only existing
 stubs are affected. To repair one, add the hash to the engine with

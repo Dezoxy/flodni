@@ -61,6 +61,10 @@ func play(c *gin.Context) {
 				c.AbortWithError(http.StatusNotFound, err)
 				return
 			}
+			if errors.Is(err, torr.ErrEngineNotReady) {
+				c.AbortWithError(http.StatusServiceUnavailable, err)
+				return
+			}
 			c.AbortWithError(http.StatusInternalServerError, err)
 			return
 		}

@@ -108,6 +108,10 @@ func ActivePeers(hash string) int {
 // It is the engine's own error, so a match on either name holds.
 var ErrNotStored = torr.ErrNotStored
 
+// ErrEngineNotReady means the wake came before the engine was up. It is transient and
+// says nothing about the hash; it is never an ErrNotStored.
+var ErrEngineNotReady = torr.ErrEngineNotReady
+
 var reHexHash = regexp.MustCompile(`^[0-9a-fA-F]{40}$`)
 
 // storedMagnet is the link WakeStored hands to Wake: the bare hash. Wake takes the
@@ -182,7 +186,7 @@ func (c *NativeClient) Wake(ctx context.Context, magnetUrl string, fileIdx int) 
 		var err error
 		t, err = torr.LoadStored(hash)
 		if err != nil {
-			if errors.Is(err, ErrNotStored) {
+			if errors.Is(err, ErrNotStored) || errors.Is(err, ErrEngineNotReady) {
 				return err
 			}
 			return fmt.Errorf("add torrent error: %w", err)

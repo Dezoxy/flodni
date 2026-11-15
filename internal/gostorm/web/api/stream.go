@@ -92,6 +92,10 @@ func stream(c *gin.Context) {
 	if tor == nil || tor.Stat == state.TorrentInDB {
 		tor, err = torr.AddTorrent(spec, title, poster, data, category)
 		if err != nil {
+			if errors.Is(err, torr.ErrEngineNotReady) {
+				c.AbortWithError(http.StatusServiceUnavailable, err)
+				return
+			}
 			c.AbortWithError(http.StatusInternalServerError, err)
 			return
 		}
