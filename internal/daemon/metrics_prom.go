@@ -11,6 +11,7 @@ import (
 	"github.com/anacrolix/torrent"
 
 	"flodni/internal/gostorm/native"
+	"flodni/internal/gostorm/settings"
 	"flodni/internal/gostorm/torr"
 	"flodni/internal/promtext"
 	"flodni/internal/warmup"
@@ -363,6 +364,12 @@ func collectEngineReadsProm(w *promtext.Writer) {
 	w.Counter("flodni_engine_peer_redials_total",
 		"Peers the opt-in redial (redial_dropped_peer) added back to a private torrent after its only connected peer dropped. 0 with the switch off.",
 		promSample(torr.RedialCount()))
+	setErrs, remErrs, clearErrs := settings.DBWriteErrors()
+	w.Counter("flodni_engine_db_write_errors_total",
+		"Engine database commits that failed, by operation: set (a record save), rem (a record removal) or clear. The record is then not saved; alert on any increase. 0 from start.",
+		promSample(setErrs, lbl("op", "set")),
+		promSample(remErrs, lbl("op", "rem")),
+		promSample(clearErrs, lbl("op", "clear")))
 	pc := torrent.ProcessCounters()
 	w.Counter("flodni_engine_hedge_triggers_total",
 		"Tail-hedge duplicate requests the engine fired. Counted per process, so unlike hedge_trigger_count in /metrics it does not fall when a torrent expires.",

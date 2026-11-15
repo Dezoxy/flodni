@@ -298,6 +298,20 @@ func (f *flakyDB) trySet(xPath, name string, value []byte) error {
 	return f.TDB.trySet(xPath, name, value)
 }
 
+func (f *flakyDB) tryRem(xPath, name string) error {
+	if f.fail {
+		return errors.New("injected: no space left on device")
+	}
+	return f.TDB.tryRem(xPath, name)
+}
+
+func (f *flakyDB) tryClear(xPath string) error {
+	if f.fail {
+		return errors.New("injected: no space left on device")
+	}
+	return f.TDB.tryClear(xPath)
+}
+
 // The cache holds committed data only. A failed commit must not leave the record in the
 // cache, or the identical save after the disk recovers would be skipped as unchanged and
 // the record would never reach the file.
