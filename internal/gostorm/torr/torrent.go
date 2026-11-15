@@ -153,17 +153,6 @@ func retrackWhenPublic(tor *torrent.Torrent, mode int, defTrackers, fileTrackers
 	}
 }
 
-// heldTakesTrackers reports whether an add may give its trackers to the torrent the
-// engine already holds: only when the held torrent is known public. Without metainfo
-// it may be private, so it takes none (a .torrent for it is added by remove, then add).
-func heldTakesTrackers(held *Torrent) bool {
-	if held.Torrent == nil {
-		return false
-	}
-	info := held.Torrent.Info()
-	return info != nil && infoPublic(info)
-}
-
 func NewTorrent(spec *torrent.TorrentSpec, bt *BTServer) (*Torrent, error) {
 	// https://github.com/anacrolix/torrent/issues/747
 	if bt == nil {
@@ -181,14 +170,24 @@ func NewTorrent(spec *torrent.TorrentSpec, bt *BTServer) (*Torrent, error) {
 	// AddTorrentSpec merges a spec's trackers into a torrent the engine already holds.
 	// A held torrent that is not known public takes none from an add (hard rule 3):
 	// the live torrent, and the record the next save writes, keep their own.
+	// Only a held torrent whose metainfo is known public takes them; one without
+	// metainfo may be private (a .torrent for it is added by remove, then add). The
+	// live torrent is read once, under its lock: drop() nils it concurrently.
 	addSpec := spec
-	if held := bt.GetTorrent(spec.InfoHash); held != nil && !heldTakesTrackers(held) {
-		if n := countNewTrackers(spec.Trackers, nil); n > 0 {
-			log.TLogln("add: ignored", n, "request trackers for a held torrent that is not public")
+	if held := bt.GetTorrent(spec.InfoHash); held != nil {
+		if live := held.UnderlyingTorrent(); live == nil || !infoPublic(live.Info()) {
+			var own [][]string
+			if live != nil {
+				mi := live.Metainfo()
+				own = mi.UpvertedAnnounceList()
+			}
+			if n := countNewTrackers(spec.Trackers, own); n > 0 {
+				log.TLogln("add: ignored", n, "request trackers for a held torrent that is not public")
+			}
+			noTrackers := *spec
+			noTrackers.Trackers = nil
+			addSpec = &noTrackers
 		}
-		noTrackers := *spec
-		noTrackers.Trackers = nil
-		addSpec = &noTrackers
 	}
 	goTorrent, _, err := client.AddTorrentSpec(addSpec)
 	if err != nil {
@@ -212,7 +211,7 @@ func NewTorrent(spec *torrent.TorrentSpec, bt *BTServer) (*Torrent, error) {
 	torr.lastTimeSpeed = time.Now()
 	torr.bt = bt
 	torr.closed = goTorrent.Closed()
-	torr.TorrentSpec = spec
+	torr.TorrentSpec = addSpec
 	torr.AddExpiredTime(timeout)
 	torr.Timestamp = time.Now().Unix()
 

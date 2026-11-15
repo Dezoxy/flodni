@@ -74,7 +74,12 @@ already stores or holds, and whose metainfo is not known public, the request's
 trackers (a magnet's `tr=`, a `torrs://` link, a `.torrent` file) are ignored
 and the log says how many, never which. Without this one add could point a
 private torrent's info hash at a foreign tracker and save it into the record.
-To change a torrent's trackers, remove it and add it again.
+To change a torrent's trackers, remove it and add it again. A record that took a
+foreign tracker before this fix keeps it, and is now authoritative: remove it
+and add it again, or drop the host with `flodni trackers remove-host`. A bare
+magnet whose metadata is not known yet is still treated as public by the engine
+until the metadata arrives, so it may use DHT meanwhile; a stored record with
+metainfo is not affected.
 
 What this does not cover:
 

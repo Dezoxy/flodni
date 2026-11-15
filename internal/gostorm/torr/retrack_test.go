@@ -454,3 +454,45 @@ func TestAddToHeldTorrentAddsNoTrackers(t *testing.T) {
 }
 
 func ptr(b bool) *bool { return &b }
+
+// A torrent held from a bare magnet has no metainfo yet, so it may be private: an add
+// with foreign trackers must not reach the live torrent.
+func TestAddToHeldTorrentWithoutMetainfoAddsNoTrackers(t *testing.T) {
+	oldPath, oldRO := sets.Path, sets.ReadOnly
+	sets.Path = t.TempDir()
+	sets.InitSets(false, false)
+	t.Cleanup(func() { sets.Path, sets.ReadOnly = oldPath, oldRO })
+	cfg := torrent.NewDefaultClientConfig()
+	cfg.NoDHT = true
+	cfg.NoUpload = true
+	cfg.ListenPort = 0
+	cfg.DataDir = t.TempDir()
+	cfg.DisableTrackers = true
+	client, err := torrent.NewClient(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer client.Close()
+
+	h := metainfo.HashBytes(testInfoBytes(t, ptr(true)))
+	bt := NewBTS()
+	bt.client = client
+	first, err := NewTorrent(&torrent.TorrentSpec{InfoHash: h, Trackers: [][]string{{ownTr}}}, bt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first.Torrent.Info() != nil {
+		t.Fatal("fixture: the held torrent must have no metainfo")
+	}
+	if _, err := NewTorrent(&torrent.TorrentSpec{InfoHash: h, Trackers: [][]string{{foreignTr}}}, bt); err != nil {
+		t.Fatal(err)
+	}
+	mi := first.Torrent.Metainfo()
+	for _, tier := range mi.UpvertedAnnounceList() {
+		for _, tr := range tier {
+			if tr == foreignTr {
+				t.Fatalf("a held torrent without metainfo took a request tracker: %v", mi.UpvertedAnnounceList())
+			}
+		}
+	}
+}
