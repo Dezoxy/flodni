@@ -39,7 +39,6 @@ func kaCounts(c *[2]atomic.Int64) (unconfirmed, confirmed int64) {
 
 // The label is true when any file of the torrent has a webhook-confirmed playback.
 func TestConfirmedHashLabel(t *testing.T) {
-	newTestApp(t)
 	resetKeepaliveState(t)
 	app.playbackRegistry.Store("/m/a.mkv", &PlaybackState{Path: "/m/a.mkv", Hash: kaHashA})
 	app.playbackRegistry.Store("/m/b1.mkv", &PlaybackState{Path: "/m/b1.mkv", Hash: kaHashB})
@@ -59,7 +58,6 @@ func TestConfirmedHashLabel(t *testing.T) {
 
 // The confirmed set is rebuilt at most once a second.
 func TestConfirmedHashesCachedForOneSecond(t *testing.T) {
-	newTestApp(t)
 	resetKeepaliveState(t)
 	now := time.Unix(1000, 0)
 	confirmedHashesNow = func() time.Time { return now }
@@ -81,7 +79,6 @@ func TestConfirmedHashesCachedForOneSecond(t *testing.T) {
 }
 
 func TestIdleCloseCountedByConfirmed(t *testing.T) {
-	newTestApp(t)
 	resetKeepaliveState(t)
 	app.playbackRegistry.Store("/m/b.mkv", &PlaybackState{Path: "/m/b.mkv", Hash: kaHashB, IsHealthy: true})
 
@@ -94,7 +91,6 @@ func TestIdleCloseCountedByConfirmed(t *testing.T) {
 }
 
 func TestReopenCountedByConfirmedAndOnTheSession(t *testing.T) {
-	newTestApp(t)
 	resetKeepaliveState(t)
 	app.playbackRegistry.Store("/m/b.mkv", &PlaybackState{Path: "/m/b.mkv", Hash: kaHashB, IsHealthy: true})
 	s := &TTFFSession{path: "/m/b.mkv", hash: kaHashB}
@@ -112,7 +108,6 @@ func TestReopenCountedByConfirmedAndOnTheSession(t *testing.T) {
 
 // A served read over the stall threshold counts; one at the threshold does not.
 func TestStallCountedByConfirmedAtTtffRead(t *testing.T) {
-	newTestApp(t)
 	resetKeepaliveState(t)
 	app.playbackRegistry.Store("/m/b.mkv", &PlaybackState{Path: "/m/b.mkv", Hash: kaHashB, IsHealthy: true})
 	app.playbackRegistry.Store("/m/a.mkv", &PlaybackState{Path: "/m/a.mkv", Hash: kaHashA})

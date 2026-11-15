@@ -1,8 +1,12 @@
 package daemon
 
 import (
+	"fmt"
+	"sort"
+	"strings"
 	"sync"
 	"testing"
+	"time"
 )
 
 var testApps sync.Map // *testing.T -> *App
@@ -21,10 +25,39 @@ func newTestApp(t *testing.T) *App {
 	app = a
 	testApps.Store(t, a)
 	t.Cleanup(func() {
+		assertDrained(t, a)
 		app = prev
 		testApps.Delete(t)
 	})
 	return a
+}
+
+// assertDrained fails the test when the retiring App still has background work
+// registered: a prefetch in flight, a pump, or a pump or priority timer. A goroutine
+// that outlives its test would write into the next App, so the test must drain it.
+// Some tests drain asynchronously, so it polls for up to a second first.
+func assertDrained(t *testing.T, a *App) {
+	t.Helper()
+	pending := func() []string {
+		var left []string
+		for name, m := range map[string]*sync.Map{
+			"inFlightPrefetches": &a.inFlightPrefetches, "activePumps": &a.activePumps,
+			"pumpTimers": &a.pumpTimers, "priorityTimers": &a.priorityTimers,
+		} {
+			m.Range(func(k, _ any) bool { left = append(left, fmt.Sprintf("%s[%v]", name, k)); return true })
+		}
+		sort.Strings(left)
+		return left
+	}
+	deadline := time.Now().Add(time.Second)
+	left := pending()
+	for len(left) > 0 && time.Now().Before(deadline) {
+		time.Sleep(10 * time.Millisecond)
+		left = pending()
+	}
+	if len(left) > 0 {
+		t.Errorf("the test left background work registered on its App: %s", strings.Join(left, ", "))
+	}
 }
 
 func TestTwoAppsDoNotShareState(t *testing.T) {

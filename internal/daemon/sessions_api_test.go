@@ -248,7 +248,6 @@ func TestCloseSessionOutcome(t *testing.T) {
 // The new session fields: stalls and the slowest one come from the stall tracking,
 // reopens from the read path, and confirmed is sticky.
 func TestSessionRecordKeepaliveFields(t *testing.T) {
-	newTestApp(t)
 	resetKeepaliveState(t)
 	s := &TTFFSession{path: "/m/k.mkv", size: 100, hash: kaHashA}
 	s.openedAt.Store(time.Now().UnixNano())
@@ -277,7 +276,6 @@ func TestSessionRecordKeepaliveFields(t *testing.T) {
 
 // A session registered for a path that is already confirmed starts confirmed.
 func TestSessionConfirmedAtRegister(t *testing.T) {
-	newTestApp(t)
 	resetKeepaliveState(t)
 	app.playbackRegistry.Store("/m/c.mkv", &PlaybackState{Path: "/m/c.mkv", Hash: kaHashA, IsHealthy: true})
 	ttffRegister("/m/c.mkv", 100, kaHashA, 0, false, false)

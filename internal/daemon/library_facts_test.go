@@ -51,6 +51,7 @@ func TestFileFactsReadTheIndexAndTheOpenSession(t *testing.T) {
 }
 
 func TestFileFactsConfirmedNeedsAnOpenConfirmedSession(t *testing.T) {
+	newTestApp(t)
 	const path = "/mnt/tv/Show/Show.S01E01.mkv"
 	k := warmup.FileKey{Hash: "ddeeff", FileIdx: 2}
 	ps := &PlaybackState{Path: path, OpenedAt: time.Now()}

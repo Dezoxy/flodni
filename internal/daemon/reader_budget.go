@@ -58,17 +58,6 @@ var (
 		return 64 << 20
 	}
 
-	// Since process start, for /metrics/prometheus.
-	unconfirmedReadBytes atomic.Int64
-	unconfirmedSessions  [2]atomic.Int64 // by rbUnconfirmed, rbConfirmedLate; resolved at close
-
-	// Movie and episode play/resume webhooks, by whether they resolved to one file. The
-	// gate arms on the matched count: refusal starts only once a webhook has matched a
-	// file since the process started, so a media server that never sends one is never
-	// cut off.
-	playbackWebhooksMatched   atomic.Int64
-	playbackWebhooksUnmatched atomic.Int64
-
 	// refuseUnconfirmedReads is the opt-in switch, read at every call. A var so tests
 	// can flip it.
 	refuseUnconfirmedReads = func() bool {
@@ -135,9 +124,9 @@ var webhookRuleNames = [numWebhookRules]string{"basename", "path_map", "imdb", "
 
 func countPlaybackWebhook(matched bool) {
 	if matched {
-		playbackWebhooksMatched.Add(1)
+		app.playbackWebhooksMatched.Add(1)
 	} else {
-		playbackWebhooksUnmatched.Add(1)
+		app.playbackWebhooksUnmatched.Add(1)
 	}
 }
 
@@ -177,7 +166,7 @@ func (s *TTFFSession) countUnconfirmed(src ttffSource, n int, off int64) {
 	if out == 0 || playbackConfirmed(s.path) {
 		return
 	}
-	unconfirmedReadBytes.Add(out)
+	app.unconfirmedReadBytes.Add(out)
 	if src == srcFetchBlock {
 		s.unconfirmedSwarm.Add(out)
 	} else {
@@ -305,7 +294,7 @@ func (s *TTFFSession) overUnconfirmedMargin() bool {
 // refusalEnforced reports whether the gate would refuse now: the switch is on and a play
 // webhook has matched a file since start.
 func refusalEnforced() bool {
-	return refuseUnconfirmedReads() && playbackWebhooksMatched.Load() > 0
+	return refuseUnconfirmedReads() && app.playbackWebhooksMatched.Load() > 0
 }
 
 // blocks asks the predicate for one session: would a fetch for [off, off+n) of a file of
@@ -497,9 +486,9 @@ func (s *TTFFSession) resolveReaderBudget() {
 		return
 	}
 	if s.confirmedLateAt.Load() != 0 {
-		unconfirmedSessions[rbConfirmedLate].Add(1)
+		app.unconfirmedSessions[rbConfirmedLate].Add(1)
 	} else {
-		unconfirmedSessions[rbUnconfirmed].Add(1)
+		app.unconfirmedSessions[rbUnconfirmed].Add(1)
 		// The comm was read at the crossing (logReaderBudget): the caller may be gone by now.
 		comm := ""
 		if p := s.overMarginComm.Load(); p != nil {
