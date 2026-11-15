@@ -82,9 +82,9 @@ func handlePlexWebhook(w http.ResponseWriter, r *http.Request) {
 		Metadata struct {
 			Title              string `json:"title"`
 			GrandparentTitle   string `json:"grandparentTitle"` // for TV series
-			Year               int    `json:"year"`
-			ParentIndex        optInt `json:"parentIndex"` // season (Plex)
-			Index              optInt `json:"index"`       // episode number (Plex)
+			Year               optInt `json:"year"`             // a template sender may quote it
+			ParentIndex        optInt `json:"parentIndex"`      // season (Plex)
+			Index              optInt `json:"index"`            // episode number (Plex)
 			LibrarySectionType string `json:"librarySectionType"`
 			Media              []struct {
 				Part []struct {
@@ -95,6 +95,8 @@ func handlePlexWebhook(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if err := json.Unmarshal([]byte(payloadStr), &payload); err != nil {
+		// Silent drops make a misconfigured sender look like no sender.
+		logger.Info(fmt.Sprintf("[PLEX] Webhook payload does not parse from %s: %v", r.RemoteAddr, err), "remote_addr", r.RemoteAddr, "err", err)
 		return
 	}
 
@@ -107,7 +109,7 @@ func handlePlexWebhook(w http.ResponseWriter, r *http.Request) {
 	if payload.Event == "media.play" || payload.Event == "media.resume" {
 		targetTitle := strings.ToLower(payload.Metadata.Title)
 		seriesTitle := strings.ToLower(payload.Metadata.GrandparentTitle)
-		targetYear := payload.Metadata.Year
+		targetYear := payload.Metadata.Year.v
 
 		logger.Debug(fmt.Sprintf("[DEBUG] Webhook for '%s' / '%s' (%d). Current registry:", targetTitle, seriesTitle, targetYear), "target_title", targetTitle, "series_title", seriesTitle, "target_year", targetYear)
 		app.playbackRegistry.Range(func(key, value interface{}) bool {
@@ -288,7 +290,7 @@ func handlePlexWebhook(w http.ResponseWriter, r *http.Request) {
 	} else if payload.Event == "media.stop" {
 		targetTitle := strings.ToLower(payload.Metadata.Title)
 		seriesTitle := strings.ToLower(payload.Metadata.GrandparentTitle)
-		targetYear := payload.Metadata.Year
+		targetYear := payload.Metadata.Year.v
 
 		stopImdbID := ""
 		if m := reImdbID.FindStringSubmatch(payloadStr); len(m) > 1 {
