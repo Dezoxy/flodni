@@ -102,6 +102,21 @@ for example `http://host:9080/plex/webhook?token=<token>`; no other route
 does. `/control` loads without it and asks for the token on its first call,
 then keeps it in the browser's local storage. `GET /api/config` never
 returns the token, and saving from the panel leaves it unchanged.
+It does not return `plex.token` either (empty), but adds
+`plex_token_source` (`env`, `file` or empty) so the panel can say whether a
+Plex token is in use. The panel's token field starts empty: leave it empty to
+keep the stored token, type to replace it. A post with an empty or absent
+`plex.token` keeps the one `config.json` holds at that moment (a hand edit
+included); an environment token (`FLODNI_PLEX_TOKEN`) is never written to the
+file. The panel cannot clear the token; delete `plex.token` from `config.json`.
+The stored token is sent wherever `plex.url` points, so a save that changes the
+URL's scheme, host or port needs a typed token: without one it is refused with
+409 (`re-enter the Plex token when changing plex.url`), and the panel makes the
+token field required once the URL field changes. On an open port (no
+`api_token`), `POST /api/config` also refuses with 403 a non-empty `plex.token`
+and a changed `plex.url`, as it does for `api_token`; set them through
+`FLODNI_PLEX_TOKEN` or by editing `config.json`, then restart. A body that leaves
+both unchanged or absent saves as before.
 With no token enforced (the port is open), two control routes are refused with
 403 and a JSON `error`, because any client that reaches the port could
 otherwise take the service over: `POST /api/config` when the body carries a non-empty
@@ -127,7 +142,17 @@ with a cross-site POST. Only hostnames are compared, not scheme or port,
 because a TLS-terminating tunnel hands Flodni plain http with the original
 `Host` while the browser's `Origin` says `https`. A request with no `Origin`
 (Plex, curl, scripts, and the GET navigations and `<img>` loads a browser
-sends without one) is unchanged; `Origin: null` is refused. The panel's own
+sends without one) is unchanged; `Origin: null` is refused. Because a page can
+still send those GETs, `GET`/`HEAD /stream` on an open port never adds a
+torrent: it plays or reports a hash the engine already stores or holds, and
+answers 403 ("adding by GET is disabled; use `POST /torrents`") for any other
+link, for an `http(s)` or `file:` link (refused before any fetch, so no
+server-side request and no local file read), and for `&save` or `&preload`
+(they change state). A stored hash wakes from its record only, so the link's
+trackers are never used; a record without metainfo answers 404. A page can
+still wake a stored hash through `GET /stream` or `GET /play`. With a token
+set, `/stream` keeps adding a hash the engine does not hold. Add through
+`POST /torrents` or `POST /torrent/upload`. The panel's own
 save and restart calls are same-origin POSTs that do carry `Origin`, and pass
 because the hostnames match, so a reverse proxy in front of the control port
 must preserve the `Host` header (nginx: `proxy_set_header Host $host;`), or
@@ -138,6 +163,53 @@ stored torrent and had no caller, is gone; and `/shutdown` and the Plex
 webhook no longer answer GET (`/shutdown` is `POST`, the webhook 405s other
 methods), because a GET from a web page carries no `Origin`. There is no
 TLS: see `SECURITY.md`.
+
+**DNS rebinding is open by default.** The `Origin` check cannot stop it: the
+attacker's hostname resolves to your LAN address, so `Origin` and `Host` both
+carry the attacker's name and match. An IP-only deployment is just as exposed,
+because the server accepts any name as `Host`. Set a Host allowlist everywhere;
+an IP-only deployment uses `["localhost"]`:
+
+| Key | Env | Values | Default |
+| --- | --- | --- | --- |
+| `allowed_hosts` | `MKV_PROXY_ALLOWED_HOSTS` (comma list, wins over the file) | hostnames, for example `["flodni.example", "flodni"]` | empty: off |
+
+When the list is not empty, both servers (control port and engine port) answer
+403 with `host not allowed` to a request whose `Host` hostname is not listed,
+with a token or without, and log it with method, path, address and the refused
+Host. The match ignores case, the port and a trailing dot. Entries are
+lowercased and stripped of a port at load; an entry with a scheme, a path, a
+wildcard or a leading dot is not a hostname and is dropped with a warning
+(a non-ASCII name is kept with a warning: list the `xn--` form a browser
+sends). A list that is not empty as written but has no valid entry, or that has
+the wrong type in `config.json`, or an environment value with no entry, fails
+closed: the check stays on and admits only the always-allowed hosts below, with
+a warning at start. Only an empty list is off. With no token enforced,
+`POST /api/config` refuses (403) a body that would change what the next start
+enforces: `allowed_hosts`, or a `gostorm_url` host that adds a new name. Edit
+the file or the environment and restart. An invalid posted list is refused
+with 400. The effective list is logged once at start, and a save from the
+panel needs a restart to apply; so does a `gostorm_url` change while the list
+is on, because the engine's list is fixed at start.
+
+Always allowed in addition: IP literals (v4 and v6), `localhost` and this
+machine's own hostname (in Docker the container's hostname, not the service
+name, unless you set `hostname:`). The engine port also admits the hostname of
+`gostorm_url`, which Flodni's own calls use. Every other name a client uses
+must be listed: a script or a container that calls `http://flodni:9080` needs
+`flodni` in the list. Behind a gateway that rewrites `Host`, list the name the
+gateway sends, which may not be the name in the Plex webhook URL; the refusal
+log shows it. Wildcards are not supported.
+
+With no token, both servers also refuse `Sec-Fetch-Site: cross-site` on any
+method, logged like the `Origin` refusals. `same-origin`, `same-site`, `none`
+and a missing header pass, so the panel's own fetches pass, behind a TLS tunnel
+too. A browser sends the header only over https or to `localhost`, so a page
+fetching a plain-http LAN address sends none and only the `Origin` check and the
+allowlist apply: it is a second signal, not a replacement. The routes that hold
+no data and are open anyway (`/control`, `/api/health`, the engine's `/echo`)
+are exempt, so a link from another site still opens the panel; a cross-site
+navigation to any other route is refused without a token.
 
 `GET /api/health` on the control port reports the mount, the engine and the
 state database, each as `{"ok": ..., "reason": "..."}`, with an overall
@@ -1240,6 +1312,22 @@ renamed and its registry row is never re-keyed, and stubs are found by the
   the old form keeps them: an add finds the row by the old key when the new one
   has none, and replaces it in place.
 
+## Engine add semantics
+
+An add through the engine (`POST /torrents`, `/stream`, `/torrent/upload`, and
+the library's add and inspect, which call `POST /torrents`) starts from the
+link or file it was given, and for a hash the engine already stores it
+restores the stored metainfo and peers. Trackers follow hard rule 3:
+
+- **Stored, not known public** (a private torrent, or a record without
+  metainfo): the request's trackers are ignored and the record's own are used.
+  The log line carries a count only, since tracker URLs carry passkeys.
+- **Stored and known public:** the request's trackers are merged with the
+  record's, as before.
+- **Already held in memory and not known public:** the add gives the live
+  torrent no tracker.
+- **Re-adding with new trackers** is remove, then add.
+
 ## Stub contents and the stub scrub
 
 A stub is a small JSON file: `url` (the engine's stream link, which carries the
@@ -1812,8 +1900,8 @@ Every path that starts a torrent for a hash, labelled:
 | Path | Kind | What it does |
 |---|---|---|
 | A read or an open through the mount, warm on add, catch-up | wake | `native.Wake` loads the stored record (`torr.LoadStored`); the magnet is used for its hash only, and a link that is not a magnet is refused without being fetched. Refuses an unstored hash. |
-| `/play/{hash}/{id}`, `/stream` with a stored hash, and the engine's own lookup of a stored torrent | wake | `torr.LoadStored`. `/play` answers 404 for an unstored hash. |
-| `POST /torrents` (`add`), upload, `/stream?link=` on a new link | explicit add | The caller's link or file starts the torrent, a stored record or not; the stored metainfo and trackers are merged in when there is one. |
+| `/play/{hash}/{id}`, `/stream` with a stored hash, and the engine's own lookup of a stored torrent | wake | `torr.LoadStored`. `/play` takes a bare hash only (40 hex or 32 base32): 400 for anything else, an `http(s)` or `file:` value never being fetched or read, and 404 for an unstored hash or a record without metainfo; `/stream` wakes a stored hash from its record the same way. |
+| `POST /torrents` (`add`), upload, and `/stream?link=` on a new link with a token set | explicit add | The caller's link or file starts the torrent, a stored record or not; the stored metainfo and trackers are merged in when there is one. |
 
 A load, a save and a removal of one torrent are serialised in the engine, so a
 torrent that was removed stays removed: a wake that was still adding it

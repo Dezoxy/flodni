@@ -41,9 +41,31 @@ hostname than its `Host` (scheme and port are ignored, because a TLS tunnel
 delivers plain http with the original `Host`; `Origin: null` is refused), so
 a page in a browser on the network cannot send a cross-site POST. Requests
 without `Origin` (scripts, Plex, and the GET navigations and `<img>` loads a
-browser sends without one) pass, so some GETs on 8090 (`/stream?link=` adds a
-torrent, `/play/:hash/:id` wakes a stored one) stay open to a page, and so does
-DNS rebinding. A page on the same hostname but another port is not stopped. A
+browser sends without one) pass, so a page can still wake a stored
+torrent with `GET /play/:hash/:id` or `GET /stream`.
+`GET`/`HEAD /stream` on an open port never adds: a link whose hash the engine
+does not already hold, any `http(s)` or `file:` link, and `&save` or
+`&preload` get 403 before anything is fetched or added; a stored hash wakes
+from its record only, and a record without metainfo gets 404. With a token set
+`/stream` still adds a hash the engine does not hold. A page on the same
+hostname but another port is not stopped. With no token both servers
+also refuse `Sec-Fetch-Site: cross-site`; browsers send it only over https or to
+`localhost`, so it is a second signal, not a gate.
+
+DNS rebinding is open by default, IP-only deployments included. The
+attacker's name is in both `Origin` and `Host`, so only a Host allowlist stops
+it: set `allowed_hosts` (or `MKV_PROXY_ALLOWED_HOSTS`, a comma list) on every
+deployment to the names clients use (an IP-only one uses `["localhost"]`), and
+both servers answer 403 to any other `Host`, token or not. Empty (the default)
+is off; a list with no valid entry, or of the wrong type, stays on and admits
+only the always-allowed hosts. With no token, `POST /api/config` refuses to
+change what the next start enforces (403): the list and a new `gostorm_url`
+host. IP literals, `localhost` and the machine's own hostname are always
+allowed, and the engine port also admits the `gostorm_url` host (a change there
+needs a restart). Scripts and containers that call by name, such as
+`http://flodni:9080`, must be listed; behind a gateway that rewrites `Host`,
+list the name the gateway sends. Without a token, a cross-site navigation to a
+data route is refused; `/control`, `/api/health` and `/echo` are exempt. A
 reverse proxy in front of the control port must keep the `Host` header, or the
 panel's saves get 403. The engine sends no CORS headers; `/shutdown` and the
 Plex webhook take POST only. GoStorm's server
@@ -68,6 +90,18 @@ Run `flodni scrub-stubs --dry-run <source_path>` to count them and
 "Stub contents and the stub scrub" in the README for the flags, the exit codes
 and the stubs it leaves alone). Each rewrite keeps the stub's mode, owner, mtime
 and atime, set on the new file before it replaces the stub.
+
+An add never changes the trackers of a private torrent. For a hash the engine
+already stores or holds, and whose metainfo is not known public, the request's
+trackers (a magnet's `tr=`, a `torrs://` link, a `.torrent` file) are ignored
+and the log says how many, never which. Without this one add could point a
+private torrent's info hash at a foreign tracker and save it into the record.
+To change a torrent's trackers, remove it and add it again. A record that took a
+foreign tracker before this fix keeps it, and is now authoritative: remove it
+and add it again, or drop the host with `flodni trackers remove-host`. A bare
+magnet whose metadata is not known yet is still treated as public by the engine
+until the metadata arrives, so it may use DHT meanwhile; a stored record with
+metainfo is not affected.
 
 What this does not cover:
 
@@ -114,5 +148,5 @@ of code that does not go through these paths, such as a new `log` call that
 prints a link directly; the redactor is a net, not a license to log URLs.
 
 The repository holds no secrets; `config.json` is ignored by git and
-`config.json.example` carries placeholders. `config.json` holds `api_token` and the Plex token in clear text: a save from the panel keeps the file's existing permission bits (a new file is created 0600), so keep it unreadable to other users, or pass the secrets as `FLODNI_API_TOKEN` and `FLODNI_PLEX_TOKEN` instead. CI runs gitleaks on the full
+`config.json.example` carries placeholders. `config.json` holds `api_token` and the Plex token in clear text: a save from the panel keeps the file's existing permission bits (a new file is created 0600), so keep it unreadable to other users. `GET /api/config` returns neither secret; the panel shows only whether a Plex token is set and where it comes from, and a save with the field empty keeps the stored one (the environment's is never written to the file). Changing `plex.url` needs the token typed again, and on an open port neither `plex.url` nor `plex.token` can be changed through the API, because the stored token is sent to whatever host the URL names. Or pass the secrets as `FLODNI_API_TOKEN` and `FLODNI_PLEX_TOKEN` instead. CI runs gitleaks on the full
 history, and GitHub secret scanning with push protection is enabled.

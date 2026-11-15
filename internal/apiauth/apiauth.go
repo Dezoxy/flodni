@@ -8,7 +8,9 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"net/netip"
 	"net/url"
+	"os"
 	"strings"
 )
 
@@ -35,24 +37,105 @@ func never(*http.Request) bool { return false }
 // Middleware gates the control server. It returns next unchanged when token is
 // empty (auth off). Otherwise it answers 401 unless the request carries the
 // token. The token and the credential offered are never logged.
-func Middleware(token string, logger *slog.Logger, next http.Handler) http.Handler {
-	return gate("Control", token, logger, next, controlOpen, controlWebhook)
+func Middleware(token string, logger *slog.Logger, next http.Handler, opts ...Option) http.Handler {
+	return gate("Control", token, logger, next, controlOpen, controlWebhook, opts)
 }
 
 // GoStorm gates the engine's server on port 8090 the same way, with only
 // GET /echo open and no query token anywhere. A nil logger logs nothing.
-func GoStorm(token string, logger *slog.Logger, next http.Handler) http.Handler {
-	return gate("GoStorm", token, logger, next, gostormOpen, never)
+func GoStorm(token string, logger *slog.Logger, next http.Handler, opts ...Option) http.Handler {
+	return gate("GoStorm", token, logger, next, gostormOpen, never, opts)
 }
 
-func gate(name, token string, logger *slog.Logger, next http.Handler, open, queryToken func(*http.Request) bool) http.Handler {
+// Option tunes a gate. The zero set is today's behaviour.
+type Option func(*options)
+
+type options struct{ hosts map[string]bool }
+
+// WithAllowedHosts turns on the Host allowlist, the defence against DNS
+// rebinding: a request whose Host hostname (port stripped, lowercased, trailing
+// dot removed) is not listed is refused with 403, whether or not a token is
+// set. IP literals, "localhost" and this machine's own hostname are always
+// allowed in addition. An empty list leaves the check off. Entries are
+// normalised here the same way, so a caller may pass them as configured.
+func WithAllowedHosts(hosts []string) Option {
+	return func(o *options) {
+		set := map[string]bool{}
+		for _, h := range hosts {
+			if h = normHost(h); h != "" {
+				set[h] = true
+			}
+		}
+		if len(set) == 0 {
+			return
+		}
+		set["localhost"] = true
+		if own, err := os.Hostname(); err == nil {
+			if own = normHost(own); own != "" {
+				set[own] = true
+			}
+		}
+		o.hosts = set
+	}
+}
+
+// normHost lowercases a host or host:port, strips the port and the brackets of
+// an IPv6 literal, and removes one trailing dot.
+func normHost(hostport string) string {
+	host := strings.TrimSpace(hostport)
+	if h, _, err := net.SplitHostPort(host); err == nil {
+		host = h
+	}
+	host = strings.TrimSuffix(strings.TrimPrefix(host, "["), "]")
+	return strings.TrimSuffix(strings.ToLower(host), ".")
+}
+
+func hostAllowed(r *http.Request, allowed map[string]bool) bool {
+	h := normHost(r.Host)
+	if h == "" {
+		return false
+	}
+	if allowed[h] {
+		return true
+	}
+	_, err := netip.ParseAddr(h)
+	return err == nil
+}
+
+func gate(name, token string, logger *slog.Logger, next http.Handler, open, queryToken func(*http.Request) bool, opts []Option) http.Handler {
+	var o options
+	for _, opt := range opts {
+		opt(&o)
+	}
+	inner := gateToken(name, token, logger, next, open, queryToken)
+	if o.hosts == nil {
+		return inner
+	}
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !hostAllowed(r, o.hosts) {
+			refuse(w, r, name, logger, "host not allowed", "host not allowed")
+			return
+		}
+		inner.ServeHTTP(w, r)
+	})
+}
+
+func refuse(w http.ResponseWriter, r *http.Request, name string, logger *slog.Logger, what, body string) {
+	if logger != nil {
+		logger.Info(fmt.Sprintf("[%s] 403 %s %s %s from %s (Host %q)", name, what, r.Method, r.URL.Path, r.RemoteAddr, r.Host), "name", name, "method", r.Method, "path", r.URL.Path, "remote_addr", r.RemoteAddr, "host", r.Host)
+	}
+	http.Error(w, body, http.StatusForbidden)
+}
+
+func gateToken(name, token string, logger *slog.Logger, next http.Handler, open, queryToken func(*http.Request) bool) http.Handler {
 	if token == "" {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			if crossOrigin(r) {
-				if logger != nil {
-					logger.Info(fmt.Sprintf("[%s] 403 cross-origin %s %s from %s", name, r.Method, r.URL.Path, r.RemoteAddr), "name", name, "method", r.Method, "path", r.URL.Path, "remote_addr", r.RemoteAddr)
-				}
-				http.Error(w, "cross-origin request refused", http.StatusForbidden)
+				refuse(w, r, name, logger, "cross-origin", "cross-origin request refused")
+				return
+			}
+			if crossSite(r) && !open(r) {
+				refuse(w, r, name, logger, "cross-site", "cross-site request refused")
 				return
 			}
 			next.ServeHTTP(w, r)
@@ -117,4 +200,15 @@ func crossOrigin(r *http.Request) bool {
 	}
 	host = strings.TrimSuffix(strings.TrimPrefix(host, "["), "]")
 	return !strings.EqualFold(u.Hostname(), host)
+}
+
+// crossSite reports Sec-Fetch-Site: cross-site, on any method. A browser sets
+// the header itself and a page cannot forge it, but only over https or on
+// localhost (a "potentially trustworthy" origin): a page fetching a plain-http
+// LAN address sends none, and then only the Origin check applies. same-origin,
+// same-site, none and a missing header pass; the panel's own fetches are
+// same-origin, also behind a TLS tunnel. A second signal, not a replacement
+// for the Host allowlist.
+func crossSite(r *http.Request) bool {
+	return strings.EqualFold(strings.TrimSpace(r.Header.Get("Sec-Fetch-Site")), "cross-site")
 }

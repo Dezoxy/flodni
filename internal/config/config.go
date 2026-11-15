@@ -5,6 +5,9 @@ import (
 	"flodni/internal/flog"
 	"fmt"
 	"log/slog"
+	"net"
+	"net/netip"
+	"net/url"
 	"os"
 	"path/filepath"
 	"sort"
@@ -64,9 +67,31 @@ type Config struct {
 	// except the static panel page (see internal/apiauth). Empty: no auth.
 	// FLODNI_API_TOKEN overrides it. GET /api/config never returns it.
 	APIToken string `json:"api_token"`
+	// AllowedHosts, when non-empty, makes both servers refuse (403) a request whose
+	// Host hostname is not listed: the defence against DNS rebinding (see
+	// internal/apiauth). IP literals, localhost and the machine's own hostname are
+	// always allowed. Empty: off. MKV_PROXY_ALLOWED_HOSTS (comma list) overrides it.
+	// Hostnames only, normalised by finalize; read at start, a save needs a restart.
+	AllowedHosts []string `json:"allowed_hosts"`
+	// hostsOn is true when the list was non-empty as written, so a list with no valid
+	// entry keeps the check on (only the always-allowed hosts) instead of turning it off.
+	hostsOn bool
+	// hostsForce makes the list count as non-empty as written when its text is not
+	// usable as a list: a value of the wrong type in config.json, or an environment
+	// value with no entry. The check then stays on with only the always-allowed hosts.
+	hostsForce bool
+	// fileAllowedHosts is the list as config.json holds it, before the environment
+	// override and normalisation, so a panel save never writes the environment's list.
+	fileAllowedHosts []string
 	// fileAPIToken is APIToken as read from config.json, before the environment
 	// override, so a panel save never writes the environment's token to disk.
 	fileAPIToken string
+
+	// filePlexToken is Plex.Token as read from config.json, and plexTokenFromEnv says
+	// the environment supplied the one in use. A panel save writes the file's token,
+	// never the environment's. GET /api/config never returns the token either.
+	filePlexToken    string
+	plexTokenFromEnv bool
 
 	// --- FUSE Paths ---
 	// Fallback when CLI args are omitted. CLI args always take precedence.
@@ -268,10 +293,33 @@ func (c *Config) Save() error {
 }
 
 // Redacted returns a copy that is safe to send to the control panel: the API
-// token is blanked.
+// token and the Plex token are blanked.
 func (c Config) Redacted() Config {
 	c.APIToken = ""
+	c.Plex.Token = ""
 	return c
+}
+
+// PlexTokenSource says where the Plex token in use comes from: "env", "file" or ""
+// (none). The panel shows it instead of the token.
+func (c Config) PlexTokenSource() string {
+	switch {
+	case c.plexTokenFromEnv:
+		return "env"
+	case c.Plex.Token != "":
+		return "file"
+	}
+	return ""
+}
+
+// ResolvePlexToken returns the Plex token to persist when the panel posts a config.
+// The panel never sees the token, so an empty value keeps the one in config.json
+// (never the environment's); anything else is taken as given.
+func (c *Config) ResolvePlexToken(posted string) string {
+	if posted == "" {
+		return c.filePlexToken
+	}
+	return posted
 }
 
 // ResolveAPIToken returns the token to persist when the panel posts a config.
@@ -362,12 +410,23 @@ func LoadConfig() Config {
 		// V138: Support comments in JSON by stripping them before unmarshaling
 		cleanData := stripJSONComments(data)
 		if err := json.Unmarshal(cleanData, &cfg); err != nil {
+			// json fills every key it can before it reports a type error, so the list is
+			// still enforced; keep its text so a save does not write null over it.
+			cfg.fileAllowedHosts = append([]string(nil), cfg.AllowedHosts...)
+			var raw map[string]json.RawMessage
+			if json.Unmarshal(cleanData, &raw) == nil {
+				if v, ok := raw["allowed_hosts"]; ok && string(v) != "null" && json.Unmarshal(v, new([]string)) != nil {
+					cfg.hostsForce = true
+				}
+			}
 			ParseFailed.Store(true)
 			flog.Printf(flog.Std, parseFailedFmt, cfg.ConfigPath, err)
 		} else {
 			ParseFailed.Store(false)
 			flog.Std.Info(fmt.Sprintf("[Config] Loaded settings from %s", cfg.ConfigPath), "config_path", cfg.ConfigPath)
 			cfg.fileAPIToken = cfg.APIToken
+			cfg.fileAllowedHosts = append([]string(nil), cfg.AllowedHosts...)
+			cfg.filePlexToken = cfg.Plex.Token
 			// Backward compat: if gostorm_url was not present in config, fall back to legacy torrserver_url key
 			if cfg.GoStormBaseURL == "" {
 				var raw map[string]json.RawMessage
@@ -439,9 +498,14 @@ func (c *Config) applyEnvOverrides() {
 	}
 	if v := firstEnv("FLODNI_PLEX_TOKEN", "TIRAMISU_PLEX_TOKEN", "GOSTREAM_PLEX_TOKEN", "PLEX_TOKEN"); v != "" {
 		c.Plex.Token = v
+		c.plexTokenFromEnv = true
 	}
 	if v := os.Getenv("FLODNI_API_TOKEN"); v != "" {
 		c.APIToken = v
+	}
+	if v := os.Getenv("MKV_PROXY_ALLOWED_HOSTS"); v != "" {
+		c.AllowedHosts = strings.Split(v, ",")
+		c.hostsForce = true // set but with no entry (",") still means on, not off
 	}
 	if v := os.Getenv("MKV_PROXY_LOG_LEVEL"); v != "" {
 		c.LogLevel = v
@@ -459,6 +523,40 @@ func (c *Config) applyEnvOverrides() {
 			c.GID = uint32(n)
 		}
 	}
+}
+
+// EffectiveAllowedHosts is the list the control server enforces: AllowedHosts, or
+// only "localhost" when the list is on but has no valid entry (an empty list means
+// off). Nil when the allowlist is off.
+func (c *Config) EffectiveAllowedHosts() []string {
+	if !c.hostsOn {
+		return nil
+	}
+	out := normalizeAllowedHosts(c.AllowedHosts, false)
+	if len(out) == 0 {
+		out = []string{"localhost"}
+	}
+	return out
+}
+
+// EngineAllowedHosts is the list the engine's server enforces: the control list plus
+// the hostname of gostorm_url, which flodni's own calls to the engine send as Host,
+// so a name there cannot lock the daemon out of its engine. Nil when the allowlist
+// is off. The control server does not need that name and does not get it.
+func (c *Config) EngineAllowedHosts() []string {
+	out := c.EffectiveAllowedHosts()
+	if out == nil {
+		return nil
+	}
+	// An IP literal and localhost always pass, so they add nothing to the set; leaving
+	// them out keeps a change between two of them from reading as a change of the list.
+	if u, err := url.Parse(c.GoStormBaseURL); err == nil && u.Hostname() != "" {
+		h, _ := normalizeHost(u.Hostname())
+		if _, isIP := netip.ParseAddr(h); isIP != nil && h != "localhost" && h != "" {
+			out = normalizeAllowedHosts(append(out, h), false)
+		}
+	}
+	return out
 }
 
 func firstEnv(keys ...string) string {
@@ -609,6 +707,12 @@ func (c *Config) finalize() {
 		c.PlexPathMap = valid
 	}
 
+	c.hostsOn = c.hostsForce || hasEntry(c.AllowedHosts)
+	c.AllowedHosts = normalizeAllowedHosts(c.AllowedHosts, true)
+	if c.hostsOn && len(c.AllowedHosts) == 0 {
+		flog.Std.Warn("[Config] WARNING: allowed_hosts has no valid entry (or is not a list); the allowlist stays ON and admits only IP literals, localhost, this machine's hostname and the gostorm_url host")
+	}
+
 	// Calculate MetadataCacheSize in bytes
 	c.MetadataCacheSize = c.MetadataCacheSizeMB * 1024 * 1024
 	if c.MetadataCacheSize < 1*1024*1024 {
@@ -619,7 +723,131 @@ func (c *Config) finalize() {
 	c.PreloadWorkers = c.PreloadWorkersCount
 }
 
-// parseBytes parses byte size strings like "80MB", "128KB", "1GB"
+func warnBadHost(warn bool, raw string) {
+	if warn {
+		flog.Std.Warn(fmt.Sprintf("[Config] WARNING: allowed_hosts entry %q is not a bare hostname (no scheme, path, wildcard or leading dot); ignoring it", raw), "entry", raw)
+	}
+}
+
+func hasEntry(in []string) bool {
+	for _, e := range in {
+		if strings.TrimSpace(e) != "" {
+			return true
+		}
+	}
+	return false
+}
+
+// HostsSaveChanged reports whether saving posted over this config (a fresh load of
+// config.json) would change the engine allowlist a start enforces. It compares the
+// derived list, so every input is covered: allowed_hosts, gostorm_url and the
+// environment. A post whose list is absent keeps the file's; one equal to what the
+// file holds, or to the running config's, is unchanged. Unless it changed, posted's
+// allowed_hosts is replaced by the file's own text, so a hand edit survives a save.
+func (c *Config) HostsSaveChanged(posted, running *Config) bool {
+	if posted.AllowedHosts == nil {
+		posted.AllowedHosts = c.fileAllowedHosts
+	}
+	p := *posted
+	if p.GoStormBaseURL == "" { // absent: the file's, as for the list
+		p.GoStormBaseURL = c.GoStormBaseURL
+	}
+	p.applyEnvOverrides() // a start applies the environment to whatever the file holds
+	p.hostsOn = p.hostsForce || hasEntry(p.AllowedHosts)
+	p.AllowedHosts = normalizeAllowedHosts(p.AllowedHosts, false)
+	got := p.EngineAllowedHosts()
+	if sameSet(got, c.EngineAllowedHosts()) || sameSet(got, running.EngineAllowedHosts()) {
+		posted.AllowedHosts = c.fileAllowedHosts
+		return false
+	}
+	return true
+}
+
+func sameSet(a, b []string) bool {
+	if (a == nil) != (b == nil) {
+		return false
+	}
+	m := map[string]bool{}
+	for _, e := range a {
+		m[e] = true
+	}
+	for _, e := range b {
+		if !m[e] {
+			return false
+		}
+		delete(m, e)
+	}
+	return len(m) == 0
+}
+
+// ValidateAllowedHosts returns an error naming the first non-blank entry that is
+// not a bare hostname, so a post can be refused instead of saved.
+func ValidateAllowedHosts(in []string) error {
+	for _, raw := range in {
+		if e := strings.TrimSpace(raw); e != "" {
+			if _, ok := normalizeHost(e); !ok {
+				return fmt.Errorf("allowed_hosts entry %q is not a bare hostname (no scheme, path, wildcard or leading dot)", raw)
+			}
+		}
+	}
+	return nil
+}
+
+// normalizeHost lowercases a host or host:port and strips port, brackets and one
+// trailing dot. ok is false for anything that is not a bare hostname or IP literal.
+func normalizeHost(e string) (string, bool) {
+	if strings.ContainsAny(e, "/\\@*? #%") {
+		return "", false
+	}
+	host := e
+	if h, _, err := net.SplitHostPort(e); err == nil {
+		host = h
+	}
+	host = strings.TrimSuffix(strings.TrimPrefix(host, "["), "]")
+	host = strings.TrimSuffix(strings.ToLower(host), ".")
+	if host == "" || strings.HasPrefix(host, ".") || strings.Contains(host, ":") && net.ParseIP(host) == nil {
+		return "", false
+	}
+	return host, true
+}
+
+// normalizeAllowedHosts returns the entries normalised (see normalizeHost) and
+// de-duplicated, in order. A blank entry is skipped; one that is not a bare hostname
+// is dropped with a warning (the allowlist then stays stricter, never wider). A
+// non-ASCII name is kept but warned about: browsers send the xn-- form.
+func normalizeAllowedHosts(in []string, warn bool) []string {
+	var out []string
+	seen := map[string]bool{}
+	for _, raw := range in {
+		e := strings.TrimSpace(raw)
+		if e == "" {
+			continue
+		}
+		host, ok := normalizeHost(e)
+		if !ok {
+			warnBadHost(warn, raw)
+			continue
+		}
+		if warn && !isASCII(host) {
+			flog.Std.Warn(fmt.Sprintf("[Config] WARNING: allowed_hosts entry %q is not ASCII; a browser sends the xn-- form, so list that", raw), "entry", raw)
+		}
+		if !seen[host] {
+			seen[host] = true
+			out = append(out, host)
+		}
+	}
+	return out
+}
+
+func isASCII(s string) bool {
+	for i := 0; i < len(s); i++ {
+		if s[i] >= 0x80 {
+			return false
+		}
+	}
+	return true
+}
+
 func parseBytes(s string) (int64, error) {
 	if n, err := strconv.ParseInt(s, 10, 64); err == nil {
 		return n, nil
@@ -659,5 +887,10 @@ func (c *Config) LogConfig(logger *slog.Logger) {
 	logger.Info(fmt.Sprintf("HTTP Retries: %d, Delay: %dms", c.MaxRetryAttempts, c.RetryDelayMS), "max_retry_attempts", c.MaxRetryAttempts, "retry_delay_m_s", c.RetryDelayMS)
 	logger.Info(fmt.Sprintf("Preload Engine: Workers=%d", c.PreloadWorkersCount), "preload_workers_count", c.PreloadWorkersCount)
 	logger.Info(fmt.Sprintf("Network: MetricsPort=%d", c.MetricsPort), "metrics_port", c.MetricsPort)
+	if c.hostsOn {
+		logger.Info(fmt.Sprintf("Allowed hosts: [%s] (plus IP literals, localhost, this machine's hostname and the gostorm_url host)", strings.Join(c.AllowedHosts, ", ")), "allowed_hosts", c.AllowedHosts)
+	} else {
+		logger.Info("Allowed hosts: off (any Host is served; DNS rebinding is not stopped)")
+	}
 	logger.Info("=====================")
 }

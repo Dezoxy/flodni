@@ -215,3 +215,139 @@ func TestOpenPortRefusesSaveOverAnUnparsableFile(t *testing.T) {
 		t.Fatalf("unparsable file overwritten: %s", after)
 	}
 }
+
+// allowed_hosts is like api_token: on an open port any client could widen or clear
+// the list the next start enforces, so a changed value is refused. The file is read
+// fresh, so a hand edit is compared, not the start-up value.
+func TestOpenPortRefusesChangingAllowedHosts(t *testing.T) {
+	h, path, _ := controlAPIServer(t, "", "")
+	if err := os.WriteFile(path, []byte(`{"log_level":"info","allowed_hosts":["x.example"]}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg := config.LoadConfig() // the running config holds the list too
+	globalConfig.Store(&cfg)
+	before, _ := os.ReadFile(path)
+	for _, body := range []string{
+		`{"allowed_hosts":["evil.example"]}`,
+		`{"allowed_hosts":["x.example","evil.example"]}`,
+		`{"allowed_hosts":[]}`,
+		`{"log_level":"debug","allowed_hosts":["evil.example"]}`,
+	} {
+		code, resp := doControl(h, "/api/config", body, "")
+		if code != http.StatusForbidden || !json.Valid([]byte(resp)) || !strings.Contains(resp, "allowed_hosts") {
+			t.Fatalf("open port, %s: status %d body %q, want 403 JSON naming allowed_hosts", body, code, resp)
+		}
+	}
+	if after, _ := os.ReadFile(path); string(before) != string(after) {
+		t.Fatalf("file changed on refusal:\n%s\n->\n%s", before, after)
+	}
+}
+
+func TestOpenPortAcceptsSameOrAbsentAllowedHosts(t *testing.T) {
+	h, path, _ := controlAPIServer(t, "", "")
+	if err := os.WriteFile(path, []byte(`{"log_level":"info","allowed_hosts":["x.example"]}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for _, body := range []string{
+		`{"log_level":"debug"}`,
+		`{"log_level":"debug","allowed_hosts":["x.example"]}`,
+		`{"log_level":"debug","allowed_hosts":["X.Example:9080"]}`,
+	} {
+		if code, resp := doControl(h, "/api/config", body, ""); code != http.StatusOK {
+			t.Fatalf("open port save %s: status %d (%s), want 200", body, code, resp)
+		}
+		data, _ := os.ReadFile(path)
+		var c struct {
+			AllowedHosts []string `json:"allowed_hosts"`
+		}
+		if err := json.Unmarshal(data, &c); err != nil || len(c.AllowedHosts) != 1 || c.AllowedHosts[0] != "x.example" {
+			t.Fatalf("after %s the file holds %s, want allowed_hosts [x.example]", body, data)
+		}
+	}
+}
+
+func TestTokenModeAllowsChangingAllowedHosts(t *testing.T) {
+	h, path, _ := controlAPIServer(t, "tok", "tok")
+	if code, resp := doControl(h, "/api/config", `{"allowed_hosts":["new.example"]}`, "tok"); code != http.StatusOK {
+		t.Fatalf("authenticated change: status %d (%s), want 200", code, resp)
+	}
+	data, _ := os.ReadFile(path)
+	if !strings.Contains(string(data), `"new.example"`) {
+		t.Fatalf("change not written: %s", data)
+	}
+}
+
+// gostorm_url feeds the engine allowlist, so on an open port a changed host there is
+// a changed list: the derived value is gated, not each field.
+func TestOpenPortRefusesGostormURLThatWidensTheList(t *testing.T) {
+	h, path, _ := controlAPIServer(t, "", "")
+	if err := os.WriteFile(path, []byte(`{"gostorm_url":"http://127.0.0.1:8090","allowed_hosts":["x.example"]}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	before, _ := os.ReadFile(path)
+	code, resp := doControl(h, "/api/config", `{"gostorm_url":"http://attacker.example:8090","allowed_hosts":["x.example"]}`, "")
+	if code != http.StatusForbidden || !json.Valid([]byte(resp)) {
+		t.Fatalf("changed gostorm_url host: status %d body %q, want 403 JSON", code, resp)
+	}
+	if after, _ := os.ReadFile(path); string(before) != string(after) {
+		t.Fatalf("file changed on refusal:\n%s\n->\n%s", before, after)
+	}
+	for _, u := range []string{"http://127.0.0.1:9999", "http://10.0.0.5:8090", "http://localhost:8090", "http://127.0.0.1:8090"} {
+		body := `{"log_level":"debug","gostorm_url":"` + u + `","allowed_hosts":["x.example"]}`
+		if code, resp := doControl(h, "/api/config", body, ""); code != http.StatusOK {
+			t.Fatalf("gostorm_url %s leaves the effective set unchanged: status %d (%s), want 200", u, code, resp)
+		}
+	}
+}
+
+// A post equal to the running list is unchanged, so a panel save does not 403 and does
+// not overwrite a hand edit that has not been restarted into effect.
+func TestOpenPortSaveEqualToRunningListKeepsTheHandEdit(t *testing.T) {
+	h, path, _ := controlAPIServer(t, "", "")
+	if err := os.WriteFile(path, []byte(`{"allowed_hosts":["old.example"]}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg := config.LoadConfig() // the running config: old.example
+	globalConfig.Store(&cfg)
+	if err := os.WriteFile(path, []byte(`{"allowed_hosts":["old.example","hand.example"]}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if code, resp := doControl(h, "/api/config", `{"log_level":"debug","allowed_hosts":["old.example"]}`, ""); code != http.StatusOK {
+		t.Fatalf("save equal to the running list: status %d (%s), want 200", code, resp)
+	}
+	data, _ := os.ReadFile(path)
+	if !strings.Contains(string(data), "hand.example") {
+		t.Fatalf("hand edit lost: %s", data)
+	}
+}
+
+func TestInvalidPostedAllowedHostsIs400(t *testing.T) {
+	for _, tok := range []string{"", "tok"} {
+		h, path, _ := controlAPIServer(t, tok, tok)
+		before, _ := os.ReadFile(path)
+		for _, body := range []string{`{"allowed_hosts":["https://x.example"]}`, `{"allowed_hosts":["ok.example","*.example"]}`, `{"allowed_hosts":[".example.com"]}`} {
+			if code, _ := doControl(h, "/api/config", body, tok); code != http.StatusBadRequest {
+				t.Fatalf("token %q, %s: status %d, want 400", tok, body, code)
+			}
+		}
+		if after, _ := os.ReadFile(path); string(before) != string(after) {
+			t.Fatalf("file changed on a 400:\n%s\n->\n%s", before, after)
+		}
+	}
+}
+
+// A type error in another key makes the file fail to parse, but the list it holds is
+// still enforced; a save with a token must not write null over it.
+func TestTokenSaveKeepsTheListWhenAnotherKeyIsMistyped(t *testing.T) {
+	h, path, _ := controlAPIServer(t, "tok", "tok")
+	if err := os.WriteFile(path, []byte(`{"api_token":"tok","allowed_hosts":["x.example"],"metrics_port":"abc"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if code, resp := doControl(h, "/api/config", `{"log_level":"debug"}`, "tok"); code != http.StatusOK {
+		t.Fatalf("save: status %d (%s), want 200", code, resp)
+	}
+	data, _ := os.ReadFile(path)
+	if !strings.Contains(string(data), `"x.example"`) {
+		t.Fatalf("list dropped by the save: %s", data)
+	}
+}
