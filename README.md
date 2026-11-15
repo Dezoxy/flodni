@@ -258,8 +258,9 @@ fails, the features are just inactive.
   reach the same file. A stop matched this way is honoured with a handle open,
   like a unique IMDb match, only when the file's season and episode (a
   movie's year) agree with the webhook's. The library-type bootstrap (step 4)
-  is not narrowed. With none or several of them linked, with no `plex_path_map`, or before the first walk
-  has finished, matching is as before; one candidate is never narrowed.
+  is not narrowed. With none or several of them linked, with no
+  `plex_path_map`, or before the first walk has finished, matching is as
+  before; one candidate is never narrowed.
   Limits: a set older than 15 minutes (three walks) is not used, so a walk
   that keeps failing falls back to the matching above; the webhook that asks
   for an early walk is matched with the old set; a walk that exceeds its
