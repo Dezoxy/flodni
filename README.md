@@ -193,9 +193,13 @@ fails, the features are just inactive.
   401 and nothing is counted. A webhook counts when it is a play or resume
   of a movie or an episode. It is matched when it resolves to one file of
   the library.
-- **How a webhook is matched.** The media server reports each file as a path
-  of its own library, and the first match wins: (1) the base name of that
-  path, byte for byte, against the registered files; (2) with
+- **How a webhook is matched.** Plex Media Server's own webhook names no
+  file: its `Metadata` has no `Media`, `Part` or `file` (seen on a live
+  server). So a play from Plex is matched by steps 3 to 5 below, and steps 1
+  and 2 apply only to a sender that includes the path, in Plex's JSON shape
+  (`Metadata.Media[].Part[].file`; see "Other senders"). The first match
+  wins: (1) the base name of a reported path, byte for byte, against the
+  registered files; (2) with
   `plex_path_map` set, the stub name behind a library symlink (below);
   (3) the IMDb id; (4) when only a library type and an IMDb id are known, the
   one registered file of that type with no id yet; (5) a fuzzy title match,
@@ -222,14 +226,32 @@ fails, the features are just inactive.
   at the mapped path. The lookup is meant for a local (not network) library
   bind and runs inline in the webhook handler, at most 8 paths per webhook: a
   hung mount delays that webhook. Prefixes and targets are cleaned at load;
-  a prefix given twice keeps the first in sorted order, with a warning. Built,
-  unit-tested against symlinks in a
-  temporary folder; not run against a media server.
+  a prefix given twice keeps the first in sorted order, with a warning.
+  Unit-tested against symlinks in a temporary folder. It never matches a
+  webhook Plex Media Server sends, which names no path (above); it needs a
+  sender that does.
 - **Which rule matched.**
   `flodni_playback_webhook_match_rule_total{rule}` counts the same webhooks
   by rule: `basename`, `path_map`, `imdb` (the id, or the bootstrap), `fuzzy`
-  or `none`. `fuzzy` is a guess: a library whose plays show up there mostly
-  is a candidate for `plex_path_map`.
+  or `none`. `fuzzy` is a guess. With Plex as the sender, `basename` and
+  `path_map` stay at 0 and plays land on `imdb` or `fuzzy`; `imdb` is exact
+  only while one registered file holds that id.
+- **Other senders.** Any client may post the same JSON (`Content-Type:
+  application/json`, or a form field `payload`), with the same token rule.
+  The handler reads:
+  - `event`: `media.play`, `media.resume` or `media.stop`; anything else is
+    ignored.
+  - `Metadata.librarySectionType`: `movie` or `show` (not `episode`);
+    anything else is ignored.
+  - `Metadata.Media[].Part[].file`: the file's path in the sender's library,
+    for steps 1 and 2.
+  - For the fallbacks: `Metadata.title`, `grandparentTitle`, `year`,
+    `parentIndex` and `index`. Numbers may be quoted.
+  - An IMDb id anywhere in the body as `"imdb://tt…"`, for example
+    `"Guid":[{"id":"imdb://tt…"}]`.
+
+  A stop is paired by the same matching, not by a player or session id. A
+  body that does not parse is logged and dropped.
 - **Check it.** The startup line, `[Webhook]`, says when the last matched
   play webhook arrived (`never` if none), whether played-file protection has
   a recorded play (`active`) or not (`inactive`), whether the reader budget
