@@ -153,11 +153,15 @@ When the list is not empty, both servers (control port and engine port) answer
 with a token or without, and log it with method, path and address. The match
 ignores case, the port and a trailing dot. Entries are lowercased and stripped
 of a port at load; an entry with a scheme, a path or a wildcard is not a
-hostname and is dropped with a warning (the list then stays stricter, not
-wider, but if every entry is dropped the check is off, so read the start-up
-log). The effective list is logged once at start, and a save from the panel
-needs a restart to apply. Always allowed in addition: IP literals (v4 and
-v6), `localhost`, this machine's own hostname and the hostname of `gostorm_url`.
+hostname and is dropped with a warning. A list that is not empty as
+written but has no valid entry fails closed: the check stays on and admits only
+the always-allowed hosts below, with a warning at start. Only an empty list is
+off. With no token enforced, `POST /api/config` refuses (403) a body that
+changes `allowed_hosts` from what `config.json` holds now, like `api_token`:
+edit the file or the environment and restart. The effective list is logged
+once at start, and a save from the panel needs a restart to apply. Always
+allowed in addition: IP literals (v4 and v6), `localhost`, this machine's own
+hostname and the hostname of `gostorm_url`.
 Every other name a client uses must be listed: a script or a container that
 calls `http://flodni:9080` needs `flodni` in the list, and so does the name Plex
 puts in the webhook URL. Wildcards are not supported. Reach the panel by IP and

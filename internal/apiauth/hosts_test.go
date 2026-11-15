@@ -170,3 +170,17 @@ func TestRebindingStoppedByAllowlist(t *testing.T) {
 		}
 	}
 }
+
+// An all-invalid list fails closed in the daemon wiring by passing the
+// always-allowed hosts only: a named Host is refused, an IP literal passes.
+func TestOnlyAlwaysAllowedHostsRefusesNames(t *testing.T) {
+	opts := []Option{WithAllowedHosts([]string{"127.0.0.1"})}
+	for hname, wrap := range wrappers {
+		if c, _, _ := do(t, wrap, "", opts, "x.example", nil); c != 403 {
+			t.Errorf("%s: named host = %d, want 403", hname, c)
+		}
+		if c, _, _ := do(t, wrap, "", opts, "192.168.1.5:9080", nil); c != 200 {
+			t.Errorf("%s: ip literal = %d, want 200", hname, c)
+		}
+	}
+}

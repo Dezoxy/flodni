@@ -55,11 +55,41 @@ func TestAllowedHostsEnvCommaListOverridesFile(t *testing.T) {
 
 func TestEffectiveAllowedHostsAddsEngineHostOnlyWhenOn(t *testing.T) {
 	c := Config{GoStormBaseURL: "http://engine:8090"}
+	c.finalize()
 	if got := c.EffectiveAllowedHosts(); got != nil {
 		t.Fatalf("allowlist off: got %v, want nil", got)
 	}
 	c.AllowedHosts = []string{"x.example"}
+	c.finalize()
 	if got := c.EffectiveAllowedHosts(); !reflect.DeepEqual(got, []string{"x.example", "engine"}) {
 		t.Fatalf("got %v, want the list plus the engine host", got)
+	}
+}
+
+// A list that is non-empty as written but has no valid entry must not turn the
+// check off: it stays on with only the always-allowed hosts.
+func TestAllInvalidAllowedHostsFailsClosed(t *testing.T) {
+	t.Setenv("MKV_PROXY_ALLOWED_HOSTS", "")
+	c := loadWith(t, `{"gostorm_url": "http://engine:8090",
+		"allowed_hosts": ["https://x.example", "*.example"]}`)
+	if len(c.AllowedHosts) != 0 {
+		t.Fatalf("allowed_hosts = %v, want none valid", c.AllowedHosts)
+	}
+	if got := c.EffectiveAllowedHosts(); !reflect.DeepEqual(got, []string{"engine"}) {
+		t.Fatalf("effective = %v, want the gostorm_url host only (check stays on)", got)
+	}
+	c = loadWith(t, `{"gostorm_url": "", "allowed_hosts": ["/x"]}`)
+	if got := c.EffectiveAllowedHosts(); len(got) == 0 {
+		t.Fatal("check turned off with every entry invalid and no gostorm_url host")
+	}
+	t.Setenv("MKV_PROXY_ALLOWED_HOSTS", "https://a.example")
+	envCfg := loadWith(t, `{}`)
+	if got := envCfg.EffectiveAllowedHosts(); len(got) == 0 {
+		t.Fatal("env list with only invalid entries turned the check off")
+	}
+	t.Setenv("MKV_PROXY_ALLOWED_HOSTS", "")
+	blankCfg := loadWith(t, `{"allowed_hosts": ["", " "]}`)
+	if got := blankCfg.EffectiveAllowedHosts(); got != nil {
+		t.Fatalf("blank list = %v, want off", got)
 	}
 }

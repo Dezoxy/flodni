@@ -72,6 +72,12 @@ type Config struct {
 	// always allowed. Empty: off. MKV_PROXY_ALLOWED_HOSTS (comma list) overrides it.
 	// Hostnames only, normalised by finalize; read at start, a save needs a restart.
 	AllowedHosts []string `json:"allowed_hosts"`
+	// hostsOn is true when the list was non-empty as written, so a list with no valid
+	// entry keeps the check on (only the always-allowed hosts) instead of turning it off.
+	hostsOn bool
+	// fileAllowedHosts is the list as config.json holds it, before the environment
+	// override and normalisation, so a panel save never writes the environment's list.
+	fileAllowedHosts []string
 	// fileAPIToken is APIToken as read from config.json, before the environment
 	// override, so a panel save never writes the environment's token to disk.
 	fileAPIToken string
@@ -376,6 +382,7 @@ func LoadConfig() Config {
 			ParseFailed.Store(false)
 			flog.Std.Info(fmt.Sprintf("[Config] Loaded settings from %s", cfg.ConfigPath), "config_path", cfg.ConfigPath)
 			cfg.fileAPIToken = cfg.APIToken
+			cfg.fileAllowedHosts = append([]string(nil), cfg.AllowedHosts...)
 			// Backward compat: if gostorm_url was not present in config, fall back to legacy torrserver_url key
 			if cfg.GoStormBaseURL == "" {
 				var raw map[string]json.RawMessage
@@ -472,18 +479,23 @@ func (c *Config) applyEnvOverrides() {
 	}
 }
 
-// EffectiveAllowedHosts is the list the two servers enforce: AllowedHosts plus the
+// EffectiveAllowedHosts is the list the two servers enforce: AllowedHosts (none valid
+// still means on) plus the
 // hostname of gostorm_url, which flodni's own calls to the engine send as Host, so
 // a name there cannot lock the daemon out of its engine. Nil when the allowlist is off.
 func (c *Config) EffectiveAllowedHosts() []string {
-	if len(c.AllowedHosts) == 0 {
+	if !c.hostsOn {
 		return nil
 	}
 	out := append([]string(nil), c.AllowedHosts...)
 	if u, err := url.Parse(c.GoStormBaseURL); err == nil && u.Hostname() != "" {
 		out = append(out, u.Hostname())
 	}
-	return normalizeAllowedHosts(out)
+	out = normalizeAllowedHosts(out, false)
+	if len(out) == 0 {
+		out = []string{"localhost"} // keep the check on: an empty list means off
+	}
+	return out
 }
 
 func firstEnv(keys ...string) string {
@@ -634,7 +646,11 @@ func (c *Config) finalize() {
 		c.PlexPathMap = valid
 	}
 
-	c.AllowedHosts = normalizeAllowedHosts(c.AllowedHosts)
+	c.hostsOn = hasEntry(c.AllowedHosts)
+	c.AllowedHosts = normalizeAllowedHosts(c.AllowedHosts, true)
+	if c.hostsOn && len(c.AllowedHosts) == 0 {
+		flog.Std.Warn("[Config] WARNING: allowed_hosts has no valid entry; the allowlist stays ON and admits only IP literals, localhost, this machine's hostname and the gostorm_url host")
+	}
 
 	// Calculate MetadataCacheSize in bytes
 	c.MetadataCacheSize = c.MetadataCacheSizeMB * 1024 * 1024
@@ -646,11 +662,52 @@ func (c *Config) finalize() {
 	c.PreloadWorkers = c.PreloadWorkersCount
 }
 
+func warnBadHost(warn bool, raw string) {
+	if warn {
+		flog.Std.Warn(fmt.Sprintf("[Config] WARNING: allowed_hosts entry %q is not a bare hostname (no scheme, path or wildcard); ignoring it", raw), "entry", raw)
+	}
+}
+
+func hasEntry(in []string) bool {
+	for _, e := range in {
+		if strings.TrimSpace(e) != "" {
+			return true
+		}
+	}
+	return false
+}
+
+// ResolveAllowedHosts returns the list to persist when the panel posts a config, and
+// whether the post changes it. An absent list, or one equal to what config.json holds
+// (or what is in effect now, the environment's included), keeps the file's own text.
+func (c *Config) ResolveAllowedHosts(posted []string) ([]string, bool) {
+	if posted == nil {
+		return c.fileAllowedHosts, false
+	}
+	np := normalizeAllowedHosts(posted, false)
+	if equalStrings(np, normalizeAllowedHosts(c.fileAllowedHosts, false)) || equalStrings(np, c.AllowedHosts) {
+		return c.fileAllowedHosts, false
+	}
+	return posted, true
+}
+
+func equalStrings(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
+}
+
 // normalizeAllowedHosts returns the entries lowercased, without port, brackets or
 // trailing dot, de-duplicated, in order. A blank entry is skipped; one with a
 // scheme, a path, userinfo, a wildcard or a space is not a hostname and is dropped
 // with a warning (the allowlist then stays stricter, never wider).
-func normalizeAllowedHosts(in []string) []string {
+func normalizeAllowedHosts(in []string, warn bool) []string {
 	var out []string
 	seen := map[string]bool{}
 	for _, raw := range in {
@@ -659,7 +716,7 @@ func normalizeAllowedHosts(in []string) []string {
 			continue
 		}
 		if strings.ContainsAny(e, "/\\@*? #%") {
-			flog.Std.Warn(fmt.Sprintf("[Config] WARNING: allowed_hosts entry %q is not a bare hostname (no scheme, path or wildcard); ignoring it", raw), "entry", raw)
+			warnBadHost(warn, raw)
 			continue
 		}
 		host := e
@@ -669,7 +726,7 @@ func normalizeAllowedHosts(in []string) []string {
 		host = strings.TrimSuffix(strings.TrimPrefix(host, "["), "]")
 		host = strings.TrimSuffix(strings.ToLower(host), ".")
 		if host == "" || strings.Contains(host, ":") && net.ParseIP(host) == nil {
-			flog.Std.Warn(fmt.Sprintf("[Config] WARNING: allowed_hosts entry %q is not a bare hostname (no scheme, path or wildcard); ignoring it", raw), "entry", raw)
+			warnBadHost(warn, raw)
 			continue
 		}
 		if !seen[host] {
@@ -720,8 +777,8 @@ func (c *Config) LogConfig(logger *slog.Logger) {
 	logger.Info(fmt.Sprintf("HTTP Retries: %d, Delay: %dms", c.MaxRetryAttempts, c.RetryDelayMS), "max_retry_attempts", c.MaxRetryAttempts, "retry_delay_m_s", c.RetryDelayMS)
 	logger.Info(fmt.Sprintf("Preload Engine: Workers=%d", c.PreloadWorkersCount), "preload_workers_count", c.PreloadWorkersCount)
 	logger.Info(fmt.Sprintf("Network: MetricsPort=%d", c.MetricsPort), "metrics_port", c.MetricsPort)
-	if len(c.AllowedHosts) > 0 {
-		logger.Info(fmt.Sprintf("Allowed hosts: %s (plus IP literals, localhost and this machine's hostname)", strings.Join(c.AllowedHosts, ", ")), "allowed_hosts", c.AllowedHosts)
+	if c.hostsOn {
+		logger.Info(fmt.Sprintf("Allowed hosts: [%s] (plus IP literals, localhost, this machine's hostname and the gostorm_url host)", strings.Join(c.AllowedHosts, ", ")), "allowed_hosts", c.AllowedHosts)
 	} else {
 		logger.Info("Allowed hosts: off (any Host is served; DNS rebinding is not stopped)")
 	}

@@ -51,7 +51,9 @@ DNS rebinding is open by default. The attacker's name is in both `Origin` and
 `Host`, so only a Host allowlist stops it: set `allowed_hosts` (or
 `MKV_PROXY_ALLOWED_HOSTS`, a comma list) to the names clients use, and both
 servers answer 403 to any other `Host`, token or not. Empty (the default) is
-off. IP literals, `localhost`, the machine's own hostname and the hostname of
+off; a list with no valid entry stays on, admitting only the always-allowed
+hosts. With no token, `POST /api/config` refuses to change it (403), as for
+`api_token`. IP literals, `localhost`, the machine's own hostname and the hostname of
 `gostorm_url` are always allowed; scripts and containers that call by name, such
 as `http://flodni:9080`, and the name in Plex's webhook URL must be listed.
 Set it on any deployment reachable by name. A

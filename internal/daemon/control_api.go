@@ -42,12 +42,25 @@ func handleConfig(w http.ResponseWriter, r *http.Request) {
 					"config.json does not parse; fix it before saving through the API")
 				return
 			}
+			// allowed_hosts is the same kind of setting: a client could clear or widen
+			// the list the next start enforces. A changed list is refused; an absent or
+			// equal one saves as before.
+			if _, changed := onDisk.ResolveAllowedHosts(newCfg.AllowedHosts); changed {
+				refuseOpenPort(w, r, http.StatusForbidden,
+					"allowed_hosts cannot be changed through the API while no token is enforced: "+
+						"set it through MKV_PROXY_ALLOWED_HOSTS or by editing config.json, then restart flodni")
+				return
+			}
 			// Keep the token the file holds now, not the one read at start: the owner may
 			// have added one by hand and not restarted yet.
 			newCfg.APIToken = onDisk.ResolveAPIToken("")
 		} else {
 			// The panel never sees the token; an empty post keeps the one in the file.
 			newCfg.APIToken = gc().ResolveAPIToken(newCfg.APIToken)
+		}
+		// A panel save keeps the list as the file holds it, never the environment's.
+		if resolved, changed := onDisk.ResolveAllowedHosts(newCfg.AllowedHosts); !changed {
+			newCfg.AllowedHosts = resolved
 		}
 		// Paths that came from the command line are not written to the
 		// file: keep what the file had.

@@ -215,3 +215,62 @@ func TestOpenPortRefusesSaveOverAnUnparsableFile(t *testing.T) {
 		t.Fatalf("unparsable file overwritten: %s", after)
 	}
 }
+
+// allowed_hosts is like api_token: on an open port any client could widen or clear
+// the list the next start enforces, so a changed value is refused. The file is read
+// fresh, so a hand edit is compared, not the start-up value.
+func TestOpenPortRefusesChangingAllowedHosts(t *testing.T) {
+	h, path, _ := controlAPIServer(t, "", "")
+	if err := os.WriteFile(path, []byte(`{"log_level":"info","allowed_hosts":["x.example"]}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	before, _ := os.ReadFile(path)
+	for _, body := range []string{
+		`{"allowed_hosts":["evil.example"]}`,
+		`{"allowed_hosts":["x.example","evil.example"]}`,
+		`{"allowed_hosts":[]}`,
+		`{"log_level":"debug","allowed_hosts":["evil.example"]}`,
+	} {
+		code, resp := doControl(h, "/api/config", body, "")
+		if code != http.StatusForbidden || !json.Valid([]byte(resp)) || !strings.Contains(resp, "allowed_hosts") {
+			t.Fatalf("open port, %s: status %d body %q, want 403 JSON naming allowed_hosts", body, code, resp)
+		}
+	}
+	if after, _ := os.ReadFile(path); string(before) != string(after) {
+		t.Fatalf("file changed on refusal:\n%s\n->\n%s", before, after)
+	}
+}
+
+func TestOpenPortAcceptsSameOrAbsentAllowedHosts(t *testing.T) {
+	h, path, _ := controlAPIServer(t, "", "")
+	if err := os.WriteFile(path, []byte(`{"log_level":"info","allowed_hosts":["x.example"]}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for _, body := range []string{
+		`{"log_level":"debug"}`,
+		`{"log_level":"debug","allowed_hosts":["x.example"]}`,
+		`{"log_level":"debug","allowed_hosts":["X.Example:9080"]}`,
+	} {
+		if code, resp := doControl(h, "/api/config", body, ""); code != http.StatusOK {
+			t.Fatalf("open port save %s: status %d (%s), want 200", body, code, resp)
+		}
+		data, _ := os.ReadFile(path)
+		var c struct {
+			AllowedHosts []string `json:"allowed_hosts"`
+		}
+		if err := json.Unmarshal(data, &c); err != nil || len(c.AllowedHosts) != 1 || c.AllowedHosts[0] != "x.example" {
+			t.Fatalf("after %s the file holds %s, want allowed_hosts [x.example]", body, data)
+		}
+	}
+}
+
+func TestTokenModeAllowsChangingAllowedHosts(t *testing.T) {
+	h, path, _ := controlAPIServer(t, "tok", "tok")
+	if code, resp := doControl(h, "/api/config", `{"allowed_hosts":["new.example"]}`, "tok"); code != http.StatusOK {
+		t.Fatalf("authenticated change: status %d (%s), want 200", code, resp)
+	}
+	data, _ := os.ReadFile(path)
+	if !strings.Contains(string(data), `"new.example"`) {
+		t.Fatalf("change not written: %s", data)
+	}
+}
