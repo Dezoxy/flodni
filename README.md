@@ -1176,7 +1176,10 @@ eight digits older tools put in the name (first eight for episodes, last eight
 for movies) are not used, so a stub of another torrent that shares them is
 left alone. The call reads each stub under both folders. A stub with no
 readable hash is skipped and logged once per call. The torrent is dropped once
-no stub links to it.
+no stub links to it. A stub that cannot be read at all (an I/O error, or JSON that
+does not parse) is not "no hash": it may be a sibling episode of a season pack,
+so the torrent is kept and one line names the first such path. A stub that reads
+fine and links to no hash is still skipped, as before.
 
 ## Replacing a release
 
@@ -1200,6 +1203,24 @@ episodes are dead but whose sampled files read still replaces the old stubs,
 and those episodes then fail on first play. Reading every file would delay
 every replacement by the slowest episode of the pack.
 
+## Listing stubs
+
+`GET /api/library/list` (control port, `type=movies` or `type=tv`) reports each
+stub with `path`, `fuse_path`, `size`, `hash`, `imdb`, `file_index`, `season` and
+`episode`, and `linked`:
+
+| `linked` | Meaning |
+|---|---|
+| `true` | A library symlink points at this stub's base name. |
+| `false` | None does: nothing the media server sees uses this stub. |
+| `null` | There is no linked set to compare against: no walk has finished, no `plex_path_map` target is configured, or the set is older than three walk intervals. |
+
+The set is the one the play webhook uses to break a tie between candidate
+stubs. It is kept in memory and refreshed every five minutes; `list` reads no
+extra file. Report only: nothing is removed or changed because a stub is
+unlinked, and a stub linked by a link outside the `plex_path_map` targets reads
+as `false`.
+
 ## Auditing stubs against the engine's file list
 
 `GET /api/library/audit` (control port, behind `api_token` like the other
@@ -1213,7 +1234,8 @@ record or state, and it runs only when asked, never at start.
  "mismatched": [{"path": "...", "hash": "...", "index": 3, "stub_size": 200,
                  "engine_length": 100, "reason": "length_differs"}],
  "no_file_list": {"stubs": 2, "torrents": 1, "hashes": ["..."]},
- "unreadable": 0}
+ "unreadable": 0,
+ "orphan_records": [{"hash": "...", "name": "..."}]}
 ```
 
 | Field | Meaning |
@@ -1223,6 +1245,7 @@ record or state, and it runs only when asked, never at start.
 | `reason` `length_differs` | The index names a file of another length than the stub's `size`. |
 | `no_file_list` | Stubs whose record holds no file list (saved before the metainfo arrived). They cannot be checked until one wake stores the list; the audit does not wake them. |
 | `unreadable` | Stubs with no readable hash. |
+| `orphan_records` | Torrent records the engine stores that no stub references, as `hash` (lower-case hex) and the stored `name`, sorted by hash and not capped. Nothing else of a record is shown, and a name that looks like a URL or magnet link is left empty. Report only: nothing is removed. An unreadable stub may reference one of them, so check `unreadable` first. `[]` when there are none. |
 
 `mismatched` and `no_file_list.hashes` hold at most 200 entries each;
 `mismatched_total` and `truncated` give the full count. Repair a reported
@@ -1803,6 +1826,7 @@ scraper on the same host or Docker network.
 | `flodni_warmup_write_queue_drops_total` | counter | none | Head chunks dropped because the warmup write queue was full. |
 | `flodni_readability_torrents` | gauge | `state` | Library torrents by readability: `failed` has a failure streak, `ok` has none and a read served by the swarm, `never_read` is the rest (no record, or a streak reset by a metainfo without a read). Not exported when the state database is off. |
 | `flodni_library_torrents_unstored` | gauge | none | Library torrents with no stored engine record holding metainfo, counted once at startup after the library walk and not refreshed. Not exported until counted. See "A stub the engine does not store". |
+| `flodni_library_unlinked_stubs` | gauge | none | Stubs no library symlink points at (`linked` is `false` in `GET /api/library/list`), as of the last list of movies and of tv (a client list, the audit and a catch-up pass refresh it). Not exported, rather than 0, while there is no linked set or a kind has not been listed yet. See "Listing stubs". |
 | `flodni_stub_index_mismatch_total` | counter | none | Library paths whose stub file index differs from the file an open resolved by size and name, once per path per process. Non-zero means a stale stub. See "A stub whose file index is stale". |
 | `flodni_tracker_scrapes_total` | counter | `result` | Experimental. Tracker scrapes per torrent and tracker: `ok` (answered), `error` (the request failed or the answer left the torrent out), `skipped` (no BEP 48 scrape URL or an unsupported scheme). All values present from 0 once the scraper runs. See Tracker scrape. |
 | `flodni_torrents_by_seeders` | gauge | `bucket` | Experimental. Torrents by the seeders of their latest scrape answer: `0`, `1-2`, `3+`. A torrent with an error entry is in none. |
