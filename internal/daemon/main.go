@@ -439,6 +439,9 @@ func Run() {
 	}
 
 	startWebhookStatus(webhookStatus, backgroundStopChan)
+	// The library's symlinks into the mount, for a webhook that matches several stubs.
+	// Off the webhook's path; idle while plex_path_map is empty.
+	go runLinkedWalker(&app.linked, linkedRoots, backgroundStopChan, linkedWalkInterval, linkedWalkDebounce)
 	startSwarmSnapshot(engineSwarmSource, backgroundStopChan, logger)
 	if net, err := torr.ScrapeNetwork(); err != nil {
 		// Fail closed: with a proxy that cannot be used, a scrape would leave from the real address.

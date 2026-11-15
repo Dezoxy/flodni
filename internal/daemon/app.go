@@ -35,9 +35,14 @@ type App struct {
 	unconfirmedHolds                 [2]atomic.Int64 // by rbHoldLifted, rbHoldRefused
 	unconfirmedConfirmedAfterRefusal atomic.Int64    // sessions, once each
 	playbackWebhookRules             [numWebhookRules]atomic.Int64
+
+	// linked is the set of stub names a library symlink points at (linked_stubs.go).
+	linked linkedIndex
 }
 
-func newApp() *App { return &App{startup: &startupReporter{}} }
+func newApp() *App {
+	return &App{startup: &startupReporter{}, linked: linkedIndex{kick: make(chan struct{}, 1)}}
+}
 
 // app is set once in Run() before any goroutine starts and never reassigned there.
 var app *App

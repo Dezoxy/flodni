@@ -140,7 +140,7 @@ func handlePlexWebhook(w http.ResponseWriter, r *http.Request) {
 		// name matched; nil with the key empty.
 		mappedNames := lazyPathMapStubNames(files)
 		exactMatch, exactState, matchRule := findExactMatchRule(
-			exactMatchKeys{imdbID: webhookImdbID, basenames: basenames, mappedBasenames: mappedNames},
+			exactMatchKeys{imdbID: webhookImdbID, basenames: basenames, mappedBasenames: mappedNames, linked: &app.linked},
 			snapshotPlaybackEntries(),
 		)
 
@@ -158,6 +158,7 @@ func handlePlexWebhook(w http.ResponseWriter, r *http.Request) {
 			if sectionDir != "" {
 				var bootPath string
 				var bootState *PlaybackState
+				var bootAll []exactMatchEntry
 				bootCount := 0
 				app.playbackRegistry.Range(func(key, value interface{}) bool {
 					path := key.(string)
@@ -165,6 +166,7 @@ func handlePlexWebhook(w http.ResponseWriter, r *http.Request) {
 					if strings.Contains(path, sectionDir) && state.GetImdbID() == "" {
 						bootPath = path
 						bootState = state
+						bootAll = append(bootAll, exactMatchEntry{path: path, state: state})
 						bootCount++
 					}
 					return true
@@ -173,6 +175,9 @@ func handlePlexWebhook(w http.ResponseWriter, r *http.Request) {
 					exactMatch = bootPath
 					exactState = bootState
 					matchRule = ruleIMDB
+				} else if e, ok := app.linked.pickEntry(bootAll); ok {
+					// Several files with no id yet: the one a library symlink points at.
+					exactMatch, exactState, matchRule = e.path, e.state, ruleLinked
 				}
 			}
 		}
@@ -181,7 +186,8 @@ func handlePlexWebhook(w http.ResponseWriter, r *http.Request) {
 		if exactMatch == "" {
 			var bestMatch string
 			var bestState *PlaybackState
-			bestLevel := 0 // higher = better match
+			bestLevel := 0             // higher = better match
+			var ties []exactMatchEntry // every entry at bestLevel
 
 			app.playbackRegistry.Range(func(key, value interface{}) bool {
 				path := key.(string)
@@ -224,6 +230,10 @@ func handlePlexWebhook(w http.ResponseWriter, r *http.Request) {
 					bestLevel = level
 					bestMatch = path
 					bestState = value.(*PlaybackState)
+					ties = ties[:0]
+				}
+				if level > 0 && level == bestLevel {
+					ties = append(ties, exactMatchEntry{path: path, state: value.(*PlaybackState)})
 				}
 				return true
 			})
@@ -231,6 +241,10 @@ func handlePlexWebhook(w http.ResponseWriter, r *http.Request) {
 			exactState = bestState
 			if exactMatch != "" {
 				matchRule = ruleFuzzy
+				// Several files fit equally well: the one a library symlink points at.
+				if e, ok := app.linked.pickEntry(ties); ok {
+					exactMatch, exactState, matchRule = e.path, e.state, ruleLinked
+				}
 			}
 		}
 
@@ -253,6 +267,7 @@ func handlePlexWebhook(w http.ResponseWriter, r *http.Request) {
 					section: payload.Metadata.LibrarySectionType,
 					title:   targetTitle, seriesTitle: seriesTitle, year: targetYear,
 					season: payload.Metadata.ParentIndex, episode: payload.Metadata.Index,
+					linked: &app.linked,
 				}, playedCandidates())
 				countConfirmedPlay(chosen.path, chosen.key, ok)
 				if ok && warmNext != nil {
@@ -308,7 +323,7 @@ func handlePlexWebhook(w http.ResponseWriter, r *http.Request) {
 		// Pass 1: Exact matches (filename, plex_path_map stub name, IMDB ID) — never the
 		// shared hash suffix.
 		stopMatch, stopState, stopRule := findExactMatchRule(
-			exactMatchKeys{imdbID: stopImdbID, basenames: basenames, mappedBasenames: lazyPathMapStubNames(files)},
+			exactMatchKeys{imdbID: stopImdbID, basenames: basenames, mappedBasenames: lazyPathMapStubNames(files), linked: &app.linked},
 			snapshotPlaybackEntries(),
 		)
 
@@ -317,6 +332,7 @@ func handlePlexWebhook(w http.ResponseWriter, r *http.Request) {
 		// Pass 2: Fuzzy matches only if no exact match.
 		if stopMatch == "" {
 			bestLevel := 0
+			var ties []exactMatchEntry // every entry at bestLevel
 			app.playbackRegistry.Range(func(key, value interface{}) bool {
 				path := key.(string)
 				filename := strings.ToLower(filepath.Base(path))
@@ -356,9 +372,17 @@ func handlePlexWebhook(w http.ResponseWriter, r *http.Request) {
 					stopMatch = path
 					stopState = value.(*PlaybackState)
 					stopMatchFromFuzzy = true
+					ties = ties[:0]
+				}
+				if level > 0 && level == bestLevel {
+					ties = append(ties, exactMatchEntry{path: path, state: value.(*PlaybackState)})
 				}
 				return true
 			})
+			// Several files fit equally well: the one a library symlink points at.
+			if e, ok := app.linked.pickEntry(ties); ok {
+				stopMatch, stopState, stopRule, stopMatchFromFuzzy = e.path, e.state, ruleLinked, false
+			}
 		}
 
 		// Only a basename match (pass 1) is the file by construction. An IMDB-only match
@@ -394,7 +418,8 @@ func handlePlexWebhook(w http.ResponseWriter, r *http.Request) {
 		// sibling episode being read, so a late or spurious stop must not kill it.
 		// Basename and unique-IMDB matches are honored even with the handle open:
 		// ignoring them would leave the pump alive until the 2h idle timeout (V262).
-		if stopMatch != "" && stopState != nil && !matchByBasename && !imdbUnique && anyLiveHandleFor(stopMatch) {
+		// So is a linked match: the one stub among several that a library symlink points at.
+		if stopMatch != "" && stopState != nil && !matchByBasename && !imdbUnique && stopRule != ruleLinked && anyLiveHandleFor(stopMatch) {
 			logger.Info(fmt.Sprintf("[PLEX] STOP ignored for %s: fuzzy or ambiguous match with handle still open", filepath.Base(stopMatch)), "file", filepath.Base(stopMatch))
 		} else if stopMatch != "" && stopState != nil {
 			stopState.mu.Lock()
