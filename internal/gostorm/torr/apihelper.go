@@ -549,6 +549,24 @@ func dropAllTorrent() {
 	}
 }
 
+// StopEngine stops the engine and closes the settings database, which syncs it. The
+// daemon's shutdown calls it last, after the sessions are closed and the mount is gone,
+// so nothing is left to write a record. It takes lifeMu first, so a save in flight
+// finishes before the close; a later save is dropped by bbolt with an error line.
+func StopEngine() {
+	utils.StopTrackerLoader()
+
+	lifeMu.Lock()
+	defer lifeMu.Unlock()
+	btsMu.Lock()
+	if bts != nil {
+		bts.Disconnect()
+	}
+	btsMu.Unlock()
+
+	sets.CloseDB()
+}
+
 func Shutdown() {
 	utils.StopTrackerLoader()
 

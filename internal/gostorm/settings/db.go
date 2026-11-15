@@ -1,6 +1,7 @@
 package settings
 
 import (
+	"os"
 	"path/filepath"
 	"strings"
 	"time"
@@ -21,7 +22,7 @@ func NewTDB() GoStormDB {
 	if globalBboltDB != nil {
 		return globalBboltDB // Return existing instance
 	}
-	db, err := bolt.Open(filepath.Join(Path, "config.db"), 0o666, &bolt.Options{Timeout: 5 * time.Second, NoSync: true})
+	db, err := openBolt(filepath.Join(Path, "config.db"))
 	if err != nil {
 		log.TLogln(err)
 		return nil
@@ -34,12 +35,28 @@ func NewTDB() GoStormDB {
 	return globalBboltDB
 }
 
+// openBolt opens the engine database with every commit fsynced: since the strict wake,
+// the stored record is the only copy of a torrent's metainfo. The file is owner-only; an
+// older, wider one is tightened here.
+func openBolt(path string) (*bolt.DB, error) {
+	if fi, err := os.Stat(path); err == nil && fi.Mode().Perm()&0o077 != 0 {
+		if err := os.Chmod(path, 0o600); err != nil {
+			log.TLogln("Cannot tighten", path, "to 0600:", err)
+		} else {
+			log.TLogln("Tightened", path, "from", fi.Mode().Perm().String(), "to -rw-------")
+		}
+	}
+	return bolt.Open(path, 0o600, &bolt.Options{Timeout: 5 * time.Second})
+}
+
+// CloseDB closes the database, which syncs it. The handle stays set: a write that
+// arrives afterwards gets bbolt's "database not open" error and is logged, not a nil
+// dereference. Closing twice is harmless.
 func (v *TDB) CloseDB() {
 	if v.db != nil {
 		if err := v.db.Close(); err != nil {
 			log.TLogln("Error close db:", err)
 		}
-		v.db = nil
 	}
 }
 

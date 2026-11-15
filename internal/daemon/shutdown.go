@@ -32,6 +32,7 @@ type shutdownSteps struct {
 	stopBackground  func()
 	unmount         func() error
 	detach          func() error // lazy detach of a mount that will not unmount
+	closeEngine     func()       // stop the engine, close and sync its database: nothing writes after this
 	restartRequired bool         // exit with restartExitCode instead of 0
 	logf            func(format string, args ...any)
 }
@@ -84,6 +85,9 @@ func shutdown(s shutdownSteps, deadline, detachAfter time.Duration) int {
 			s.logf("WARNING: unmount failed: %v", err)
 		}
 		s.logf("Shutdown: unmount done")
+		// Last: the mount is gone, so no read can wake a torrent or save a record. Every
+		// commit is already fsynced, so a deadline that skips this loses no record.
+		run("close engine", s.closeEngine)
 	}()
 
 	select {
