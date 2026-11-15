@@ -86,3 +86,27 @@ func TestTokenModeIgnoresOrigin(t *testing.T) {
 		}
 	}
 }
+
+// Two Origin headers are ambiguous and refused; a GET with a foreign Origin is
+// refused like any other method (an XHR or fetch GET carries one).
+func TestOpenPortOriginEdgeCases(t *testing.T) {
+	next := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {})
+	for name, wrap := range map[string]func(string, *slog.Logger, http.Handler) http.Handler{"control": Middleware, "gostorm": GoStorm} {
+		req := httptest.NewRequest("GET", "/api/config", nil)
+		req.Host = "x.example"
+		req.Header.Set("Origin", "https://evil.example")
+		rec := httptest.NewRecorder()
+		wrap("", nil, next).ServeHTTP(rec, req)
+		if rec.Code != 403 {
+			t.Errorf("%s GET foreign origin: %d, want 403", name, rec.Code)
+		}
+		req = httptest.NewRequest("POST", "/api/config", nil)
+		req.Host = "x.example"
+		req.Header["Origin"] = []string{"https://x.example", "https://x.example"}
+		rec = httptest.NewRecorder()
+		wrap("", nil, next).ServeHTTP(rec, req)
+		if rec.Code != 403 {
+			t.Errorf("%s two Origin values: %d, want 403", name, rec.Code)
+		}
+	}
+}

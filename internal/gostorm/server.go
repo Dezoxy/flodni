@@ -1,6 +1,7 @@
 package server
 
 import (
+	"log/slog"
 	"net"
 	"os"
 	"path/filepath"
@@ -12,8 +13,12 @@ import (
 )
 
 // SetAPIToken makes the HTTP server require this bearer token on every route
-// except GET /echo. Call it before Start; empty leaves the server open.
-func SetAPIToken(token string) { web.APIToken = token }
+// except GET /echo. Call it before Start; empty leaves the server open, and
+// then the logger records each request refused for a foreign Origin.
+func SetAPIToken(token string, logger *slog.Logger) {
+	web.APIToken = token
+	web.Logger = logger
+}
 
 func Start() {
 	settings.InitSets(settings.Args.RDB, settings.Args.SearchWA)

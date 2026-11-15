@@ -1577,8 +1577,8 @@ curl -X POST -H 'Content-Type: application/json' \
   -d '{"action":"rem","hash":"<infohash>"}' http://127.0.0.1:8090/torrents
 ```
 
-The engine also accepts `drop` (unload from RAM, keep it in the DB) and `wipe`
-(remove every torrent, rarely what you want).
+The engine also accepts `drop` (unload from RAM, keep it in the DB). It no
+longer has `wipe`; remove torrents one by one.
 
 Removing a title means removing its stub, not just its torrent. Two ways do it
 properly, and deleting the stub from the source directory is neither: that

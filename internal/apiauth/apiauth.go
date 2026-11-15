@@ -91,9 +91,10 @@ func equal(got, want []byte) bool {
 // crossOrigin reports whether r carries an Origin header whose hostname is not
 // the hostname the request was sent to. Only an open port (no token) applies
 // it: a page in the owner's browser could otherwise POST text/plain JSON here
-// with no preflight. A request with no Origin (Plex, curl, scripts, the
-// same-origin panel and its proxy) is not a browser cross-site request and
-// passes. Scheme and port are ignored on purpose: a TLS-terminating tunnel
+// with no preflight. A request with no Origin (Plex, curl, scripts, and the
+// GET navigations, <img> and <script> loads a browser sends without one) passes.
+// The panel's same-origin fetch POSTs do carry Origin and pass because the
+// hostnames match, so a reverse proxy in front must keep the Host header. Scheme and port are ignored on purpose: a TLS-terminating tunnel
 // delivers plain http with the original Host, so the browser's https Origin
 // would never match scheme://host:port. "null", an empty value and anything
 // that does not parse count as cross-origin. A page on the same hostname but

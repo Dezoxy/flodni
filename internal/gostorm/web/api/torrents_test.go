@@ -28,3 +28,29 @@ func TestTorrentsRefusesWipe(t *testing.T) {
 		}
 	}
 }
+
+// /shutdown stops the process, so it must not answer GET: a page can send a
+// GET with an <img> tag and no Origin header. POST goes through the Origin gate.
+func TestShutdownIsPostOnly(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	r := gin.New()
+	SetupRoute(r)
+	post := map[string]bool{}
+	for _, rt := range r.Routes() {
+		if rt.Path == "/shutdown" || rt.Path == "/shutdown/*reason" {
+			if rt.Method != http.MethodPost {
+				t.Errorf("%s %s registered, want POST only", rt.Method, rt.Path)
+			}
+			post[rt.Path] = true
+		}
+	}
+	if len(post) != 2 {
+		t.Errorf("POST routes registered: %v, want /shutdown and /shutdown/*reason", post)
+	}
+	req := httptest.NewRequest(http.MethodGet, "/shutdown", nil)
+	rec := httptest.NewRecorder()
+	r.ServeHTTP(rec, req)
+	if rec.Code != http.StatusNotFound && rec.Code != http.StatusMethodNotAllowed {
+		t.Errorf("GET /shutdown: status %d, want 404 or 405", rec.Code)
+	}
+}

@@ -1,6 +1,7 @@
 package web
 
 import (
+	"log/slog"
 	"net"
 	"net/http"
 	"os"
@@ -29,6 +30,9 @@ var (
 	// APIToken, when set before Start, is required as a bearer token on every
 	// route except GET /echo. Empty: no auth.
 	APIToken string
+
+	// Logger receives the Origin refusals of the engine's gate. Nil logs nothing.
+	Logger *slog.Logger
 )
 
 // newServer wraps the gin engine at the http.Server level so no route bypasses
@@ -37,7 +41,7 @@ var (
 func newServer(addr string, h http.Handler) *http.Server {
 	return &http.Server{
 		Addr:              addr,
-		Handler:           apiauth.GoStorm(APIToken, nil, h),
+		Handler:           apiauth.GoStorm(APIToken, Logger, h),
 		ReadHeaderTimeout: 10 * time.Second,
 		IdleTimeout:       120 * time.Second,
 	}

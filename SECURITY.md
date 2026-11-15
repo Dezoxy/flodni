@@ -27,7 +27,7 @@ API is open: bind it to loopback or a private network, never to an address
 other people can reach. Even then, `POST /api/config` refuses to set or change
 `api_token` and `POST /api/restart` is refused (403), so a client cannot pick
 or erase the next start's token; set it through the environment or
-`config.json`. GoStorm's `GET /shutdown` still stops the process without a
+`config.json`. GoStorm's `POST /shutdown` still stops the process without a
 token.
 
 The same token also covers GoStorm's own server on port 8090 (torrent
@@ -40,8 +40,13 @@ both servers answer 403 to a request whose `Origin` header names a different
 hostname than its `Host` (scheme and port are ignored, because a TLS tunnel
 delivers plain http with the original `Host`; `Origin: null` is refused), so
 a page in a browser on the network cannot send a cross-site POST. Requests
-without `Origin` (scripts, Plex) pass, and a page on the same hostname but
-another port is not stopped. The engine sends no CORS headers. GoStorm's server
+without `Origin` (scripts, Plex, and the GET navigations and `<img>` loads a
+browser sends without one) pass, so some GETs on 8090 (`/stream?link=` adds a
+torrent, `/play/:hash/:id` wakes a stored one) stay open to a page, and so does
+DNS rebinding. A page on the same hostname but another port is not stopped. A
+reverse proxy in front of the control port must keep the `Host` header, or the
+panel's saves get 403. The engine sends no CORS headers; `/shutdown` and the
+Plex webhook take POST only. GoStorm's server
 bounds header reads (10 s) and idle connections (120 s); it sets no read or
 write timeout, because streams and uploads are long-lived.
 
