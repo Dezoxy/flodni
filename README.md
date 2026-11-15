@@ -985,7 +985,11 @@ that window is not counted.
 
 With the warmup cache on, a new head file that would pass the quota evicts
 whole media files, head and tail together. Files never played go first, then
-played files; each class goes oldest written first. This is built and runs
+played files; each class goes oldest written first. An eviction does not stop at
+the quota: it goes down to 95% of it (a fixed mark, not a setting), so the next
+head writes find room instead of each starting another directory walk. The
+headroom comes from files never played; a played file is taken only as far as
+the quota needs. This is built and runs
 today. The cache also keeps an in-memory list of which files are warm; it is
 internal and not served, and only the aggregates below are exported
 (`flodni_warmup_files`). Evicting the least recently read file is built but
