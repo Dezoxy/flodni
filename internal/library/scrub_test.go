@@ -185,8 +185,8 @@ func TestScrubRewritesALegacyLineStub(t *testing.T) {
 	if fi, _ := os.Lstat(p); !fi.ModTime().Equal(scrubOldTime) {
 		t.Errorf("mtime = %v", fi.ModTime())
 	}
-	if st := readStub(p); st.Hash != charHash || st.Size != 4321 || st.IMDB != "tt7654321" {
-		t.Errorf("readStub = %+v", st)
+	if st, err := readStub(p); err != nil || st.Hash != charHash || st.Size != 4321 || st.IMDB != "tt7654321" {
+		t.Errorf("readStub = %+v, %v", st, err)
 	}
 }
 
