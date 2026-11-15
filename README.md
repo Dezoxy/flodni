@@ -109,8 +109,14 @@ keep the stored token, type to replace it. A post with an empty or absent
 `plex.token` keeps the one `config.json` holds at that moment (a hand edit
 included); an environment token (`FLODNI_PLEX_TOKEN`) is never written to the
 file. The panel cannot clear the token; delete `plex.token` from `config.json`.
-Changing the Plex token is allowed on an open port, unlike `api_token`: it is a
-credential for another system, not a say over who may call Flodni.
+The stored token is sent wherever `plex.url` points, so a save that changes the
+URL's scheme, host or port needs a typed token: without one it is refused with
+409 (`re-enter the Plex token when changing plex.url`), and the panel makes the
+token field required once the URL field changes. On an open port (no
+`api_token`), `POST /api/config` also refuses with 403 a non-empty `plex.token`
+and a changed `plex.url`, as it does for `api_token`; set them through
+`FLODNI_PLEX_TOKEN` or by editing `config.json`, then restart. A body that leaves
+both unchanged or absent saves as before.
 With no token enforced (the port is open), two control routes are refused with
 403 and a JSON `error`, because any client that reaches the port could
 otherwise take the service over: `POST /api/config` when the body carries a non-empty

@@ -603,7 +603,7 @@
                         <div class="form-grid">
                             <div class="form-group" style="grid-column: 1 / -1;">
                                 <label>Media Server URL</label>
-                                <input type="text" name="plex_url" data-nested="plex.url"
+                                <input type="text" name="plex_url" data-nested="plex.url" oninput="syncPlexTokenRequired()"
                                     placeholder="http://192.168.1.10:32400">
                                 <div class="hint">Base URL of the Plex server. Used only for the library refresh after a library add; nothing is discovered automatically.</div>
                             </div>
@@ -613,6 +613,7 @@
                                 <div class="hint" id="plex-token-hint">A Plex token. Needed for the library refresh after
                                     a library add. It is never shown: leave the field empty to keep the stored one, type to replace it.
                                     To remove it, delete <code>plex.token</code> from config.json.</div>
+                                <div class="hint" id="plex-token-warn" style="display:none;">You changed the URL: re-enter the Plex token.</div>
                             </div>
                             <div class="form-group">
                                 <label>Movies Library ID</label>
@@ -986,6 +987,23 @@
             'log_level'
         ];
 
+        // Changing the Plex URL points the stored token at a new host, so the token
+        // must be typed again (the server refuses with 409 otherwise).
+        let originalPlexURL = "";
+        function plexURLChanged() {
+            const v = (document.querySelector('[data-nested="plex.url"]').value || "").trim();
+            if (!v) return false;
+            const origin = s => { try { return new URL(s).origin; } catch (e) { return s.replace(/\/+$/, ''); } };
+            return origin(v) !== origin(originalPlexURL);
+        }
+        function syncPlexTokenRequired() {
+            const tokenInput = document.querySelector('[data-nested="plex.token"]');
+            const changed = plexURLChanged();
+            tokenInput.required = changed;
+            document.getElementById('plex-token-hint').dataset.warn = changed ? '1' : '';
+            document.getElementById('plex-token-warn').style.display = changed ? 'block' : 'none';
+        }
+
         async function loadEngine() {
             try {
                 const res = await api('/api/config');
@@ -1014,6 +1032,7 @@
                     const src = originalEngine.plex_token_source;
                     const tokenInput = form.querySelector('[data-nested="plex.token"]');
                     tokenInput.value = "";
+                    originalPlexURL = p.url || p.URL || "";
                     tokenInput.placeholder = src === 'env' ? 'A token is set (from the environment)'
                         : src === 'file' ? 'A token is set (in config.json)' : 'No token set';
                     form.querySelector('[data-nested="plex.library_id"]').value = p.library_id || p.LibraryID || 0;

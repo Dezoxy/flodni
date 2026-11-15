@@ -107,8 +107,8 @@ func TestSaveWithAnEmptyPlexTokenKeepsTheFilesToken(t *testing.T) {
 	clearPlexEnv(t)
 	for _, body := range []string{
 		`{"log_level":"debug"}`,                                      // plex absent
-		`{"log_level":"debug","plex":{"url":"http://y"}}`,            // token absent
-		`{"log_level":"debug","plex":{"url":"http://y","token":""}}`, // what the panel sends untouched
+		`{"log_level":"debug","plex":{"url":"http://x"}}`,            // token absent, url unchanged
+		`{"log_level":"debug","plex":{"url":"http://x","token":""}}`, // what the panel sends untouched
 	} {
 		h, path, _ := controlAPIServer(t, "", "")
 		writeCfg(t, path, `{"log_level":"info","plex":{"url":"http://x","token":"`+plexSecret+`"}}`)
@@ -123,9 +123,9 @@ func TestSaveWithAnEmptyPlexTokenKeepsTheFilesToken(t *testing.T) {
 
 func TestSaveWithANewPlexTokenWritesIt(t *testing.T) {
 	clearPlexEnv(t)
-	h, path, _ := controlAPIServer(t, "", "")
-	writeCfg(t, path, `{"log_level":"info","plex":{"token":"`+plexSecret+`"}}`)
-	if code, resp := doControl(h, "/api/config", `{"plex":{"token":"replacement"}}`, ""); code != http.StatusOK {
+	h, path, _ := controlAPIServer(t, "tok", "tok")
+	writeCfg(t, path, `{"api_token":"tok","plex":{"token":"`+plexSecret+`"}}`)
+	if code, resp := doControl(h, "/api/config", `{"plex":{"token":"replacement"}}`, "tok"); code != http.StatusOK {
 		t.Fatalf("status %d (%s)", code, resp)
 	}
 	if tok := filePlexToken(t, path); tok != "replacement" {
@@ -133,11 +133,83 @@ func TestSaveWithANewPlexTokenWritesIt(t *testing.T) {
 	}
 }
 
+// Redaction makes a stored token worth stealing without reading it: point plex.url at
+// a host you control, post no token, and the save keeps the stored one, which the next
+// library refresh sends there. A changed URL therefore needs a typed token, and on an
+// open port neither field may change through the API.
+func TestPlexURLChangeNeedsANewToken(t *testing.T) {
+	clearPlexEnv(t)
+	h, path, _ := controlAPIServer(t, "tok", "tok")
+	start := `{"api_token":"tok","plex":{"url":"http://plex.lan:32400","token":"` + plexSecret + `"}}`
+	writeCfg(t, path, start)
+	for _, body := range []string{
+		`{"plex":{"url":"http://evil.example"}}`,
+		`{"plex":{"url":"http://evil.example","token":""}}`,
+		`{"plex":{"url":"https://plex.lan:32400","token":""}}`, // scheme
+		`{"plex":{"url":"http://plex.lan:1","token":""}}`,      // port
+	} {
+		code, resp := doControl(h, "/api/config", body, "tok")
+		if code != http.StatusConflict || !json.Valid([]byte(resp)) || !strings.Contains(resp, "re-enter the Plex token") {
+			t.Fatalf("%s: status %d (%q), want 409 with a JSON error", body, code, resp)
+		}
+		if data, _ := os.ReadFile(path); string(data) != start {
+			t.Fatalf("%s: file changed on refusal: %s", body, data)
+		}
+	}
+	// With a typed token the change is accepted and the new token is the one stored.
+	if code, resp := doControl(h, "/api/config", `{"plex":{"url":"http://new.lan:32400","token":"fresh"}}`, "tok"); code != http.StatusOK {
+		t.Fatalf("new url with a new token: status %d (%s), want 200", code, resp)
+	}
+	if tok := filePlexToken(t, path); tok != "fresh" {
+		t.Fatalf("file token = %q, want fresh", tok)
+	}
+	// An unchanged URL (the panel's untouched save, a trailing slash included) keeps the token.
+	if code, resp := doControl(h, "/api/config", `{"plex":{"url":"http://new.lan:32400/","token":""}}`, "tok"); code != http.StatusOK {
+		t.Fatalf("unchanged url: status %d (%s), want 200", code, resp)
+	}
+	if tok := filePlexToken(t, path); tok != "fresh" {
+		t.Fatalf("file token = %q, want it kept", tok)
+	}
+}
+
+func TestOpenPortRefusesPlexURLAndTokenChanges(t *testing.T) {
+	clearPlexEnv(t)
+	h, path, _ := controlAPIServer(t, "", "")
+	start := `{"plex":{"url":"http://plex.lan:32400","token":"` + plexSecret + `"}}`
+	writeCfg(t, path, start)
+	for _, body := range []string{
+		`{"plex":{"url":"http://evil.example"}}`,
+		`{"plex":{"url":"http://evil.example","token":"x"}}`,
+		`{"plex":{"url":"http://plex.lan:32400","token":"x"}}`, // a token, whatever its value
+		`{"plex":{"token":"x"}}`,
+	} {
+		code, resp := doControl(h, "/api/config", body, "")
+		if code != http.StatusForbidden || !json.Valid([]byte(resp)) || !strings.Contains(resp, "FLODNI_PLEX_TOKEN") {
+			t.Fatalf("%s: status %d (%q), want 403 naming FLODNI_PLEX_TOKEN", body, code, resp)
+		}
+		if data, _ := os.ReadFile(path); string(data) != start {
+			t.Fatalf("%s: file changed on refusal: %s", body, data)
+		}
+	}
+	// Leaving both unchanged or absent saves as before.
+	for _, body := range []string{
+		`{"log_level":"debug","plex":{"url":"http://plex.lan:32400","token":""}}`,
+		`{"log_level":"debug"}`, // drops the URL as before, keeps the token
+	} {
+		if code, resp := doControl(h, "/api/config", body, ""); code != http.StatusOK {
+			t.Fatalf("%s: status %d (%s), want 200", body, code, resp)
+		}
+		if tok := filePlexToken(t, path); tok != plexSecret {
+			t.Fatalf("%s: token = %q, want kept", body, tok)
+		}
+	}
+}
+
 func TestSaveNeverWritesAnEnvironmentPlexTokenToTheFile(t *testing.T) {
 	clearPlexEnv(t)
 	t.Setenv("FLODNI_PLEX_TOKEN", "env-plex-secret")
 	h, path, _ := controlAPIServer(t, "", "")
-	for _, body := range []string{`{"log_level":"debug"}`, `{"plex":{"url":"http://y","token":""}}`} {
+	for _, body := range []string{`{"log_level":"debug"}`, `{"plex":{"token":""}}`} {
 		if code, resp := doControl(h, "/api/config", body, ""); code != http.StatusOK {
 			t.Fatalf("%s: status %d (%s)", body, code, resp)
 		}
@@ -198,5 +270,12 @@ func TestPanelNeverHoldsOrResendsThePlexToken(t *testing.T) {
 	}
 	if !strings.Contains(html, "plex_token_source") {
 		t.Error("the panel must show where the token comes from")
+	}
+}
+
+func TestPanelRequiresTheTokenWhenThePlexURLChanges(t *testing.T) {
+	html := string(settingsHTML)
+	if !strings.Contains(html, "plexURLChanged") || !strings.Contains(html, "re-enter the Plex token") {
+		t.Error("the panel must require the token field when the Plex URL changes, with a hint")
 	}
 }
