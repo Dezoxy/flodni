@@ -126,7 +126,7 @@ func TestReadStubParsesJSONAndLegacyForms(t *testing.T) {
 	if err := WriteStub(jsonStub, "http://e/stream?link="+strings.ToUpper(charHash)+"&index=7&play", 99, "m", "tt1234567"); err != nil {
 		t.Fatal(err)
 	}
-	if got, want := readStub(jsonStub), (stub{Size: 99, Hash: charHash, IMDB: "tt1234567", FileIndex: 7}); got != want {
+	if got, want := readStubOnly(jsonStub), (stub{Size: 99, Hash: charHash, IMDB: "tt1234567", FileIndex: 7}); got != want {
 		t.Fatalf("json stub = %+v, want %+v", got, want)
 	}
 
@@ -135,11 +135,22 @@ func TestReadStubParsesJSONAndLegacyForms(t *testing.T) {
 	if err := os.WriteFile(legacy, []byte(body), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if got, want := readStub(legacy), (stub{Size: 4321, Hash: charHash, IMDB: "tt7654321", FileIndex: 3}); got != want {
+	if got, want := readStubOnly(legacy), (stub{Size: 4321, Hash: charHash, IMDB: "tt7654321", FileIndex: 3}); got != want {
 		t.Fatalf("legacy stub = %+v, want %+v", got, want)
 	}
-	if got := readStub(filepath.Join(dir, "missing.mkv")); got != (stub{}) {
-		t.Fatalf("missing stub = %+v, want zero", got)
+	if got, err := readStub(filepath.Join(dir, "missing.mkv")); got != (stub{}) || err == nil {
+		t.Fatalf("missing stub = %+v, %v, want zero and an error", got, err)
+	}
+	// Unreadable is not the same as readable with no hash.
+	empty := filepath.Join(dir, "nohash.mkv")
+	if err := os.WriteFile(empty, []byte("{}"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := readStub(empty); got != (stub{}) || err != nil {
+		t.Fatalf("hashless stub = %+v, %v, want zero and no error", got, err)
+	}
+	if _, err := readStub(dir); err == nil {
+		t.Fatal("a directory read as a stub without an error")
 	}
 }
 
@@ -1272,4 +1283,54 @@ func TestAccentedAndPlainAddsOfTheSameEpisodeDoNotDeadlockOrRace(t *testing.T) {
 		}()
 	}
 	wg.Wait()
+}
+
+// readStubOnly is readStub for a stub that must read.
+func readStubOnly(path string) stub {
+	st, _ := readStub(path)
+	return st
+}
+
+// An unreadable stub is not "no hash": it may be the sibling episode that still needs a
+// season pack's torrent, so the torrent stays and one line names the path. A symlink to
+// a directory stands in for an I/O error (a mode 000 file still reads as root).
+func TestDropTorrentIfUnusedKeepsTheTorrentWhenAStubCannotBeRead(t *testing.T) {
+	e := newCharEnv(t)
+	var buf bytes.Buffer
+	e.m.cfg.Logger = flog.NewText(&buf)
+	if err := os.MkdirAll(e.tv, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	bad := filepath.Join(e.tv, "Unreadable_S01E02_55555555.mkv")
+	if err := os.Symlink(e.tv, bad); err != nil {
+		t.Fatal(err)
+	}
+	if e.m.dropTorrentIfUnused(context.Background(), charPackHash) || len(e.eng.removed) != 0 {
+		t.Fatalf("torrent dropped while a stub could not be read: %v", e.eng.removed)
+	}
+	keeping := 0
+	for _, line := range strings.Split(buf.String(), "\n") {
+		if strings.Contains(line, "keeping torrent") {
+			keeping++
+			if !strings.Contains(line, bad) {
+				t.Fatalf("the keeping line does not name the path: %s", line)
+			}
+		}
+	}
+	if keeping != 1 {
+		t.Fatalf("%d keeping lines, want 1:\n%s", keeping, buf.String())
+	}
+
+	// A stub that reads fine and links to no hash keeps today's meaning: it does not
+	// hold a torrent.
+	e = newCharEnv(t)
+	if err := os.MkdirAll(e.tv, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(e.tv, "NoHash_S01E02_55555555.mkv"), []byte("{}"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if !e.m.dropTorrentIfUnused(context.Background(), charPackHash) {
+		t.Fatal("a readable stub with no hash kept the torrent")
+	}
 }

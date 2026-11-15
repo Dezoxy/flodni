@@ -8,6 +8,7 @@ import (
 	"flodni/internal/promtext"
 	"flodni/internal/warmup"
 	"fmt"
+	"strings"
 	"sync"
 	"sync/atomic"
 
@@ -37,6 +38,22 @@ func residentFiles(hash string) []library.TorrentFile {
 // the torrent: nil when there is none. A var so a test can stand in the database.
 var storedFileList = func(hash string) []library.TorrentFile {
 	return filesFromStats(torr.StoredFiles(hash))
+}
+
+// storedRecordList is every torrent record the engine stores, as hash and name only. A
+// stored name that looks like a URL or a magnet link is left out, so an entry never
+// carries a tracker address. Reads the database, so only the on-demand audit calls it.
+func storedRecordList() []library.StoredRecord {
+	dbs := torr.ListTorrentsDB()
+	out := make([]library.StoredRecord, 0, len(dbs))
+	for h, t := range dbs {
+		name := t.Title
+		if strings.Contains(name, "://") || strings.HasPrefix(strings.ToLower(name), "magnet:") {
+			name = ""
+		}
+		out = append(out, library.StoredRecord{Hash: h.HexString(), Name: name})
+	}
+	return out
 }
 
 // knownFiles is the torrent's file list: the resident one, else the stored one.
