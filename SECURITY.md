@@ -91,7 +91,39 @@ What this does not cover:
 - The engine can print a link or tracker URL in its own log lines. Redacting
   those is separate work and not done here.
 
+## Foreign trackers in private torrents
+
+A private torrent's own `.torrent` file can carry a second tracker that is not
+the torrent's (a cross-upload, with someone else's key). The engine stores it in
+the torrent's record in `config.db` and announces to it on every wake, which
+sends the info hash to a tracker outside the torrent's own. Find them with
+`flodni trackers audit` and remove a host with
+`flodni trackers remove-host <host>` (try `--dry-run` first). Stop flodni and copy
+`config.db` before either; see "Foreign trackers in stored records" in the README
+for the flags and the approximate own-domain rule. The commands print hosts and
+info hashes only, never a tracker URL or passkey. Removal is owner-triggered; the
+daemon never does it by itself, and a removed host stays removed unless the
+torrent is added again with it.
+
 ## Secrets
+
+**Logs.** A private tracker's announce URL is the user's account, and logs
+get shared when asking for help, so tracker credentials never reach a log.
+`internal/redact` is the one redactor. It works on whole strings (errors from
+`net/http` embed the full URL), keeps `scheme://host[:port]` of every
+http(s), udp and ws(s) URL and replaces userinfo, path and query with
+`/<redacted>`, replaces the `tr=` and `xs=` values of a magnet by the host of
+their URL, replaces a `torrs://` link whole, and masks stray
+`passkey=`-style values. It is applied at the add API (the link and its parse
+and add errors), the wake and activation failure lines, the discovery boost's
+announce failures and, through the engine client's logger, every line the
+engine writes, including the debug lines `EnableDebug` turns on. The Plex
+library refresh puts `X-Plex-Token` in its request URL, and `net/http` errors embed
+the URL, so that error is redacted where it is built and again where it is logged.
+The engine's `Client config:` line is redacted too (`BlockListURL` can hold a key).
+The tracker scrape has its own cleaner for what a tracker sends back. Not covered: lines
+of code that does not go through these paths, such as a new `log` call that
+prints a link directly; the redactor is a net, not a license to log URLs.
 
 The repository holds no secrets; `config.json` is ignored by git and
 `config.json.example` carries placeholders. `config.json` holds `api_token` and the Plex token in clear text: a save from the panel keeps the file's existing permission bits (a new file is created 0600), so keep it unreadable to other users, or pass the secrets as `FLODNI_API_TOKEN` and `FLODNI_PLEX_TOKEN` instead. CI runs gitleaks on the full

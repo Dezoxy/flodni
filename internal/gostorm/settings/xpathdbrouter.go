@@ -108,6 +108,23 @@ func (v *XPathDBRouter) Clear(xPath string) {
 	v.getDBForXPath(xPath).Clear(xPath)
 }
 
+// The router is a committer: the cache above it needs the commit result of the routed
+// database, or it would cache a record that was never written.
+func (v *XPathDBRouter) trySet(xPath, name string, value []byte) error {
+	db := v.getDBForXPath(xPath)
+	return tryWrite(db, func(c committer) error { return c.trySet(xPath, name, value) }, func(db GoStormDB) { db.Set(xPath, name, value) })
+}
+
+func (v *XPathDBRouter) tryRem(xPath, name string) error {
+	db := v.getDBForXPath(xPath)
+	return tryWrite(db, func(c committer) error { return c.tryRem(xPath, name) }, func(db GoStormDB) { db.Rem(xPath, name) })
+}
+
+func (v *XPathDBRouter) tryClear(xPath string) error {
+	db := v.getDBForXPath(xPath)
+	return tryWrite(db, func(c committer) error { return c.tryClear(xPath) }, func(db GoStormDB) { db.Clear(xPath) })
+}
+
 func (v *XPathDBRouter) CloseDB() {
 	for _, db := range v.dbs {
 		db.CloseDB()

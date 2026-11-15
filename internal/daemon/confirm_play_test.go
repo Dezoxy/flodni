@@ -110,9 +110,7 @@ func TestWebhookPlayCountsAsAWebhookMark(t *testing.T) {
 // the control token fixed at start-up the way main fixes it.
 func confirmServer(t *testing.T, startToken string) (http.Handler, warmup.FileKey) {
 	t.Helper()
-	old := app.controlToken
-	app.controlToken = startToken
-	t.Cleanup(func() { app.controlToken = old })
+	newTestApp(t).controlToken = startToken
 
 	const hash = "0123456789abcdef0123456789abcdef01234567"
 	tv := t.TempDir()
