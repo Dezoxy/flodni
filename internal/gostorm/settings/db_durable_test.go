@@ -2,6 +2,7 @@ package settings
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
 	stdlog "log"
 	"os"
@@ -278,5 +279,62 @@ func TestUnchangedRecordIsNotRecommitted(t *testing.T) {
 	AddTorrent(rec)
 	if writes() == first {
 		t.Error("a changed record was not written")
+	}
+}
+
+// flakyDB is a TDB whose commits fail while fail is set, as a full disk or an I/O error
+// would: Set swallows the failure, trySet reports it.
+type flakyDB struct {
+	*TDB
+	fail bool
+}
+
+func (f *flakyDB) Set(xPath, name string, value []byte) { _ = f.trySet(xPath, name, value) }
+
+func (f *flakyDB) trySet(xPath, name string, value []byte) error {
+	if f.fail {
+		return errors.New("injected: no space left on device")
+	}
+	return f.TDB.trySet(xPath, name, value)
+}
+
+// The cache holds committed data only. A failed commit must not leave the record in the
+// cache, or the identical save after the disk recovers would be skipped as unchanged and
+// the record would never reach the file.
+func TestFailedCommitIsRetriedByTheNextSave(t *testing.T) {
+	withFreshDB(t, t.TempDir())
+	flaky := &flakyDB{TDB: NewTDB().(*TDB)}
+	tdb = NewDBReadCache(flaky)
+
+	rec := &TorrentDB{
+		TorrentSpec: &torrent.TorrentSpec{InfoBytes: []byte("info")},
+		Title:       "t",
+	}
+	rec.InfoHash = metainfo.Hash{7}
+	key := rec.InfoHash.HexString()
+	onDisk := func() []byte {
+		var got []byte
+		_ = flaky.db.View(func(tx *bolt.Tx) error {
+			if b := tx.Bucket([]byte("Torrents")); b != nil {
+				got = append(got, b.Get([]byte(key))...)
+			}
+			return nil
+		})
+		return got
+	}
+
+	flaky.fail = true
+	AddTorrent(rec)
+	if len(onDisk()) != 0 {
+		t.Fatal("record on disk after a failed commit")
+	}
+	if got := tdb.Get("Torrents", key); got != nil {
+		t.Errorf("cache holds a record that was never committed: %q", got)
+	}
+
+	flaky.fail = false
+	AddTorrent(rec)
+	if len(onDisk()) == 0 {
+		t.Error("the identical save after recovery did not commit the record")
 	}
 }

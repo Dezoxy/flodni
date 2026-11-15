@@ -74,6 +74,12 @@ func (v *DBReadCache) Set(xPath, name string, value []byte) {
 		return
 	}
 
+	// The cache holds committed data only: a failed commit leaves it as it was, so the
+	// next identical save differs from it and commits again.
+	if !v.commit(func(c committer) error { return c.trySet(xPath, name, value) }, func(db GoStormDB) { db.Set(xPath, name, value) }) {
+		return
+	}
+
 	cacheKey := v.makeDataCacheKey(xPath, name)
 
 	v.dataCacheMutex.Lock()
@@ -87,8 +93,16 @@ func (v *DBReadCache) Set(xPath, name string, value []byte) {
 		delete(v.listCache, xPath)
 	}
 	v.listCacheMutex.Unlock()
+}
 
-	v.db.Set(xPath, name, value)
+// commit runs a write on the database under the cache and reports whether it committed.
+// A database that cannot report (not a committer) is assumed to have committed.
+func (v *DBReadCache) commit(try func(committer) error, plain func(GoStormDB)) bool {
+	if c, ok := v.db.(committer); ok {
+		return try(c) == nil
+	}
+	plain(v.db)
+	return true
 }
 
 func (v *DBReadCache) List(xPath string) []string {
@@ -126,6 +140,10 @@ func (v *DBReadCache) Rem(xPath, name string) {
 		return
 	}
 
+	if !v.commit(func(c committer) error { return c.tryRem(xPath, name) }, func(db GoStormDB) { db.Rem(xPath, name) }) {
+		return
+	}
+
 	cacheKey := v.makeDataCacheKey(xPath, name)
 
 	v.dataCacheMutex.Lock()
@@ -139,8 +157,6 @@ func (v *DBReadCache) Rem(xPath, name string) {
 		delete(v.listCache, xPath)
 	}
 	v.listCacheMutex.Unlock()
-
-	v.db.Rem(xPath, name)
 }
 
 func (v *DBReadCache) Clear(xPath string) {
@@ -155,8 +171,10 @@ func (v *DBReadCache) Clear(xPath string) {
 		log.TLogln("DBReadCache.Clear: DB is closed, cannot clear", xPath)
 		return
 	}
-	// Clear from underlying DB first
-	v.db.Clear(xPath)
+	// Clear the underlying DB first; the cache follows only if that committed.
+	if !v.commit(func(c committer) error { return c.tryClear(xPath) }, func(db GoStormDB) { db.Clear(xPath) }) {
+		return
+	}
 
 	// Clear cache
 	v.listCacheMutex.Lock()
