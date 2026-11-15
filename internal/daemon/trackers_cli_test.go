@@ -142,7 +142,7 @@ func TestTrackersAuditCountsForeignHosts(t *testing.T) {
 		"cross.other.example  records=3  private=2\n",
 		"x.other2.example  records=1  private=1\n",
 		"other.co.uk  records=1  private=1\n",
-		"scanned=5 private=4 public=1 foreign_records=4\n",
+		"scanned=5 private=4 public=1 foreign_records=4 same_site_records=0\n",
 	} {
 		if !strings.Contains(out, want) {
 			t.Errorf("output lacks %q:\n%s", want, out)
@@ -290,7 +290,7 @@ func TestTrackersRemoveHostRefusesAPrimaryHost(t *testing.T) {
 	if code != 2 {
 		t.Fatalf("exit %d, want 2 (out %q)", code, out)
 	}
-	if !strings.Contains(errOut, "primary tracker of 3 record") {
+	if !strings.Contains(errOut, "in the primary tracker's own domain for 3 record") {
 		t.Errorf("stderr lacks the count: %q", errOut)
 	}
 	noLeak(t, out, errOut)
@@ -362,6 +362,88 @@ func TestOwnDomain(t *testing.T) {
 	} {
 		if got := ownDomain(host); got != want {
 			t.Errorf("ownDomain(%q) = %q, want %q", host, got, want)
+		}
+	}
+}
+
+// A host whose site name is the primary's (the primary on one top-level domain, this
+// one on another) is reported apart, never hidden: it is usually the tracker's own
+// second domain, but a lookalike reads the same, so the owner decides.
+func siblingFixture(t *testing.T) string {
+	primary := "https://tracker.own.example/announce?passkey=" + trkPasskey
+	sibling := "https://t.own.org/announce?passkey=" + trkPasskey
+	foreign := "https://cross.other.example/" + trkPasskey + "/announce"
+	return trkState(t,
+		trkRecord{1, true, [][]string{{primary}, {sibling}}},
+		trkRecord{2, true, [][]string{{primary, sibling, foreign}}},
+	)
+}
+
+func TestTrackersAuditReportsSameSiteHostsApart(t *testing.T) {
+	code, out, errOut := runTrk("audit", "--state", siblingFixture(t))
+	if code != 0 {
+		t.Fatalf("exit %d, stderr %q", code, errOut)
+	}
+	head := strings.Index(out, "same site, other domain")
+	foreign := strings.Index(out, "cross.other.example  records=1  private=1\n")
+	sibling := strings.Index(out, "t.own.org  records=2  private=2\n")
+	if head < 0 || foreign < 0 || sibling < 0 {
+		t.Fatalf("missing the foreign host, the same-site section or the sibling:\n%s", out)
+	}
+	if !(foreign < head && head < sibling) {
+		t.Errorf("the sibling must be listed under the same-site section, the foreign host above it:\n%s", out)
+	}
+	if !strings.Contains(out, "foreign_records=1 same_site_records=2\n") {
+		t.Errorf("summary:\n%s", out)
+	}
+	noLeak(t, out, errOut)
+	_, js, _ := runTrk("audit", "--json", "--state", siblingFixture(t))
+	if !strings.Contains(js, `"host":"t.own.org","records":2,"private":2,"same_site":true`) {
+		t.Errorf("JSON lacks same_site for the sibling: %s", js)
+	}
+}
+
+func TestTrackersRemoveHostNeedsAllowSameSiteForASibling(t *testing.T) {
+	dir := siblingFixture(t)
+	before, _ := os.ReadFile(filepath.Join(dir, "config.db"))
+	code, out, errOut := runTrk("remove-host", "--state", dir, "t.own.org")
+	if code != 2 || !strings.Contains(errOut, "--allow-same-site") {
+		t.Fatalf("exit %d, stderr %q, want a refusal naming --allow-same-site (out %q)", code, errOut, out)
+	}
+	if after, _ := os.ReadFile(filepath.Join(dir, "config.db")); !bytes.Equal(before, after) {
+		t.Error("refused run changed config.db")
+	}
+	// the owner can still remove a lookalike on purpose
+	if code, out, errOut := runTrk("remove-host", "--allow-same-site", "--state", dir, "t.own.org"); code != 0 || !strings.Contains(out, "records_changed=2") {
+		t.Fatalf("with --allow-same-site: exit %d, out %q, stderr %q", code, out, errOut)
+	}
+	// a genuinely foreign host needs no flag
+	if code, _, errOut := runTrk("remove-host", "--state", dir, "cross.other.example"); code != 0 {
+		t.Fatalf("removing the foreign host: exit %d, stderr %q", code, errOut)
+	}
+}
+
+func TestTrackersRemoveHostRefusesThePrimarysOwnDomain(t *testing.T) {
+	dir := trkFixture(t)
+	// sub.own.example is in the primary tracker.own.example's own domain (record 3)
+	code, _, errOut := runTrk("remove-host", "--allow-same-site", "--state", dir, "sub.own.example")
+	if code != 2 || !strings.Contains(errOut, "primary tracker's own domain") {
+		t.Fatalf("exit %d, stderr %q: the primary's own domain must never be removable", code, errOut)
+	}
+}
+
+func TestSiteName(t *testing.T) {
+	for host, want := range map[string]string{
+		"t.ncore.example":     "ncore",
+		"ncore.other":         "ncore",
+		"a.b.site.co.uk":      "site",
+		"x.site.com.hu":       "site",
+		"tracker.example.com": "example",
+		"localhost":           "localhost",
+		"10.0.0.5":            "10.0.0.5",
+	} {
+		if got := siteName(host); got != want {
+			t.Errorf("siteName(%q) = %q, want %q", host, got, want)
 		}
 	}
 }

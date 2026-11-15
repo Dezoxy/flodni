@@ -270,21 +270,26 @@ flodni trackers remove-host [--dry-run] [--hashes] [--state <dir>] <host>
 ```
 
 - `audit` is read-only. Per record, the primary tracker is the first tracker of
-  the first tier; its own domain is the last two labels of its host (three under
-  a built-in list of common two-label suffixes such as `co.uk`, `org.uk` and
-  `com.hu`). Every other host in the record is foreign. It prints one line per
-  foreign host, `host  records=N  private=N`, most records first, then a summary
-  `scanned= private= public= foreign_records=`. A record whose metainfo is
-  missing or unreadable counts as private. The domain rule is an approximation,
-  not the Public Suffix List: a suffix missing from the list makes its hosts look
-  like one domain, so a foreign host there can be missed.
+  the first tier, and its own domain is the registrable domain of its host: the
+  last two labels (three under a built-in list of common two-label suffixes such
+  as `co.uk`, `org.uk` and `com.hu`). Every other host is listed, most records
+  first, as `host  records=N  private=N`. A host whose site name (the first
+  label of its registrable domain) is the primary's, such as `t.example.org`
+  beside `tracker.example.com`, is listed apart under "same site, other domain":
+  it is usually the tracker's own second domain, but a lookalike reads the same,
+  so it is never hidden. The summary is `scanned= private= public=
+  foreign_records= same_site_records=`, and `--json` marks each host with
+  `same_site`. A record whose metainfo is missing or unreadable counts as
+  private. The domain rule is an approximation, not the Public Suffix List.
 - `remove-host <host>` removes every tracker with that host (case-insensitive,
   trailing dot ignored) from every record, drops tiers left empty and keeps the
   order of the rest. Nothing else in the record changes; each changed record is
-  one fsynced transaction. It refuses (exit 2, nothing written) when the host is
-  the primary tracker of any record it would touch. `--dry-run` writes nothing and
-  prints the same summary, `records_changed= trackers_removed= private= public=`.
-  The flags go before the host.
+  one fsynced transaction. It refuses (exit 2, nothing written) a host in the
+  primary tracker's own domain of any record it would touch, always, and a
+  same-site host unless `--allow-same-site` is given: check that host in the
+  audit first. `--dry-run` writes nothing and prints the same summary,
+  `records_changed= trackers_removed= private= public=`. The flags go before the
+  host.
 
 ## Startup report
 
