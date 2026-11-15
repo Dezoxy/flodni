@@ -642,7 +642,8 @@ Requests from running v0.2.0 on a real host.
 
 ## Durable records (after v0.2.2)
 
-From a review after v0.2.2. Steps 1 to 3 are must-fix: data loss and an open-port gap. Designed, not built.
+From a review after v0.2.2. Steps 1 to 3 are must-fix: data loss and an
+open-port gap. Designed, not built.
 
 1. **Make the engine database durable.** The engine's `config.db` is opened with
     `NoSync` and mode 0666, and is neither synced nor closed at shutdown. Since
