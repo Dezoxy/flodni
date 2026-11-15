@@ -342,3 +342,23 @@ func sameItem(es []exactMatchEntry, section string, season, episode, year optInt
 	}
 	return out
 }
+
+// withYear keeps the tied entries whose file name carries the year as a whole token,
+// when the year is set and at least one does; otherwise it returns the ties unchanged.
+// It only narrows a fuzzy tie, so a match it settles was a candidate already.
+func withYear(ties []exactMatchEntry, year optInt) []exactMatchEntry {
+	if !year.ok || year.v <= 0 || len(ties) < 2 {
+		return ties
+	}
+	y := []string{strconv.Itoa(year.v)}
+	var out []exactMatchEntry
+	for _, e := range ties {
+		if hasTokens(nameTokens(filepath.Base(e.path)), y) {
+			out = append(out, e)
+		}
+	}
+	if len(out) == 0 {
+		return ties
+	}
+	return out
+}

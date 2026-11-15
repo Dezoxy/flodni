@@ -235,6 +235,11 @@ func handlePlexWebhook(w http.ResponseWriter, r *http.Request) {
 				}
 				return true
 			})
+			// A title tie with a known year keeps the files of that year ("Alien" is a
+			// substring of "Aliens"); it only narrows, never adds a candidate.
+			if ties = withYear(ties, payload.Metadata.Year); len(ties) > 0 {
+				bestMatch, bestState = ties[0].path, ties[0].state
+			}
 			exactMatch = bestMatch
 			exactState = bestState
 			if exactMatch != "" {
@@ -378,6 +383,9 @@ func handlePlexWebhook(w http.ResponseWriter, r *http.Request) {
 				}
 				return true
 			})
+			if ties = withYear(ties, payload.Metadata.Year); len(ties) > 0 {
+				stopMatch, stopState = ties[0].path, ties[0].state
+			}
 			// Several files fit equally well: the one a library symlink points at.
 			if e, ok := snap.pickEntry(sameItem(ties, payload.Metadata.LibrarySectionType, payload.Metadata.ParentIndex, payload.Metadata.Index, payload.Metadata.Year)); ok {
 				stopMatch, stopState, stopRule, stopMatchFromFuzzy = e.path, e.state, ruleLinked, false

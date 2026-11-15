@@ -3,6 +3,7 @@ package daemon
 import (
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"syscall"
 	"testing"
@@ -238,7 +239,9 @@ func TestLinkedPlayOfAnotherMovieIsNotPicked(t *testing.T) {
 		if got := playRule(t, mvPayload("media.play", "Alien", year)); got == ruleLinked {
 			t.Fatalf("year %q: a title substring was settled by a link", year)
 		}
-		if m[mvAliens].GetStatus() {
+		// With no year nothing settles the tie: plain fuzzy picks either one in Range
+		// order, as before the tie-break. With the year, Alien ranks above Aliens.
+		if year != "" && m[mvAliens].GetStatus() {
 			t.Fatalf("year %q: the linked stub of another movie was confirmed", year)
 		}
 	}
@@ -555,5 +558,35 @@ func TestLinkedWalkerForgetsWarningsAfterACleanWalk(t *testing.T) {
 	<-finished
 	if _, ok := a.linked.warn.Load("/old/path"); ok {
 		t.Fatal("a clean walk kept its old warnings")
+	}
+}
+
+// Without any link, a fuzzy title tie with a known year keeps the files carrying that
+// year: "Alien" is a substring of "Aliens", and a play of Alien (1979) must confirm it,
+// whatever order the registry is ranged in. A stop narrows the same way.
+func TestFuzzyTieWithAYearKeepsTheFilesOfThatYear(t *testing.T) {
+	for i := 0; i < 20; i++ {
+		t.Run(strconv.Itoa(i), func(t *testing.T) {
+			m := mvEnv(t, mvAliens, mvAlien)
+			playRule(t, mvPayload("media.play", "Alien", "1979"))
+			if !m[mvAlien].GetStatus() || m[mvAliens].GetStatus() {
+				t.Fatalf("a play of Alien (1979) confirmed the wrong file (alien %v, aliens %v)", m[mvAlien].GetStatus(), m[mvAliens].GetStatus())
+			}
+		})
+	}
+}
+
+func TestFuzzyStopTieWithAYearStopsTheFileOfThatYear(t *testing.T) {
+	for i := 0; i < 20; i++ {
+		t.Run(strconv.Itoa(i), func(t *testing.T) {
+			m := mvEnv(t, mvAliens, mvAlien)
+			for _, st := range m {
+				st.SetHealthy(true)
+			}
+			postWebhook(t, mvPayload("media.stop", "Alien", "1979"))
+			if m[mvAlien].GetStatus() || !m[mvAliens].GetStatus() {
+				t.Fatalf("a stop of Alien (1979) hit the wrong file (alien playing %v, aliens playing %v)", m[mvAlien].GetStatus(), m[mvAliens].GetStatus())
+			}
+		})
 	}
 }
