@@ -142,13 +142,14 @@ func TestTrackersAuditCountsForeignHosts(t *testing.T) {
 		"cross.other.example  records=3  private=2\n",
 		"x.other2.example  records=1  private=1\n",
 		"other.co.uk  records=1  private=1\n",
-		"scanned=5 private=4 public=1 foreign_records=4 same_site_records=0\n",
+		"scanned=5 private=4 public=1 foreign_records=4 same_site_records=0 unparsed_trackers=0 no_primary=0\n",
 	} {
 		if !strings.Contains(out, want) {
 			t.Errorf("output lacks %q:\n%s", want, out)
 		}
 	}
-	if strings.Contains(out, "sub.own.example") || strings.Contains(out, "site.co.uk") {
+	hostRows := out[:strings.Index(out, "primaries")]
+	if strings.Contains(hostRows, "sub.own.example") || strings.Contains(hostRows, "site.co.uk") {
 		t.Errorf("own domain reported as foreign:\n%s", out)
 	}
 	// sorted by count: the 3-record host comes first
@@ -393,7 +394,7 @@ func TestTrackersAuditReportsSameSiteHostsApart(t *testing.T) {
 	if !(foreign < head && head < sibling) {
 		t.Errorf("the sibling must be listed under the same-site section, the foreign host above it:\n%s", out)
 	}
-	if !strings.Contains(out, "foreign_records=1 same_site_records=2\n") {
+	if !strings.Contains(out, "foreign_records=1 same_site_records=2 unparsed_trackers=0 no_primary=0\n") {
 		t.Errorf("summary:\n%s", out)
 	}
 	noLeak(t, out, errOut)
@@ -466,5 +467,204 @@ func TestTrackersTrailingFlagIsNamed(t *testing.T) {
 	}
 	if _, _, errOut := runTrk("remove-host", "cross.other.example", "--dry-run=true"); !strings.Contains(errOut, "--dry-run must come before") {
 		t.Errorf("a --flag=value form is not named: %q", errOut)
+	}
+}
+
+// A host that is same-site for one record and foreign for another gets one row per
+// class, each with its own count; the same-site header appears only with rows.
+func TestTrackersAuditMixedHostGetsTwoRows(t *testing.T) {
+	dir := trkState(t,
+		trkRecord{1, true, [][]string{{"https://tracker.own.example/a"}, {"https://t.own.org/a"}}},
+		trkRecord{2, true, [][]string{{"https://tracker.own.example/a"}, {"https://t.own.org/a"}}},
+		trkRecord{3, true, [][]string{{"https://tracker.zzz.example/a"}, {"https://t.own.org/a"}}},
+	)
+	code, out, errOut := runTrk("audit", "--state", dir)
+	if code != 0 {
+		t.Fatalf("exit %d %q", code, errOut)
+	}
+	head := strings.Index(out, "same site, other domain")
+	foreign := strings.Index(out, "t.own.org  records=1  private=1\n")
+	same := strings.Index(out, "t.own.org  records=2  private=2\n")
+	if head < 0 || foreign < 0 || same < 0 || !(foreign < head && head < same) {
+		t.Errorf("want a foreign row (1) above the header and a same-site row (2) below:\n%s", out)
+	}
+	_, js, _ := runTrk("audit", "--json", "--state", dir)
+	if !strings.Contains(js, `"host":"t.own.org","records":2,"private":2,"same_site":true`) ||
+		!strings.Contains(js, `"host":"t.own.org","records":1,"private":1,"same_site":false`) {
+		t.Errorf("JSON rows: %s", js)
+	}
+	// no same-site rows, no header
+	_, out2, _ := runTrk("audit", "--state", trkFixture(t))
+	if strings.Contains(out2, "same site, other domain") {
+		t.Errorf("header without rows:\n%s", out2)
+	}
+}
+
+func TestTrackersAuditReportsPrimariesAndUnparsed(t *testing.T) {
+	dir := trkState(t,
+		trkRecord{1, true, [][]string{{"https://tracker.own.example/a"}}},
+		trkRecord{2, true, [][]string{{"https://tracker.own.example/a"}, {"https://cross.other.example/a"}}},
+		trkRecord{3, true, [][]string{{"https://cross.other.example/a"}, {"https://tracker.own.example/a"}}},
+		trkRecord{4, true, [][]string{{"no-scheme.example/a", "::bad"}}}, // no parsable host
+		trkRecord{5, false, nil},
+	)
+	code, out, errOut := runTrk("audit", "--state", dir)
+	if code != 0 {
+		t.Fatalf("exit %d %q", code, errOut)
+	}
+	noLeak(t, out, errOut)
+	for _, want := range []string{"primaries", "own.example  records=2\n", "other.example  records=1\n", "unparsed_trackers=2 no_primary=2"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("output lacks %q:\n%s", want, out)
+		}
+	}
+	_, js, _ := runTrk("audit", "--json", "--state", dir)
+	for _, want := range []string{`"primaries":[{"site":"own.example","records":2},{"site":"other.example","records":1}]`, `"unparsed_trackers":2`, `"no_primary":2`} {
+		if !strings.Contains(js, want) {
+			t.Errorf("JSON lacks %q: %s", want, js)
+		}
+	}
+}
+
+// A record whose .torrent lists the foreign tracker first has it as its primary: the
+// run refuses, and --hashes says which records.
+func TestTrackersRemoveHostRefusalListsHashes(t *testing.T) {
+	foreignFirst := trkState(t,
+		trkRecord{1, true, [][]string{{"https://cross.other.example/a"}, {"https://tracker.own.example/a"}}},
+		trkRecord{2, true, [][]string{{"https://tracker.own.example/a"}, {"https://cross.other.example/a"}}},
+	)
+	before, _ := os.ReadFile(filepath.Join(foreignFirst, "config.db"))
+	code, out, errOut := runTrk("remove-host", "--hashes", "--state", foreignFirst, "cross.other.example")
+	if code != 2 || !strings.Contains(errOut, "primary tracker's own domain for 1 record") {
+		t.Fatalf("exit %d, stderr %q", code, errOut)
+	}
+	if !strings.Contains(out, trkHash(1).HexString()) || strings.Contains(out, trkHash(2).HexString()) {
+		t.Errorf("want only the refusing record's hash:\n%s", out)
+	}
+	if _, plain, _ := runTrk("remove-host", "--state", foreignFirst, "cross.other.example"); strings.Contains(plain, trkHash(1).HexString()) {
+		t.Error("hash printed without --hashes")
+	}
+	if after, _ := os.ReadFile(filepath.Join(foreignFirst, "config.db")); !bytes.Equal(before, after) {
+		t.Error("refused run changed config.db")
+	}
+
+	code, out, errOut = runTrk("remove-host", "--hashes", "--state", siblingFixture(t), "t.own.org")
+	if code != 2 || !strings.Contains(errOut, "--allow-same-site") ||
+		!strings.Contains(out, trkHash(1).HexString()) || !strings.Contains(out, trkHash(2).HexString()) {
+		t.Errorf("same-site refusal: exit %d, out %q, stderr %q", code, out, errOut)
+	}
+}
+
+func TestTrackersRemoveHostRejectsPortAndBrackets(t *testing.T) {
+	dir := trkFixture(t)
+	before, _ := os.ReadFile(filepath.Join(dir, "config.db"))
+	for arg, want := range map[string]string{"cross.other.example:443": "port", "[::1]": "brackets", "[::1]:80": "brackets"} {
+		code, _, errOut := runTrk("remove-host", "--state", dir, arg)
+		if code != 2 || !strings.Contains(strings.SplitN(errOut, "\n", 2)[0], want) {
+			t.Errorf("%q: exit %d, stderr %q, want a usage error naming the %s", arg, code, errOut, want)
+		}
+	}
+	if after, _ := os.ReadFile(filepath.Join(dir, "config.db")); !bytes.Equal(before, after) {
+		t.Error("config.db changed")
+	}
+	// a bare IPv6 address is a host, not a port
+	if code, out, errOut := runTrk("remove-host", "--dry-run", "--state", dir, "::1"); code != 0 || !strings.Contains(out, "no record has that host") {
+		t.Errorf("bare ipv6: exit %d, out %q, stderr %q", code, out, errOut)
+	}
+}
+
+func TestTrackersRemoveHostSaysWhenNoRecordHasTheHost(t *testing.T) {
+	code, out, _ := runTrk("remove-host", "--state", trkFixture(t), "nobody.example")
+	if code != 0 || !strings.Contains(out, "no record has that host") || !strings.Contains(out, "records_changed=0") {
+		t.Errorf("exit %d, out %q", code, out)
+	}
+}
+
+// Fields the struct does not know, with bytes a decode-and-compare would not tell
+// apart (number formats, key order, escapes), must survive byte for byte.
+func TestTrackersRemoveHostKeepsOtherFieldsRaw(t *testing.T) {
+	dir := trkFixture(t)
+	key := trkHash(2).HexString()
+	open := func(ro bool) *settings.TDB {
+		db, err := settings.OpenOffline(dir, time.Second, ro)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return db
+	}
+	db := open(false)
+	var m map[string]json.RawMessage
+	if err := json.Unmarshal(db.Get("Torrents", key), &m); err != nil {
+		t.Fatal(err)
+	}
+	m["Extra"] = json.RawMessage(`{"z":1.0,"a":[1e2,"\u003c"],"big":12345678901234567890}`)
+	m["Title"] = json.RawMessage(`"t\u00e9"`)
+	seeded, _ := json.Marshal(m)
+	if err := db.Put("Torrents", key, seeded); err != nil {
+		t.Fatal(err)
+	}
+	orig := db.Get("Torrents", key)
+	db.CloseDB()
+
+	if code, _, errOut := runTrk("remove-host", "--state", dir, "cross.other.example"); code != 0 {
+		t.Fatalf("exit %d %q", code, errOut)
+	}
+	db = open(true)
+	defer db.CloseDB()
+	var o, n map[string]json.RawMessage
+	if err := json.Unmarshal(orig, &o); err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal(db.Get("Torrents", key), &n); err != nil {
+		t.Fatal(err)
+	}
+	if len(o) != len(n) {
+		t.Errorf("key set changed: %d -> %d", len(o), len(n))
+	}
+	for k, v := range o {
+		if k != "Trackers" && !bytes.Equal(v, n[k]) {
+			t.Errorf("field %s changed: %s -> %s", k, v, n[k])
+		}
+	}
+	if bytes.Equal(o["Trackers"], n["Trackers"]) {
+		t.Error("Trackers did not change")
+	}
+}
+
+// If the bytes about to be written do not match the plan, nothing is written, only the
+// hash is printed, and the run stops with exit 1.
+func TestTrackersRemoveHostVerifiesBeforeWriting(t *testing.T) {
+	for name, bad := range map[string]func(raw []byte, tiers [][]string) ([]byte, error){
+		"other field changed": func(raw []byte, tiers [][]string) ([]byte, error) {
+			var m map[string]json.RawMessage
+			_ = json.Unmarshal(raw, &m)
+			m["Title"] = json.RawMessage(`"changed"`)
+			tr, _ := json.Marshal(tiers)
+			m["Trackers"] = tr
+			return json.Marshal(m)
+		},
+		"trackers not the plan": func(raw []byte, tiers [][]string) ([]byte, error) {
+			return rewriteTrackers(raw, [][]string{{"https://tracker.own.example/other"}})
+		},
+		"not json": func([]byte, [][]string) ([]byte, error) { return []byte("{"), nil },
+	} {
+		t.Run(name, func(t *testing.T) {
+			dir := trkFixture(t)
+			before, _ := os.ReadFile(filepath.Join(dir, "config.db"))
+			old := trackersRewrite
+			trackersRewrite = bad
+			defer func() { trackersRewrite = old }()
+			code, out, errOut := runTrk("remove-host", "--state", dir, "cross.other.example")
+			if code != 1 || !strings.Contains(errOut, "could not rewrite record "+trkHash(1).HexString()) {
+				t.Fatalf("exit %d, out %q, stderr %q", code, out, errOut)
+			}
+			if strings.Contains(out, "records_changed") {
+				t.Errorf("summary printed after a failed run: %q", out)
+			}
+			noLeak(t, out, errOut)
+			if after, _ := os.ReadFile(filepath.Join(dir, "config.db")); !bytes.Equal(before, after) {
+				t.Error("config.db changed")
+			}
+		})
 	}
 }

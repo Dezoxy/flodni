@@ -1,6 +1,7 @@
 package daemon
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"flag"
@@ -10,6 +11,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"reflect"
 	"sort"
 	"strings"
 	"time"
@@ -72,6 +74,12 @@ func trackersMain(args []string, out, errOut io.Writer) int {
 		host = normHost(fs.Arg(0))
 		if host == "" || strings.HasPrefix(host, "-") || strings.ContainsAny(host, "/?@ ") {
 			return usage("the argument must be a bare host name, flags go before it")
+		}
+		if strings.ContainsAny(host, "[]") {
+			return usage("usage error, nothing was changed: the host must not carry brackets; pass an IPv6 address bare")
+		}
+		if strings.Contains(host, ":") && net.ParseIP(host) == nil {
+			return usage("usage error, nothing was changed: the host must not carry a port; trackers match by host name only")
 		}
 	} else if fs.NArg() != 0 {
 		return usage("usage error: audit takes no argument")
@@ -270,22 +278,52 @@ type auditHost struct {
 
 type auditReport struct {
 	Hosts           []auditHost `json:"hosts"`
+	Primaries       []auditSite `json:"primaries"`
 	Scanned         int         `json:"scanned"`
 	Private         int         `json:"private"`
 	Public          int         `json:"public"`
 	ForeignRecords  int         `json:"foreign_records"`
 	SameSiteRecords int         `json:"same_site_records"`
 	Unreadable      int         `json:"unreadable,omitempty"`
+	// UnparsedTrackers counts tracker entries whose host could not be parsed; NoPrimary
+	// counts records with no parsable host at all (the audit cannot judge those).
+	UnparsedTrackers int `json:"unparsed_trackers"`
+	NoPrimary        int `json:"no_primary"`
+}
+
+// auditSite is one primary site (the registrable domain of a record's first tracker)
+// and how many records lead with it.
+type auditSite struct {
+	Site    string `json:"site"`
+	Records int    `json:"records"`
 }
 
 func trackersAudit(recs []trackerRecord, unreadable int, hashes, asJSON bool, out io.Writer) int {
-	rep := auditReport{Hosts: []auditHost{}, Scanned: len(recs), Unreadable: unreadable}
-	byHost := map[string]*auditHost{}
+	rep := auditReport{Hosts: []auditHost{}, Primaries: []auditSite{}, Scanned: len(recs), Unreadable: unreadable}
+	// A host can be same-site for one record and foreign for another: key by both.
+	type hostClass struct {
+		host     string
+		sameSite bool
+	}
+	byHost := map[hostClass]*auditHost{}
+	bySite := map[string]int{}
 	for _, r := range recs {
 		if r.private {
 			rep.Private++
 		} else {
 			rep.Public++
+		}
+		for _, tier := range r.tiers {
+			for _, tr := range tier {
+				if trackerHostOf(tr) == "" {
+					rep.UnparsedTrackers++
+				}
+			}
+		}
+		if p := primaryHost(r.tiers); p == "" {
+			rep.NoPrimary++
+		} else {
+			bySite[ownDomain(p)]++
 		}
 		f, same := otherHosts(r)
 		if len(f) > 0 {
@@ -295,10 +333,10 @@ func trackersAudit(recs []trackerRecord, unreadable int, hashes, asJSON bool, ou
 			rep.SameSiteRecords++
 		}
 		add := func(h string, sameSite bool) {
-			e := byHost[h]
+			e := byHost[hostClass{h, sameSite}]
 			if e == nil {
 				e = &auditHost{Host: h, SameSite: sameSite}
-				byHost[h] = e
+				byHost[hostClass{h, sameSite}] = e
 			}
 			e.Records++
 			if r.private {
@@ -323,7 +361,19 @@ func trackersAudit(recs []trackerRecord, unreadable int, hashes, asJSON bool, ou
 		if rep.Hosts[i].Records != rep.Hosts[j].Records {
 			return rep.Hosts[i].Records > rep.Hosts[j].Records
 		}
-		return rep.Hosts[i].Host < rep.Hosts[j].Host
+		if rep.Hosts[i].Host != rep.Hosts[j].Host {
+			return rep.Hosts[i].Host < rep.Hosts[j].Host
+		}
+		return !rep.Hosts[i].SameSite && rep.Hosts[j].SameSite
+	})
+	for site, n := range bySite {
+		rep.Primaries = append(rep.Primaries, auditSite{site, n})
+	}
+	sort.Slice(rep.Primaries, func(i, j int) bool {
+		if rep.Primaries[i].Records != rep.Primaries[j].Records {
+			return rep.Primaries[i].Records > rep.Primaries[j].Records
+		}
+		return rep.Primaries[i].Site < rep.Primaries[j].Site
 	})
 	if asJSON {
 		enc := json.NewEncoder(out)
@@ -344,12 +394,20 @@ func trackersAudit(recs []trackerRecord, unreadable int, hashes, asJSON bool, ou
 		}
 	}
 	print(false)
-	if rep.SameSiteRecords > 0 {
+	hasSame := false
+	for _, e := range rep.Hosts {
+		hasSame = hasSame || e.SameSite
+	}
+	if hasSame {
 		_, _ = fmt.Fprintln(out, "same site, other domain (verify: often the tracker's own second domain, a lookalike reads the same; remove-host needs --allow-same-site):")
 		print(true)
 	}
-	_, _ = fmt.Fprintf(out, "scanned=%d private=%d public=%d foreign_records=%d same_site_records=%d%s\n",
-		rep.Scanned, rep.Private, rep.Public, rep.ForeignRecords, rep.SameSiteRecords, unreadableNote(unreadable))
+	_, _ = fmt.Fprintln(out, "primaries (the first tracker of each record, by site; check that it is your own):")
+	for _, ps := range rep.Primaries {
+		_, _ = fmt.Fprintf(out, "%s  records=%d\n", ps.Site, ps.Records)
+	}
+	_, _ = fmt.Fprintf(out, "scanned=%d private=%d public=%d foreign_records=%d same_site_records=%d unparsed_trackers=%d no_primary=%d%s\n",
+		rep.Scanned, rep.Private, rep.Public, rep.ForeignRecords, rep.SameSiteRecords, rep.UnparsedTrackers, rep.NoPrimary, unreadableNote(unreadable))
 	return 0
 }
 
@@ -394,13 +452,47 @@ func rewriteTrackers(raw []byte, tiers [][]string) ([]byte, error) {
 	return json.Marshal(m)
 }
 
+// trackersRewrite is rewriteTrackers; a test replaces it to prove the check below.
+var trackersRewrite = rewriteTrackers
+
+// verifyRewrite checks the bytes about to be written: they decode, their Trackers are
+// the planned tiers, and every other top-level key is present with identical raw bytes.
+func verifyRewrite(orig, buf []byte, tiers [][]string) error {
+	var after struct{ Trackers [][]string }
+	if err := json.Unmarshal(buf, &after); err != nil {
+		return err
+	}
+	if !reflect.DeepEqual(after.Trackers, tiers) {
+		return errors.New("trackers differ from the plan")
+	}
+	var o, n map[string]json.RawMessage
+	if err := json.Unmarshal(orig, &o); err != nil {
+		return err
+	}
+	if err := json.Unmarshal(buf, &n); err != nil {
+		return err
+	}
+	delete(o, "Trackers")
+	delete(n, "Trackers")
+	if len(o) != len(n) {
+		return errors.New("key set changed")
+	}
+	for k, v := range o {
+		if nv, ok := n[k]; !ok || !bytes.Equal(v, nv) {
+			return errors.New("a field changed")
+		}
+	}
+	return nil
+}
+
 func trackersRemoveHost(db *settings.TDB, recs []trackerRecord, unreadable int, host string, dryRun, hashes, allowSameSite bool, out, errOut io.Writer) int {
 	type change struct {
 		rec   trackerRecord
 		tiers [][]string
 	}
 	var changes []change
-	removed, primaries, sameSite, priv, pub := 0, 0, 0, 0, 0
+	removed, priv, pub := 0, 0, 0
+	var primaryHashes, sameSiteHashes []string
 	for _, r := range recs {
 		tiers, n := withoutHost(r.tiers, host)
 		if n == 0 {
@@ -411,9 +503,9 @@ func trackersRemoveHost(db *settings.TDB, recs []trackerRecord, unreadable int, 
 		if p := primaryHost(r.tiers); p != "" {
 			switch {
 			case p == host || ownDomain(p) == ownDomain(host):
-				primaries++
+				primaryHashes = append(primaryHashes, r.hash)
 			case siteName(p) == siteName(host):
-				sameSite++
+				sameSiteHashes = append(sameSiteHashes, r.hash)
 			}
 		}
 		removed += n
@@ -424,12 +516,21 @@ func trackersRemoveHost(db *settings.TDB, recs []trackerRecord, unreadable int, 
 		}
 		changes = append(changes, change{r, tiers})
 	}
-	if primaries > 0 {
-		_, _ = fmt.Fprintf(errOut, "trackers: refusing: that host is in the primary tracker's own domain for %d record(s); nothing was changed\n", primaries)
+	listHashes := func(hs []string) {
+		if hashes {
+			for _, h := range hs {
+				_, _ = fmt.Fprintf(out, "  %s\n", h)
+			}
+		}
+	}
+	if len(primaryHashes) > 0 {
+		listHashes(primaryHashes)
+		_, _ = fmt.Fprintf(errOut, "trackers: refusing: that host is in the primary tracker's own domain for %d record(s); nothing was changed\n", len(primaryHashes))
 		return 2
 	}
-	if sameSite > 0 && !allowSameSite {
-		_, _ = fmt.Fprintf(errOut, "trackers: refusing: that host shares the site name of the primary tracker of %d record(s), so it is likely the tracker's own second domain; check it, then pass --allow-same-site to remove it; nothing was changed\n", sameSite)
+	if len(sameSiteHashes) > 0 && !allowSameSite {
+		listHashes(sameSiteHashes)
+		_, _ = fmt.Fprintf(errOut, "trackers: refusing: that host shares the site name of the primary tracker of %d record(s), so it is likely the tracker's own second domain; check it, then pass --allow-same-site to remove it; nothing was changed\n", len(sameSiteHashes))
 		return 2
 	}
 	if hashes {
@@ -440,7 +541,10 @@ func trackersRemoveHost(db *settings.TDB, recs []trackerRecord, unreadable int, 
 	if !dryRun {
 		for _, c := range changes {
 			raw := db.Get("Torrents", c.rec.key)
-			buf, err := rewriteTrackers(raw, c.tiers)
+			buf, err := trackersRewrite(raw, c.tiers)
+			if err == nil {
+				err = verifyRewrite(raw, buf, c.tiers)
+			}
 			if err == nil {
 				err = db.Put("Torrents", c.rec.key, buf)
 			}
@@ -450,6 +554,9 @@ func trackersRemoveHost(db *settings.TDB, recs []trackerRecord, unreadable int, 
 				return 1
 			}
 		}
+	}
+	if len(changes) == 0 {
+		_, _ = fmt.Fprintln(out, "no record has that host")
 	}
 	note := ""
 	if dryRun {
