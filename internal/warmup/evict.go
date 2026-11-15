@@ -187,6 +187,18 @@ func splitCacheName(stem string) FileKey {
 // lowers the total that ends the loop.
 const maxEvictFailures = 8
 
+// lowWaterPercent is where an eviction that had to run stops, as a share of the quota.
+// Stopping exactly at the quota would put the next head write over it again and start
+// another full directory walk under d.mu and tailMu, so every write at quota would
+// walk. 95% leaves 5% of the quota of headroom, which absorbs many head writes per
+// walk whatever the quota is. The other candidate, the quota minus one head window,
+// frees one head and so only moves the next walk one write away; it also scales
+// with nothing.
+const lowWaterPercent = 95
+
+// lowWaterBytes is the total an eviction triggered at quota evicts down to.
+func lowWaterBytes(quota int64) int64 { return quota / 100 * lowWaterPercent }
+
 func (d *DiskWarmupCache) enforceQuotaLocked(needed int64, opts evictOpts) (evicted []Eviction, room bool) {
 	quota := quotaBytes()
 	if opts.request {
@@ -204,6 +216,7 @@ func (d *DiskWarmupCache) enforceQuotaLocked(needed int64, opts evictOpts) (evic
 	d.tailMu.Lock()
 	defer d.tailMu.Unlock()
 
+	d.walks.Add(1)
 	walkStart := time.Now()
 	entries, err := os.ReadDir(d.dir)
 	if err != nil {
@@ -284,6 +297,13 @@ func (d *DiskWarmupCache) enforceQuotaLocked(needed int64, opts evictOpts) (evic
 		victims = append(victims, u)
 	}
 	over := diskTotal + needed - quota
+	// Evict to the low-water mark, not only to the quota, so the next head write finds
+	// room. A request names its own target. Only files never played give headroom
+	// past the quota: a played file goes only as far as the quota needs (see below).
+	lowWater := quota
+	if !opts.request {
+		lowWater = lowWaterBytes(quota)
+	}
 	if opts.policy == EvictNeverPlayed && neverPlayedBytes < over {
 		return nil, false
 	}
@@ -302,7 +322,7 @@ func (d *DiskWarmupCache) enforceQuotaLocked(needed int64, opts evictOpts) (evic
 	d.removals.Add(1)
 	failed := 0
 	for _, u := range victims {
-		if diskTotal+needed <= quota {
+		if diskTotal+needed <= quota && (u.played || diskTotal+needed <= lowWater) {
 			break
 		}
 		// A failed unlink is not an eviction: its bytes stay counted, and nothing is

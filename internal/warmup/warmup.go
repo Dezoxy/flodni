@@ -330,6 +330,7 @@ type DiskWarmupCache struct {
 	tailQueue     chan tailJob     // index-mode tail fills, one worker
 	tailQueueOnce sync.Once
 	removals      atomic.Int64 // bumped by every removal; a waiter older than one drops its block
+	walks         atomic.Int64 // quota walks of the directory; tests count them to prove the low-water mark spares the next head write one
 	warmupStarts  sync.Map     // path -> time.Time (STARTING timestamp, for duration histogram)
 	lastRead      sync.Map     // FileKey -> *atomic.Int64 (unix nanoseconds of the last cache hit); kept only with the "read" eviction order
 	writeCh       chan warmupWrite
