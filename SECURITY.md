@@ -42,8 +42,19 @@ delivers plain http with the original `Host`; `Origin: null` is refused), so
 a page in a browser on the network cannot send a cross-site POST. Requests
 without `Origin` (scripts, Plex, and the GET navigations and `<img>` loads a
 browser sends without one) pass, so some GETs on 8090 (`/stream?link=` adds a
-torrent, `/play/:hash/:id` wakes a stored one) stay open to a page, and so does
-DNS rebinding. A page on the same hostname but another port is not stopped. A
+torrent, `/play/:hash/:id` wakes a stored one) stay open to a page. A page on
+the same hostname but another port is not stopped. With no token both servers
+also refuse `Sec-Fetch-Site: cross-site`; browsers send it only over https or to
+`localhost`, so it is a second signal, not a gate.
+
+DNS rebinding is open by default. The attacker's name is in both `Origin` and
+`Host`, so only a Host allowlist stops it: set `allowed_hosts` (or
+`MKV_PROXY_ALLOWED_HOSTS`, a comma list) to the names clients use, and both
+servers answer 403 to any other `Host`, token or not. Empty (the default) is
+off. IP literals, `localhost`, the machine's own hostname and the hostname of
+`gostorm_url` are always allowed; scripts and containers that call by name, such
+as `http://flodni:9080`, and the name in Plex's webhook URL must be listed.
+Set it on any deployment reachable by name. A
 reverse proxy in front of the control port must keep the `Host` header, or the
 panel's saves get 403. The engine sends no CORS headers; `/shutdown` and the
 Plex webhook take POST only. GoStorm's server

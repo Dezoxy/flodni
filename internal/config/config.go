@@ -5,6 +5,8 @@ import (
 	"flodni/internal/flog"
 	"fmt"
 	"log/slog"
+	"net"
+	"net/url"
 	"os"
 	"path/filepath"
 	"sort"
@@ -64,6 +66,12 @@ type Config struct {
 	// except the static panel page (see internal/apiauth). Empty: no auth.
 	// FLODNI_API_TOKEN overrides it. GET /api/config never returns it.
 	APIToken string `json:"api_token"`
+	// AllowedHosts, when non-empty, makes both servers refuse (403) a request whose
+	// Host hostname is not listed: the defence against DNS rebinding (see
+	// internal/apiauth). IP literals, localhost and the machine's own hostname are
+	// always allowed. Empty: off. MKV_PROXY_ALLOWED_HOSTS (comma list) overrides it.
+	// Hostnames only, normalised by finalize; read at start, a save needs a restart.
+	AllowedHosts []string `json:"allowed_hosts"`
 	// fileAPIToken is APIToken as read from config.json, before the environment
 	// override, so a panel save never writes the environment's token to disk.
 	fileAPIToken string
@@ -443,6 +451,9 @@ func (c *Config) applyEnvOverrides() {
 	if v := os.Getenv("FLODNI_API_TOKEN"); v != "" {
 		c.APIToken = v
 	}
+	if v := os.Getenv("MKV_PROXY_ALLOWED_HOSTS"); v != "" {
+		c.AllowedHosts = strings.Split(v, ",")
+	}
 	if v := os.Getenv("MKV_PROXY_LOG_LEVEL"); v != "" {
 		c.LogLevel = v
 	}
@@ -459,6 +470,20 @@ func (c *Config) applyEnvOverrides() {
 			c.GID = uint32(n)
 		}
 	}
+}
+
+// EffectiveAllowedHosts is the list the two servers enforce: AllowedHosts plus the
+// hostname of gostorm_url, which flodni's own calls to the engine send as Host, so
+// a name there cannot lock the daemon out of its engine. Nil when the allowlist is off.
+func (c *Config) EffectiveAllowedHosts() []string {
+	if len(c.AllowedHosts) == 0 {
+		return nil
+	}
+	out := append([]string(nil), c.AllowedHosts...)
+	if u, err := url.Parse(c.GoStormBaseURL); err == nil && u.Hostname() != "" {
+		out = append(out, u.Hostname())
+	}
+	return normalizeAllowedHosts(out)
 }
 
 func firstEnv(keys ...string) string {
@@ -609,6 +634,8 @@ func (c *Config) finalize() {
 		c.PlexPathMap = valid
 	}
 
+	c.AllowedHosts = normalizeAllowedHosts(c.AllowedHosts)
+
 	// Calculate MetadataCacheSize in bytes
 	c.MetadataCacheSize = c.MetadataCacheSizeMB * 1024 * 1024
 	if c.MetadataCacheSize < 1*1024*1024 {
@@ -617,6 +644,40 @@ func (c *Config) finalize() {
 
 	c.StreamingThreshold = c.StreamingThresholdKB * 1024
 	c.PreloadWorkers = c.PreloadWorkersCount
+}
+
+// normalizeAllowedHosts returns the entries lowercased, without port, brackets or
+// trailing dot, de-duplicated, in order. A blank entry is skipped; one with a
+// scheme, a path, userinfo, a wildcard or a space is not a hostname and is dropped
+// with a warning (the allowlist then stays stricter, never wider).
+func normalizeAllowedHosts(in []string) []string {
+	var out []string
+	seen := map[string]bool{}
+	for _, raw := range in {
+		e := strings.TrimSpace(raw)
+		if e == "" {
+			continue
+		}
+		if strings.ContainsAny(e, "/\\@*? #%") {
+			flog.Std.Warn(fmt.Sprintf("[Config] WARNING: allowed_hosts entry %q is not a bare hostname (no scheme, path or wildcard); ignoring it", raw), "entry", raw)
+			continue
+		}
+		host := e
+		if h, _, err := net.SplitHostPort(e); err == nil {
+			host = h
+		}
+		host = strings.TrimSuffix(strings.TrimPrefix(host, "["), "]")
+		host = strings.TrimSuffix(strings.ToLower(host), ".")
+		if host == "" || strings.Contains(host, ":") && net.ParseIP(host) == nil {
+			flog.Std.Warn(fmt.Sprintf("[Config] WARNING: allowed_hosts entry %q is not a bare hostname (no scheme, path or wildcard); ignoring it", raw), "entry", raw)
+			continue
+		}
+		if !seen[host] {
+			seen[host] = true
+			out = append(out, host)
+		}
+	}
+	return out
 }
 
 // parseBytes parses byte size strings like "80MB", "128KB", "1GB"
@@ -659,5 +720,10 @@ func (c *Config) LogConfig(logger *slog.Logger) {
 	logger.Info(fmt.Sprintf("HTTP Retries: %d, Delay: %dms", c.MaxRetryAttempts, c.RetryDelayMS), "max_retry_attempts", c.MaxRetryAttempts, "retry_delay_m_s", c.RetryDelayMS)
 	logger.Info(fmt.Sprintf("Preload Engine: Workers=%d", c.PreloadWorkersCount), "preload_workers_count", c.PreloadWorkersCount)
 	logger.Info(fmt.Sprintf("Network: MetricsPort=%d", c.MetricsPort), "metrics_port", c.MetricsPort)
+	if len(c.AllowedHosts) > 0 {
+		logger.Info(fmt.Sprintf("Allowed hosts: %s (plus IP literals, localhost and this machine's hostname)", strings.Join(c.AllowedHosts, ", ")), "allowed_hosts", c.AllowedHosts)
+	} else {
+		logger.Info("Allowed hosts: off (any Host is served; DNS rebinding is not stopped)")
+	}
 	logger.Info("=====================")
 }

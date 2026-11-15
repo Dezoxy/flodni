@@ -20,6 +20,12 @@ func SetAPIToken(token string, logger *slog.Logger) {
 	web.Logger = logger
 }
 
+// SetAllowedHosts turns on the Host allowlist (see apiauth.WithAllowedHosts) on
+// the same server. Call it before Start; empty leaves it off.
+func SetAllowedHosts(hosts []string) {
+	web.AllowedHosts = hosts
+}
+
 func Start() {
 	settings.InitSets(settings.Args.RDB, settings.Args.SearchWA)
 	// https checks

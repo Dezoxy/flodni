@@ -139,6 +139,38 @@ webhook no longer answer GET (`/shutdown` is `POST`, the webhook 405s other
 methods), because a GET from a web page carries no `Origin`. There is no
 TLS: see `SECURITY.md`.
 
+**DNS rebinding is open by default.** The `Origin` check cannot stop it: the
+attacker's hostname resolves to your LAN address, so `Origin` and `Host` both
+carry the attacker's name and match. If the control panel or the engine port is
+reachable by a name (a DNS name, a tunnel, an mDNS name), set a Host allowlist:
+
+| Key | Env | Values | Default |
+| --- | --- | --- | --- |
+| `allowed_hosts` | `MKV_PROXY_ALLOWED_HOSTS` (comma list, wins over the file) | hostnames, for example `["flodni.example", "flodni"]` | empty: off |
+
+When the list is not empty, both servers (control port and engine port) answer
+403 with `host not allowed` to a request whose `Host` hostname is not listed,
+with a token or without, and log it with method, path and address. The match
+ignores case, the port and a trailing dot. Entries are lowercased and stripped
+of a port at load; an entry with a scheme, a path or a wildcard is not a
+hostname and is dropped with a warning (the list then stays stricter, not
+wider, but if every entry is dropped the check is off, so read the start-up
+log). The effective list is logged once at start, and a save from the panel
+needs a restart to apply. Always allowed in addition: IP literals (v4 and
+v6), `localhost`, this machine's own hostname and the hostname of `gostorm_url`.
+Every other name a client uses must be listed: a script or a container that
+calls `http://flodni:9080` needs `flodni` in the list, and so does the name Plex
+puts in the webhook URL. Wildcards are not supported. Reach the panel by IP and
+nothing needs listing; reach it by name and list that name. Set it on any
+deployment that is reachable by name.
+
+With no token, both servers also refuse `Sec-Fetch-Site: cross-site` on any
+method, logged like the `Origin` refusals. `same-origin`, `same-site`, `none`
+and a missing header pass, so the panel's own fetches pass, behind a TLS tunnel
+too. A browser sends the header only over https or to `localhost`, so a page
+fetching a plain-http LAN address sends none and only the `Origin` check and the
+allowlist apply: it is a second signal, not a replacement.
+
 `GET /api/health` on the control port reports the mount, the engine and the
 state database, each as `{"ok": ..., "reason": "..."}`, with an overall
 `status` of `ok` (HTTP 200), `degraded` (engine or state database down) or
