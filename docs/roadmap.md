@@ -617,6 +617,28 @@ switch them on. Steps 1 to 19 and 22 to 26 are merged; steps 20 (`slog`) and 21
 The vendored engine stays as it is apart from fixes, and advisories for
 `anacrolix/torrent` are watched.
 
+## After v0.2.0
+
+Requests from running v0.2.0 on a real host.
+
+1. **Pick the linked file when a webhook matches several.** Plex Media Server's
+    own webhook names no file, so a play is matched by IMDb id, the library-type
+    bootstrap or a fuzzy title. In a library of Sonarr or Radarr symlinks into
+    the mount, several stubs can share one IMDb id: a release an upgrade
+    replaced stays as its own stub, and no symlink points at it any more. The
+    `imdb` rule can then confirm a play, protect a file and hold a torrent for
+    the wrong stub. The owner keeps Plex as the sender and gives Flodni no Plex
+    token. Design: the targets `plex_path_map` already declares are the library
+    roots. A background walker, never the webhook handler, reads them with
+    `lstat` and `readlink` only (no following, no file reads) and builds the set
+    of stub base names some library symlink points at. It rebuilds every few
+    minutes, and early when a webhook finds several candidates. When a rule
+    yields more than one candidate, only the linked ones are kept; exactly one
+    left is the match, counted as `rule="linked"`. With no candidate linked, or
+    no roots set, matching is as today. A test holds two stubs sharing an IMDb
+    id, one linked: the linked one wins, for a play and for a stop. Not urgent:
+    an IMDb match is exact while one stub holds the id.
+
 ## Done
 
 - 2026-11-11, trim step 1: telemetry, the update check, the MCP server and
