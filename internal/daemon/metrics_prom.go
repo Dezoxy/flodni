@@ -294,11 +294,11 @@ func collectPlaybackProm(w *promtext.Writer) {
 func collectReaderBudgetProm(w *promtext.Writer) {
 	w.Counter("flodni_unconfirmed_read_bytes_total",
 		"Bytes past the head and tail windows that readers took from files with no confirmed playback, whichever path served them.",
-		promSample(unconfirmedReadBytes.Load()))
+		promSample(app.unconfirmedReadBytes.Load()))
 	w.Counter("flodni_unconfirmed_read_sessions_total",
 		"Sessions that crossed the unconfirmed-read margin, counted once at close: confirmed_late if a playback webhook confirmed the file afterwards.",
-		promSample(unconfirmedSessions[rbUnconfirmed].Load(), lbl("outcome", "unconfirmed")),
-		promSample(unconfirmedSessions[rbConfirmedLate].Load(), lbl("outcome", "confirmed_late")))
+		promSample(app.unconfirmedSessions[rbUnconfirmed].Load(), lbl("outcome", "unconfirmed")),
+		promSample(app.unconfirmedSessions[rbConfirmedLate].Load(), lbl("outcome", "confirmed_late")))
 	w.Counter("flodni_unconfirmed_read_refused_reads_total",
 		"Reads the reader budget refused with EIO (refuse_unconfirmed_reads on only).",
 		promSample(app.unconfirmedRefusedReads.Load()))
@@ -317,8 +317,8 @@ func collectReaderBudgetProm(w *promtext.Writer) {
 		promSample(app.attributedFillBytes.Load()))
 	w.Counter("flodni_playback_webhooks_received_total",
 		"Playback start and resume webhooks for a movie or an episode, matched to one file or not.",
-		promSample(playbackWebhooksMatched.Load(), lbl("matched", "true")),
-		promSample(playbackWebhooksUnmatched.Load(), lbl("matched", "false")))
+		promSample(app.playbackWebhooksMatched.Load(), lbl("matched", "true")),
+		promSample(app.playbackWebhooksUnmatched.Load(), lbl("matched", "false")))
 	rules := make([]promtext.Sample, 0, numWebhookRules)
 	for i, name := range webhookRuleNames {
 		rules = append(rules, promSample(app.playbackWebhookRules[i].Load(), lbl("rule", name)))

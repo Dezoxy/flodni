@@ -33,6 +33,7 @@ func TestReadaheadOvershootArithmetic(t *testing.T) {
 }
 
 func TestClampReadahead(t *testing.T) {
+	newTestApp(t)
 	const size = 10 * gb
 	head := warmup.FileSize
 	on := func(v bool) {
