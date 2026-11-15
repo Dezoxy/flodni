@@ -63,15 +63,18 @@ func trackersMain(args []string, out, errOut io.Writer) int {
 	if sub == "remove-host" {
 		// flag stops at the first positional, so a flag after the host would be ignored
 		// and a dry run would write: exactly one argument, and it is the host.
+		if f := misplacedFlag(fs.Args()); f != "" {
+			return usage(fmt.Sprintf("usage error, nothing was changed: %s must come before <host>", f))
+		}
 		if fs.NArg() != 1 {
-			return usage("exactly one host is required, after the flags")
+			return usage("usage error, nothing was changed: exactly one host is required, after the flags")
 		}
 		host = normHost(fs.Arg(0))
 		if host == "" || strings.HasPrefix(host, "-") || strings.ContainsAny(host, "/?@ ") {
 			return usage("the argument must be a bare host name, flags go before it")
 		}
 	} else if fs.NArg() != 0 {
-		return usage("audit takes no argument")
+		return usage("usage error: audit takes no argument")
 	}
 	if scrubEuid() == 0 && !*allowRoot {
 		return usage("refusing to run as root: run it as the daemon's user, or pass --allow-root")
@@ -102,6 +105,21 @@ func trackersMain(args []string, out, errOut io.Writer) int {
 		return trackersAudit(recs, unreadable, *hashes, *asJSON, out)
 	}
 	return trackersRemoveHost(db, recs, unreadable, host, *dryRun, *hashes, *allowSameSite, out, errOut)
+}
+
+// misplacedFlag returns the first flag-looking argument after the positional one. Go's
+// flag package stops at the first positional, so such a flag would otherwise be
+// ignored (a trailing --dry-run would not apply): it is refused by name instead.
+func misplacedFlag(rest []string) string {
+	for i, a := range rest {
+		if i > 0 && strings.HasPrefix(a, "-") {
+			if j := strings.IndexByte(a, '='); j > 0 {
+				return a[:j]
+			}
+			return a
+		}
+	}
+	return ""
 }
 
 // trackerRecord is one decodable stored record.

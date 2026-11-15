@@ -107,3 +107,14 @@ func TestScrubStubsCommandRefusesBadInvocations(t *testing.T) {
 		}
 	}
 }
+
+func TestScrubStubsTrailingFlagIsNamed(t *testing.T) {
+	var out, errOut bytes.Buffer
+	if code := scrubStubsMain([]string{"--allow-root", t.TempDir(), "--dry-run"}, &out, &errOut); code != 2 {
+		t.Fatalf("exit %d, want 2", code)
+	}
+	first := strings.SplitN(errOut.String(), "\n", 2)[0]
+	if !strings.Contains(first, "--dry-run must come before the source path") || !strings.Contains(first, "nothing was changed") {
+		t.Errorf("first line does not name the misplaced flag: %q", first)
+	}
+}
