@@ -102,6 +102,21 @@ for example `http://host:9080/plex/webhook?token=<token>`; no other route
 does. `/control` loads without it and asks for the token on its first call,
 then keeps it in the browser's local storage. `GET /api/config` never
 returns the token, and saving from the panel leaves it unchanged.
+It does not return `plex.token` either (empty), but adds
+`plex_token_source` (`env`, `file` or empty) so the panel can say whether a
+Plex token is in use. The panel's token field starts empty: leave it empty to
+keep the stored token, type to replace it. A post with an empty or absent
+`plex.token` keeps the one `config.json` holds at that moment (a hand edit
+included); an environment token (`FLODNI_PLEX_TOKEN`) is never written to the
+file. The panel cannot clear the token; delete `plex.token` from `config.json`.
+The stored token is sent wherever `plex.url` points, so a save that changes the
+URL's scheme, host or port needs a typed token: without one it is refused with
+409 (`re-enter the Plex token when changing plex.url`), and the panel makes the
+token field required once the URL field changes. On an open port (no
+`api_token`), `POST /api/config` also refuses with 403 a non-empty `plex.token`
+and a changed `plex.url`, as it does for `api_token`; set them through
+`FLODNI_PLEX_TOKEN` or by editing `config.json`, then restart. A body that leaves
+both unchanged or absent saves as before.
 With no token enforced (the port is open), two control routes are refused with
 403 and a JSON `error`, because any client that reaches the port could
 otherwise take the service over: `POST /api/config` when the body carries a non-empty
