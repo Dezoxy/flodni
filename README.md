@@ -265,8 +265,8 @@ root needs `--allow-root`. They never print a tracker URL, path, query or
 passkey, only hosts and info hashes.
 
 ```
-flodni trackers audit [--hashes] [--json] [--state <dir>]
-flodni trackers remove-host [--dry-run] [--hashes] [--state <dir>] <host>
+flodni trackers audit [--hashes] [--json] [--allow-root] [--state <dir>]
+flodni trackers remove-host [--dry-run] [--hashes] [--allow-same-site] [--allow-root] [--state <dir>] <host>
 ```
 
 - `audit` is read-only. Per record, the primary tracker is the first tracker of
@@ -278,8 +278,13 @@ flodni trackers remove-host [--dry-run] [--hashes] [--state <dir>] <host>
   beside `tracker.example.com`, is listed apart under "same site, other domain":
   it is usually the tracker's own second domain, but a lookalike reads the same,
   so it is never hidden. The summary is `scanned= private= public=
-  foreign_records= same_site_records=`, and `--json` marks each host with
-  `same_site`. A record whose metainfo is missing or unreadable counts as
+  foreign_records= same_site_records= unparsed_trackers= no_primary=`
+  (trackers whose host could not be parsed; records with no parsable host at
+  all), and `--json` marks each host with `same_site`. A host that is same-site
+  for one record and foreign for another gets one row per class. A "primaries"
+  section lists each primary site with its record count: check that it is your
+  own, because a record whose `.torrent` lists a foreign tracker first has that
+  tracker as its primary. A record whose metainfo is missing or unreadable counts as
   private. The domain rule is an approximation, not the Public Suffix List.
 - `remove-host <host>` removes every tracker with that host (case-insensitive,
   trailing dot ignored) from every record, drops tiers left empty and keeps the
@@ -287,9 +292,32 @@ flodni trackers remove-host [--dry-run] [--hashes] [--state <dir>] <host>
   one fsynced transaction. It refuses (exit 2, nothing written) a host in the
   primary tracker's own domain of any record it would touch, always, and a
   same-site host unless `--allow-same-site` is given: check that host in the
-  audit first. `--dry-run` writes nothing and prints the same summary,
-  `records_changed= trackers_removed= private= public=`. The flags go before the
-  host.
+  audit first. With `--hashes`, a refusal first lists the hashes of the records
+  that cause it. The run is all-or-nothing. A host argument with a port or
+  brackets is a usage error, and a host no record has prints "no record has that
+  host". Before each write the new bytes are decoded and checked against the
+  plan (the trackers as planned, every other field byte-identical); on a
+  mismatch it writes nothing more, prints the hash and exits 1. `--dry-run`
+  writes nothing and prints the same summary,
+  `records_changed= trackers_removed= private= public=`. The flags go before
+  the host.
+
+In Docker the image's entrypoint does not forward arguments, so
+`docker run <image> trackers ...` starts the daemon. Stop the container, then run
+the binary with `--entrypoint` against the state volume. The image has no `USER`,
+hence `--allow-root`:
+
+```
+docker run --rm --entrypoint /usr/local/bin/flodni -v <state>:/state <image> \
+  trackers audit --allow-root --state /state
+```
+
+(`docker exec` cannot work here: the tools need the daemon stopped, and
+`scrub-stubs` below is the one that is safe beside a running daemon.) Recommended
+sequence: stop flodni, back up `config.db`, copy it to a scratch directory and
+rehearse there (audit, then `--dry-run`, then a real run on the copy), check the
+result with a second audit, and only then put the copy in place and start. Delete
+the copies afterwards: they hold passkeys.
 
 ## Startup report
 
