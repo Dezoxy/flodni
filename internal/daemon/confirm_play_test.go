@@ -115,7 +115,7 @@ func confirmServer(t *testing.T, startToken string) (http.Handler, warmup.FileKe
 	const hash = "0123456789abcdef0123456789abcdef01234567"
 	tv := t.TempDir()
 	stub := filepath.Join(tv, "Show", "Season.01", "Show.S01E01.mkv")
-	if err := library.WriteStub(stub, "http://engine/stream?link="+hash+"&index=3&play", 10, "magnet:?xt=urn:btih:"+hash, ""); err != nil {
+	if err := library.WriteStub(stub, "http://engine/stream?link="+hash+"&index=3&play", 10, hash, ""); err != nil {
 		t.Fatal(err)
 	}
 	m := library.New(library.Config{TVDir: tv, Confirm: confirmPlayByHand, TokenSet: apiTokenSet})

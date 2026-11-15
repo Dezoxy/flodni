@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
-	"regexp"
 	"strings"
 
 	"github.com/anacrolix/torrent/metainfo"
@@ -87,16 +86,6 @@ func MergeTrackers(lists ...[]string) []string {
 		}
 	}
 	return out
-}
-
-// reSecret matches the per-user credentials trackers put in announce URLs, raw or
-// URL-encoded inside a magnet.
-var reSecret = regexp.MustCompile(`(?i)((?:pk|passkey|authkey|torrent_pass|uk|apikey)(?:=|%3D))[^&%\s"]+`)
-
-// RedactSecrets masks tracker passkeys and API keys before a URL reaches a log: the
-// log is shared when asking for help, the passkey is the user's account.
-func RedactSecrets(s string) string {
-	return reSecret.ReplaceAllString(s, "${1}***")
 }
 
 // releaseFile checks a request's .torrent against the hash the request names; an

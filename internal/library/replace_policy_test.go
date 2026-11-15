@@ -48,7 +48,7 @@ func newPolicyEnv(t *testing.T, prior map[int]int) *policyEnv {
 	e := &policyEnv{m: m, eng: eng, reg: reg, tv: tv, oldStub: map[int]string{}, added: &calls}
 	for ep, score := range prior {
 		p := filepath.Join(tv, "Show", "Season.01", EpisodeFilename("Show", 1, ep, oldHash[:8]))
-		if err := WriteStub(p, m.streamURL(oldHash, ep), 1000, "magnet:?xt=urn:btih:"+oldHash, ""); err != nil {
+		if err := WriteStub(p, m.streamURL(oldHash, ep), 1000, oldHash, ""); err != nil {
 			t.Fatal(err)
 		}
 		key := EpisodeKey("Show", 1, ep)
