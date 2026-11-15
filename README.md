@@ -1785,6 +1785,18 @@ both formats; `[DeadSwarm]` and `[TTFF]` wording is not a contract. The
 GoStorm engine's own log lines still use the standard logger, so they keep
 their old shape in both formats.
 
+**Tracker credentials in logs.** A private tracker's announce URL carries the
+user's passkey, in its path, its query or its userinfo, and a magnet carries it
+in `tr=` and `xs=`. Every log line that can hold a link, a magnet, an error built
+from one or an announce URL goes through one redactor (`internal/redact`), which
+keeps `scheme://host[:port]` and replaces the rest with `/<redacted>`: the add
+line prints `add torrent https://tracker.example/<redacted>`, a failed announce
+says which tracker failed and why. This covers the add API, the wake and
+activation errors, the discovery boost's failure list and all of the engine's
+own log lines, the debug ones included (the engine's `EnableDebug` setting
+logs every announce, with its URL, redacted). A `torrs://` link is replaced
+whole, since it packs the trackers.
+
 The conversion from `log.Printf` is `scripts/slogify` (see its README); it
 can be run again on a newer tree.
 

@@ -221,6 +221,8 @@ func (bt *BTServer) configure(ctx context.Context) {
 	cliVers := userAgent
 
 	bt.config.Debug = settings.BTsets.EnableDebug
+	// The engine's lines carry tracker URLs; this routes them through the redactor.
+	bt.config.Logger = engineLogger()
 	bt.config.DisableIPv6 = !settings.BTsets.EnableIPv6
 	bt.config.DisableTCP = settings.BTsets.DisableTCP
 	bt.config.DisableUTP = settings.BTsets.DisableUTP

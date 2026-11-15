@@ -3,13 +3,13 @@ package api
 import (
 	"flodni/internal/gostorm/torrshash"
 	"net/http"
-	"regexp"
 	"strings"
 
 	"flodni/internal/gostorm/log"
 	"flodni/internal/gostorm/torr"
 	"flodni/internal/gostorm/torr/state"
 	"flodni/internal/gostorm/web/api/utils"
+	"flodni/internal/redact"
 
 	"github.com/anacrolix/torrent"
 	"github.com/gin-gonic/gin"
@@ -87,7 +87,7 @@ func addTorrent(req torrReqJS, c *gin.Context) {
 		return
 	}
 
-	log.TLogln("add torrent", redactSecrets(req.Link))
+	log.TLogln("add torrent", redact.String(req.Link))
 	req.Link = strings.ReplaceAll(req.Link, "&amp;", "&")
 
 	var torrSpec *torrent.TorrentSpec
@@ -97,7 +97,7 @@ func addTorrent(req torrReqJS, c *gin.Context) {
 	if strings.HasPrefix(req.Link, "torrs://") {
 		torrSpec, torrsHash, err = utils.ParseTorrsHash(req.Link)
 		if err != nil {
-			log.TLogln("error parse torrshash:", err)
+			log.TLogln("error parse torrshash:", redact.Err(err))
 			c.AbortWithError(http.StatusBadRequest, err)
 			return
 		}
@@ -113,7 +113,7 @@ func addTorrent(req torrReqJS, c *gin.Context) {
 	} else {
 		torrSpec, err = utils.ParseLink(req.Link)
 		if err != nil {
-			log.TLogln("error parse link:", err)
+			log.TLogln("error parse link:", redact.Err(err))
 			c.AbortWithError(http.StatusBadRequest, err)
 			return
 		}
@@ -121,7 +121,7 @@ func addTorrent(req torrReqJS, c *gin.Context) {
 
 	tor, err := torr.AddTorrent(torrSpec, req.Title, req.Poster, req.Data, req.Category)
 	if err != nil {
-		log.TLogln("error add torrent:", err)
+		log.TLogln("error add torrent:", redact.Err(err))
 		c.AbortWithError(http.StatusInternalServerError, err)
 		return
 	}
@@ -220,9 +220,3 @@ func dropTorrent(req torrReqJS, c *gin.Context) {
 	torr.DropTorrent(req.Hash)
 	c.Status(200)
 }
-
-// reSecret matches the per-user credentials tracker URLs carry, raw or URL-encoded.
-var reSecret = regexp.MustCompile(`(?i)((?:pk|passkey|authkey|torrent_pass|uk|apikey)(?:=|%3D))[^&%\s"]+`)
-
-// redactSecrets keeps a tracker passkey out of the log, which users share for help.
-func redactSecrets(s string) string { return reSecret.ReplaceAllString(s, "${1}***") }
