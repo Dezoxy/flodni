@@ -652,6 +652,8 @@ func Run() {
 			GoStorm:        library.NewGoStormClient(gc().GoStormBaseURL, gc().APIToken),
 			Registry:       registry,
 			StoredFiles:    func(hash string) []library.TorrentFile { return storedFileList(hash) },
+			StoredRecords:  storedRecordList,
+			Linked:         func() map[string]struct{} { return app.linked.current() },
 			FileState:      libraryFileFacts,
 			Confirm:        confirmPlayByHand,
 			TokenSet:       apiTokenSet,
@@ -704,6 +706,12 @@ func Run() {
 			return err
 		}
 		// Catch-up (idle unless warm_on_add is on): warms the titles already filed.
+		libraryUnlinked.Store(&libraryUnlinkedFn{func() (int, bool) {
+			if app.linked.current() == nil { // the set aged out since the last list
+				return 0, false
+			}
+			return libMgr.UnlinkedStubs()
+		}})
 		startCatchup(libMgr)
 		// Next episode (idle unless warm_next_episode is on): see warm_next.go.
 		startWarmNext(libMgr)

@@ -6,6 +6,7 @@ import (
 	"os"
 	"runtime"
 	"sort"
+	"sync/atomic"
 
 	"github.com/anacrolix/torrent"
 
@@ -138,6 +139,7 @@ func collectProm(w *promtext.Writer) {
 	collectWebhookHealthProm(w)
 	collectReadabilityProm(w)
 	collectUnstoredProm(w)
+	collectUnlinkedProm(w)
 	collectSwarmProm(w)
 	collectScrapeProm(w)
 	collectReadAheadProm(w)
@@ -221,6 +223,30 @@ func collectUnstoredProm(w *promtext.Writer) {
 	w.Gauge("flodni_library_torrents_unstored",
 		"Library torrents with no stored engine record holding metainfo, counted once at startup (a library add or an engine add with save_to_db repairs one; not refreshed).",
 		promSample(int64(*n)))
+}
+
+// libraryUnlinkedFn reads the unlinked-stub count; ok is false while there is none.
+type libraryUnlinkedFn struct{ get func() (int, bool) }
+
+// libraryUnlinked is set once the library manager exists.
+var libraryUnlinked atomic.Pointer[libraryUnlinkedFn]
+
+// collectUnlinkedProm writes the number of stubs no library symlink points at, as of
+// the last list of each kind. No series while there is no linked set (no walk yet, no
+// library root configured, or the set is too old) or a kind has not been listed: a zero
+// would read as "every stub is linked".
+func collectUnlinkedProm(w *promtext.Writer) {
+	f := libraryUnlinked.Load()
+	if f == nil {
+		return
+	}
+	n, ok := f.get()
+	if !ok {
+		return
+	}
+	w.Gauge("flodni_library_unlinked_stubs",
+		"Stubs no library symlink points at (linked=false in GET /api/library/list), as of the last list of movies and of tv; absent while there is no linked set.",
+		promSample(int64(n)))
 }
 
 func collectPlaybackProm(w *promtext.Writer) {
