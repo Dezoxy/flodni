@@ -203,8 +203,10 @@ fails, the features are just inactive.
   `plex_path_map` set, the stub name behind a library symlink (below);
   (3) the IMDb id; (4) when only a library type and an IMDb id are known, the
   one registered file of that type with no id yet; (5) a fuzzy title match,
-  which can pick the wrong file. A play is confirmed and marked played only
-  for the file the match resolved to.
+  which can pick the wrong file. When several files tie on the title and the
+  webhook carries a year, only those whose name holds that year stay ("Alien"
+  is a substring of "Aliens"). A play is confirmed and marked played only for
+  the file the match resolved to.
 - **`plex_path_map`** in `config.json` (default empty = off, read live) is for
   a library of Sonarr or Radarr named symlinks into the mount, where the
   media server's file name never equals the stub's (`Show Name - S01E02 -
