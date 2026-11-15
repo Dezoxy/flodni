@@ -27,6 +27,13 @@ const webhookMaxBody = 10 * 1024 * 1024
 
 // handlePlexWebhook gestisce i messaggi in arrivo dal server Plex
 func handlePlexWebhook(w http.ResponseWriter, r *http.Request) {
+	// POST only: a GET carries the payload in the query string, which a web page
+	// can send with an <img> tag and no Origin header, past the open-port gate.
+	if r.Method != http.MethodPost {
+		w.Header().Set("Allow", http.MethodPost)
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
 	logger.Info(fmt.Sprintf("[PLEX] Webhook connection from %s", r.RemoteAddr), "remote_addr", r.RemoteAddr)
 
 	var payloadStr string

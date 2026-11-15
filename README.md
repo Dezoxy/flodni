@@ -119,8 +119,25 @@ file is created 0600), and secrets are better passed as the
 `FLODNI_API_TOKEN` and `FLODNI_PLEX_TOKEN` environment variables than stored
 in the file. The
 same token covers GoStorm's port 8090 (every route except `GET /echo`, header
-only, no `?token=`); external clients of 8090 must send it. There is no TLS:
-see `SECURITY.md`.
+only, no `?token=`); external clients of 8090 must send it. On an open port
+(no token) both servers refuse a request that carries an `Origin` header whose
+hostname differs from the `Host` it was sent to: 403, logged with method, path
+and address, so a web page in a browser on your network cannot drive the API
+with a cross-site POST. Only hostnames are compared, not scheme or port,
+because a TLS-terminating tunnel hands Flodni plain http with the original
+`Host` while the browser's `Origin` says `https`. A request with no `Origin`
+(Plex, curl, scripts, and the GET navigations and `<img>` loads a browser
+sends without one) is unchanged; `Origin: null` is refused. The panel's own
+save and restart calls are same-origin POSTs that do carry `Origin`, and pass
+because the hostnames match, so a reverse proxy in front of the control port
+must preserve the `Host` header (nginx: `proxy_set_header Host $host;`), or
+every panel save gets 403; a Cloudflare tunnel preserves it by default. A page
+on the same hostname but another port is not stopped. The engine on 8090 no
+longer sends CORS headers; its `wipe` torrent action, which deleted every
+stored torrent and had no caller, is gone; and `/shutdown` and the Plex
+webhook no longer answer GET (`/shutdown` is `POST`, the webhook 405s other
+methods), because a GET from a web page carries no `Origin`. There is no
+TLS: see `SECURITY.md`.
 
 `GET /api/health` on the control port reports the mount, the engine and the
 state database, each as `{"ok": ..., "reason": "..."}`, with an overall

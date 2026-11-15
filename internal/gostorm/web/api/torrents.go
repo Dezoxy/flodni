@@ -31,11 +31,11 @@ type torrReqJS struct {
 // torrents godoc
 //
 //	@Summary		Handle torrents informations
-//	@Description	Allow to list, add, remove, get, set, drop, wipe torrents on server. The action depends of what has been asked.
+//	@Description	Allow to list, add, remove, get, set, drop torrents on server. The action depends of what has been asked.
 //
 //	@Tags			API
 //
-//	@Param			request	body	torrReqJS	true	"Torrent request. Available params for action: add, get, set, rem, list, drop, wipe. link required for add, hash required for get, set, rem, drop."
+//	@Param			request	body	torrReqJS	true	"Torrent request. Available params for action: add, get, set, rem, list, drop. link required for add, hash required for get, set, rem, drop."
 //
 //	@Accept			json
 //	@Produce		json
@@ -77,10 +77,6 @@ func torrents(c *gin.Context) {
 	case "drop":
 		{
 			dropTorrent(req, c)
-		}
-	case "wipe":
-		{
-			wipeTorrents(c)
 		}
 	}
 }
@@ -222,15 +218,6 @@ func dropTorrent(req torrReqJS, c *gin.Context) {
 		return
 	}
 	torr.DropTorrent(req.Hash)
-	c.Status(200)
-}
-
-func wipeTorrents(c *gin.Context) {
-	torrents := torr.ListTorrent()
-	for _, t := range torrents {
-		torr.RemTorrent(t.TorrentSpec.InfoHash.HexString())
-	}
-
 	c.Status(200)
 }
 
