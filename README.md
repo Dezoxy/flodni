@@ -144,9 +144,11 @@ torrent's metainfo since the strict wake (see "A stub the engine does not
 store"). Every commit to it is fsynced, so a crash or a power loss keeps the
 records already saved. The file is created with mode 0600; a wider existing
 file is tightened to 0600 at start, with one log line. On shutdown the daemon
-unmounts, then stops the engine and closes the database. A save costs one
-fsync, at most once per torrent per 30 s; watch the first-byte and wake
-metrics after upgrading.
+unmounts, then stops the engine and closes the database. A commit costs two
+fdatasyncs (plus a sync when the file grows). The wake save is debounced to
+once per torrent per 30 s and skipped when the record is unchanged; the
+idle-close save and a record update are not debounced. Watch the first-byte
+and wake metrics after upgrading.
 
 To back it up, stop flodni and copy `config.db`: a cold copy is the safe one.
 To restore, stop flodni, copy `config.db` back and start it.

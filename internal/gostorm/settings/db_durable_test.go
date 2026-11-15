@@ -1,14 +1,19 @@
 package settings
 
 import (
+	"bytes"
 	"fmt"
+	stdlog "log"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"syscall"
 	"testing"
 	"time"
 
+	"github.com/anacrolix/torrent"
+	"github.com/anacrolix/torrent/metainfo"
 	bolt "go.etcd.io/bbolt"
 )
 
@@ -112,7 +117,8 @@ func TestMain(m *testing.M) {
 }
 
 // SIGKILL mid-write: the file reopens and every record the child reported as committed
-// is there. This only holds with a synced commit.
+// is there. A process kill leaves the page cache intact, so this guards against a torn
+// file, not against a missing fsync: TestConfigDBIsSynced pins that.
 func TestConfigDBSurvivesKill(t *testing.T) {
 	dir := t.TempDir()
 	cmd := exec.Command(os.Args[0])
@@ -170,4 +176,107 @@ func TestConfigDBSurvivesKill(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Logf("child committed %d records before the kill; all readable", last+1)
+}
+
+// The headline change: every commit is synced. A kill test cannot tell, so assert the option.
+func TestConfigDBIsSynced(t *testing.T) {
+	withFreshDB(t, t.TempDir())
+	db, ok := NewTDB().(*TDB)
+	if !ok {
+		t.Fatal("NewTDB did not return a *TDB")
+	}
+	if db.db.NoSync {
+		t.Error("config.db is open with NoSync: a commit is not fsynced")
+	}
+}
+
+func captureLog(t *testing.T) *bytes.Buffer {
+	t.Helper()
+	var buf bytes.Buffer
+	stdlog.SetOutput(&buf)
+	t.Cleanup(func() { stdlog.SetOutput(os.Stderr) })
+	return &buf
+}
+
+// A failed write names the key and the size, never the record: it holds tracker URLs
+// with passkeys.
+func TestWriteErrorDoesNotLogTheRecord(t *testing.T) {
+	withFreshDB(t, t.TempDir())
+	db := NewTDB()
+	db.CloseDB() // every write now fails inside bbolt
+	buf := captureLog(t)
+
+	secret := `{"trackers":["http://tracker.example/announce?passkey=SECRETPASSKEY"]}`
+	db.Set("Torrents", "abc", []byte(secret))
+
+	out := buf.String()
+	if !strings.Contains(out, "Torrents/abc") {
+		t.Errorf("log should name the key:\n%s", out)
+	}
+	for _, bad := range []string{"announce", "://", "SECRETPASSKEY", "123 34"} {
+		if strings.Contains(out, bad) {
+			t.Errorf("log leaks the record (%q):\n%s", bad, out)
+		}
+	}
+}
+
+// Through the wrapper production uses: after close a write is refused and is not
+// readable from the cache, and a read does not return data.
+func TestReadCacheAfterClose(t *testing.T) {
+	withFreshDB(t, t.TempDir())
+	raw := NewTDB()
+	cache := NewDBReadCache(raw)
+	tdb = cache
+	cache.Set("Torrents", "before", []byte(`{"a":1}`))
+	if string(cache.Get("Torrents", "before")) != `{"a":1}` {
+		t.Fatal("record not readable before close")
+	}
+	CloseDB()
+	buf := captureLog(t)
+
+	cache.Set("Torrents", "after", []byte(`{"b":2}`)) // must not panic
+	if got := cache.Get("Torrents", "after"); got != nil {
+		t.Errorf("a write refused after close reads back as %q", got)
+	}
+	if got := cache.Get("Torrents", "before"); got != nil {
+		t.Errorf("a read after close returns cached data %q", got)
+	}
+	if got := cache.List("Torrents"); got != nil {
+		t.Errorf("List after close = %v, want nil", got)
+	}
+	if !strings.Contains(buf.String(), "closed") {
+		t.Errorf("a refused write should be logged:\n%s", buf.String())
+	}
+	CloseDB() // twice is harmless
+}
+
+// Wake saves the record it has just read. An identical record must not commit again.
+func TestUnchangedRecordIsNotRecommitted(t *testing.T) {
+	withFreshDB(t, t.TempDir())
+	raw := NewTDB().(*TDB)
+	tdb = NewDBReadCache(raw)
+
+	rec := &TorrentDB{
+		TorrentSpec: &torrent.TorrentSpec{InfoBytes: []byte("info"), PeerAddrs: []string{"192.0.2.1:1"}},
+		Title:       "t",
+	}
+	rec.InfoHash = metainfo.Hash{1}
+	writes := func() int64 { st := raw.db.Stats(); return st.TxStats.GetWrite() }
+
+	AddTorrent(rec)
+	first := writes()
+	if first == 0 {
+		t.Fatal("first save wrote nothing")
+	}
+	for i := 0; i < 3; i++ {
+		AddTorrent(rec)
+	}
+	if got := writes(); got != first {
+		t.Errorf("identical saves wrote %d more pages, want 0", got-first)
+	}
+	rec.Title = "changed"
+	AddTorrent(rec)
+	if writes() == first {
+		t.Error("a changed record was not written")
+	}
 }

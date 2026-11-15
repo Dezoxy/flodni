@@ -32,7 +32,7 @@ type shutdownSteps struct {
 	stopBackground  func()
 	unmount         func() error
 	detach          func() error // lazy detach of a mount that will not unmount
-	closeEngine     func()       // stop the engine, close and sync its database: nothing writes after this
+	closeEngine     func()       // stop the engine and close its database; a later write is refused
 	restartRequired bool         // exit with restartExitCode instead of 0
 	logf            func(format string, args ...any)
 }

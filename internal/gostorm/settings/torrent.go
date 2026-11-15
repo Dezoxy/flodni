@@ -1,6 +1,7 @@
 package settings
 
 import (
+	"bytes"
 	"encoding/json"
 	"sort"
 	"sync"
@@ -30,7 +31,12 @@ func AddTorrent(torr *TorrentDB) {
 	mu.Lock()
 	buf, err := json.Marshal(torr)
 	if err == nil {
-		tdb.Set("Torrents", torr.InfoHash.HexString(), buf)
+		key := torr.InfoHash.HexString()
+		// A wake saves the record it has just read: an identical one is not committed
+		// again, which would cost two fdatasyncs under the wake's locks.
+		if !bytes.Equal(tdb.Get("Torrents", key), buf) {
+			tdb.Set("Torrents", key, buf)
+		}
 	}
 	mu.Unlock()
 }

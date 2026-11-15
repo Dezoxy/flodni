@@ -37,19 +37,30 @@ func NewTDB() GoStormDB {
 
 // openBolt opens the engine database with every commit fsynced: since the strict wake,
 // the stored record is the only copy of a torrent's metainfo. The file is owner-only; an
-// older, wider one is tightened here.
+// older, wider one is tightened on the open descriptor, so a swap of the path cannot
+// redirect the chmod.
 func openBolt(path string) (*bolt.DB, error) {
-	if fi, err := os.Stat(path); err == nil && fi.Mode().Perm()&0o077 != 0 {
-		if err := os.Chmod(path, 0o600); err != nil {
-			log.TLogln("Cannot tighten", path, "to 0600:", err)
-		} else {
-			log.TLogln("Tightened", path, "from", fi.Mode().Perm().String(), "to -rw-------")
-		}
-	}
-	return bolt.Open(path, 0o600, &bolt.Options{Timeout: 5 * time.Second})
+	return bolt.Open(path, 0o600, &bolt.Options{
+		Timeout: 5 * time.Second,
+		OpenFile: func(name string, flag int, mode os.FileMode) (*os.File, error) {
+			f, err := os.OpenFile(name, flag, mode)
+			if err != nil {
+				return nil, err
+			}
+			if fi, err := f.Stat(); err == nil && fi.Mode().Perm()&0o077 != 0 {
+				if err := f.Chmod(0o600); err != nil {
+					log.TLogln("Cannot tighten", name, "to 0600:", err)
+				} else {
+					log.TLogln("Tightened", name, "from", fi.Mode().Perm().String(), "to -rw-------")
+				}
+			}
+			return f, nil
+		},
+	})
 }
 
-// CloseDB closes the database, which syncs it. The handle stays set: a write that
+// CloseDB closes the database. Every commit was already synced; Close adds no fsync of
+// its own, it releases the file lock. The handle stays set: a write that
 // arrives afterwards gets bbolt's "database not open" error and is logged, not a nil
 // dereference. Closing twice is harmless.
 func (v *TDB) CloseDB() {
@@ -122,7 +133,8 @@ func (v *TDB) Set(xpath, name string, value []byte) {
 	})
 	if err != nil {
 		log.TLogln("Error put sets", xpath+"/"+name, ", error:", err)
-		log.TLogln("value:", value)
+		// Never the value: a record carries tracker URLs with passkeys.
+		log.TLogln("value bytes:", len(value))
 	}
 }
 
