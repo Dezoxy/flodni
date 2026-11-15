@@ -193,17 +193,34 @@ func ownDomain(host string) string {
 	return strings.Join(labels[n-2:], ".")
 }
 
-// foreignHosts is the set of hosts of a record outside its primary host's domain.
+// siteName is the first label of a host's registrable domain: tracker.example.com and
+// example.org are both "example". A tracker often serves the same torrents from a
+// second domain of its own site on another top-level domain, so hosts are grouped by
+// it. An IP literal or a single label is its own name.
+func siteName(host string) string {
+	d := ownDomain(host)
+	if strings.Contains(d, ":") || net.ParseIP(d) != nil {
+		return d
+	}
+	if i := strings.IndexByte(d, '.'); i > 0 {
+		return d[:i]
+	}
+	return d
+}
+
+// foreignHosts is the set of hosts of a record outside its primary host's site (its
+// registrable domain's first label, so a second top-level domain of the same tracker
+// counts as its own).
 func foreignHosts(r trackerRecord) map[string]bool {
 	p := primaryHost(r.tiers)
 	if p == "" {
 		return nil
 	}
-	own := ownDomain(p)
+	own := siteName(p)
 	var out map[string]bool
 	for _, tier := range r.tiers {
 		for _, tr := range tier {
-			if h := trackerHostOf(tr); h != "" && ownDomain(h) != own {
+			if h := trackerHostOf(tr); h != "" && siteName(h) != own {
 				if out == nil {
 					out = map[string]bool{}
 				}
@@ -339,7 +356,8 @@ func trackersRemoveHost(db *settings.TDB, recs []trackerRecord, unreadable int, 
 		if n == 0 {
 			continue
 		}
-		if primaryHost(r.tiers) == host {
+		// The primary, or another domain of the same site, is the record's own tracker.
+		if p := primaryHost(r.tiers); p == host || (p != "" && siteName(p) == siteName(host)) {
 			primaries++
 		}
 		removed += n
@@ -351,7 +369,7 @@ func trackersRemoveHost(db *settings.TDB, recs []trackerRecord, unreadable int, 
 		changes = append(changes, change{r, tiers})
 	}
 	if primaries > 0 {
-		_, _ = fmt.Fprintf(errOut, "trackers: refusing: that host is the primary tracker of %d record(s); nothing was changed\n", primaries)
+		_, _ = fmt.Fprintf(errOut, "trackers: refusing: that host is the record's own tracker (its primary, or another domain of the same site) for %d record(s); nothing was changed\n", primaries)
 		return 2
 	}
 	if hashes {

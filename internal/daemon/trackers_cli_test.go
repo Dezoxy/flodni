@@ -290,7 +290,7 @@ func TestTrackersRemoveHostRefusesAPrimaryHost(t *testing.T) {
 	if code != 2 {
 		t.Fatalf("exit %d, want 2 (out %q)", code, out)
 	}
-	if !strings.Contains(errOut, "primary tracker of 3 record") {
+	if !strings.Contains(errOut, "own tracker (its primary, or another domain of the same site) for 3 record") {
 		t.Errorf("stderr lacks the count: %q", errOut)
 	}
 	noLeak(t, out, errOut)
@@ -362,6 +362,68 @@ func TestOwnDomain(t *testing.T) {
 	} {
 		if got := ownDomain(host); got != want {
 			t.Errorf("ownDomain(%q) = %q, want %q", host, got, want)
+		}
+	}
+}
+
+// A tracker that serves its torrents from a second domain of the same site (the
+// primary on one top-level domain, a secondary on another) is the record's own: the
+// audit must not list it, and remove-host must refuse it like a primary.
+func siblingFixture(t *testing.T) string {
+	primary := "https://tracker.own.example/announce?passkey=" + trkPasskey
+	sibling := "https://t.own.org/announce?passkey=" + trkPasskey
+	foreign := "https://cross.other.example/" + trkPasskey + "/announce"
+	return trkState(t,
+		trkRecord{1, true, [][]string{{primary}, {sibling}}},
+		trkRecord{2, true, [][]string{{primary, sibling, foreign}}},
+	)
+}
+
+func TestTrackersAuditGroupsSiblingDomainsAsOwn(t *testing.T) {
+	code, out, errOut := runTrk("audit", "--state", siblingFixture(t))
+	if code != 0 {
+		t.Fatalf("exit %d, stderr %q", code, errOut)
+	}
+	if strings.Contains(out, "t.own.org") {
+		t.Errorf("a sibling domain of the primary is reported as foreign:\n%s", out)
+	}
+	if !strings.Contains(out, "cross.other.example  records=1  private=1\n") {
+		t.Errorf("the real foreign host is missing:\n%s", out)
+	}
+}
+
+func TestTrackersRemoveHostRefusesASiblingDomain(t *testing.T) {
+	dir := siblingFixture(t)
+	before, _ := os.ReadFile(filepath.Join(dir, "config.db"))
+	code, out, errOut := runTrk("remove-host", "--state", dir, "t.own.org")
+	if code != 2 {
+		t.Fatalf("exit %d, want 2 (out %q)", code, out)
+	}
+	if !strings.Contains(errOut, "own tracker") {
+		t.Errorf("stderr does not say why: %q", errOut)
+	}
+	after, _ := os.ReadFile(filepath.Join(dir, "config.db"))
+	if !bytes.Equal(before, after) {
+		t.Error("refused run changed config.db")
+	}
+	// the genuinely foreign host still goes
+	if code, _, errOut := runTrk("remove-host", "--state", dir, "cross.other.example"); code != 0 {
+		t.Fatalf("removing the foreign host: exit %d, stderr %q", code, errOut)
+	}
+}
+
+func TestSiteName(t *testing.T) {
+	for host, want := range map[string]string{
+		"t.ncore.example":     "ncore",
+		"ncore.other":         "ncore",
+		"a.b.site.co.uk":      "site",
+		"x.site.com.hu":       "site",
+		"tracker.example.com": "example",
+		"localhost":           "localhost",
+		"10.0.0.5":            "10.0.0.5",
+	} {
+		if got := siteName(host); got != want {
+			t.Errorf("siteName(%q) = %q, want %q", host, got, want)
 		}
 	}
 }

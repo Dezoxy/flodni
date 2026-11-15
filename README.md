@@ -270,21 +270,26 @@ flodni trackers remove-host [--dry-run] [--hashes] [--state <dir>] <host>
 ```
 
 - `audit` is read-only. Per record, the primary tracker is the first tracker of
-  the first tier; its own domain is the last two labels of its host (three under
-  a built-in list of common two-label suffixes such as `co.uk`, `org.uk` and
-  `com.hu`). Every other host in the record is foreign. It prints one line per
-  foreign host, `host  records=N  private=N`, most records first, then a summary
+  the first tier, and its site is the first label of its registrable domain: the
+  last two labels of its host (three under a built-in list of common two-label
+  suffixes such as `co.uk`, `org.uk` and `com.hu`), so `tracker.example.com` and
+  `t.example.org` are both the site `example`. A host of the same site is the
+  record's own, since trackers often serve the same torrents from a second
+  top-level domain; every other host is foreign. It prints one line per foreign
+  host, `host  records=N  private=N`, most records first, then a summary
   `scanned= private= public= foreign_records=`. A record whose metainfo is
-  missing or unreadable counts as private. The domain rule is an approximation,
-  not the Public Suffix List: a suffix missing from the list makes its hosts look
-  like one domain, so a foreign host there can be missed.
+  missing or unreadable counts as private. The rule is an approximation, not the
+  Public Suffix List: two unrelated sites that share a name on different
+  top-level domains count as one, so a foreign host there can be missed, never
+  the reverse.
 - `remove-host <host>` removes every tracker with that host (case-insensitive,
   trailing dot ignored) from every record, drops tiers left empty and keeps the
   order of the rest. Nothing else in the record changes; each changed record is
   one fsynced transaction. It refuses (exit 2, nothing written) when the host is
-  the primary tracker of any record it would touch. `--dry-run` writes nothing and
-  prints the same summary, `records_changed= trackers_removed= private= public=`.
-  The flags go before the host.
+  the record's own tracker for any record it would touch: its primary, or
+  another domain of the same site. `--dry-run` writes nothing and prints the
+  same summary, `records_changed= trackers_removed= private= public=`. The flags
+  go before the host.
 
 ## Startup report
 
