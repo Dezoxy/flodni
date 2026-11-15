@@ -3,6 +3,7 @@ package daemon
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"syscall"
 	"testing"
 	"time"
@@ -53,7 +54,7 @@ func linkedNames(paths ...string) {
 	for _, p := range paths {
 		s[filepath.Base(p)] = struct{}{}
 	}
-	app.linked.set.Store(&s)
+	app.linked.publish(s, time.Now())
 }
 
 // lkPayload is what Plex sends: no file, an IMDb id (when given), a title.
@@ -85,14 +86,17 @@ func TestLinkedStubWinsAnImdbTie(t *testing.T) {
 	}
 }
 
-func TestLinkedStubWinsABootstrapTie(t *testing.T) {
-	a, b := linkedEnv(t, "") // neither carries an id yet: the library-type bootstrap
+// The bootstrap's candidates share only the library type: no linked pick there.
+func TestBootstrapTieIsNotBrokenByLinks(t *testing.T) {
+	a, b := linkedEnv(t, "") // neither carries an id yet
 	linkedNames(lkB)
-	if got := playRule(t, lkPayload("media.play", lkI)); got != ruleLinked {
-		t.Fatalf("rule = %d, want linked (%d)", got, ruleLinked)
+	payload := strings.Replace(lkPayload("media.play", lkI), `"grandparentTitle":"Show"`, `"grandparentTitle":"Unrelated Programme"`, 1)
+	payload = strings.Replace(payload, `"title":"Pilot"`, `"title":"Zzz"`, 1)
+	if got := playRule(t, payload); got != ruleNone {
+		t.Fatalf("rule = %d, want none (%d)", got, ruleNone)
 	}
-	if !b.GetStatus() || a.GetStatus() || b.GetImdbID() != lkI || a.GetImdbID() != "" {
-		t.Fatal("the bootstrap did not pick the linked stub alone")
+	if a.GetStatus() || b.GetStatus() {
+		t.Fatal("a library-type tie confirmed a stub")
 	}
 }
 
@@ -130,6 +134,54 @@ func TestLinkedStubStopIsHonouredWithAHandleOpen(t *testing.T) {
 		if !b.GetStatus() {
 			t.Fatalf("imdb %q: the stop reached the unlinked stub", imdb)
 		}
+	}
+}
+
+// Two stubs of E03 (one linked, both open) and a late stop for E05, whose entry is gone:
+// the series title ties both E03 stubs, and neither may be released.
+func TestLinkedStopForAnotherEpisodeReleasesNothing(t *testing.T) {
+	const e3new = "/mnt/flodni/tv/Show (2020)/Season.01/Show_S01E03_aaaaaaaa.mkv"
+	const e3old = "/mnt/flodni/tv/Show (2020)/Season.01/Show_S01E03_bbbbbbbb.mkv"
+	linkedEnv(t, "")
+	app.playbackRegistry.Delete(lkA)
+	app.playbackRegistry.Delete(lkB)
+	newS, oldS := &PlaybackState{Path: e3new, OpenedAt: time.Now()}, &PlaybackState{Path: e3old, OpenedAt: time.Now()}
+	app.playbackRegistry.Store(e3new, newS)
+	app.playbackRegistry.Store(e3old, oldS)
+	t.Cleanup(func() { app.playbackRegistry.Delete(e3new); app.playbackRegistry.Delete(e3old) })
+	linkedNames(e3new)
+	newS.SetHealthy(true)
+	oldS.SetHealthy(true)
+	openHandle(t, e3new)
+	openHandle(t, e3old)
+	payload := strings.Replace(lkPayload("media.stop", ""), `"index":2`, `"index":5`, 1)
+	postWebhook(t, payload)
+	if !newS.GetStatus() || !oldS.GetStatus() {
+		t.Fatal("a stop for another episode released a stream being watched")
+	}
+	// Without a season and episode in the payload there is no linked pick either.
+	payload = strings.Replace(lkPayload("media.stop", ""), `,"parentIndex":1,"index":2`, ``, 1)
+	postWebhook(t, payload)
+	if !newS.GetStatus() || !oldS.GetStatus() {
+		t.Fatal("a stop with no episode released a stream being watched")
+	}
+}
+
+func TestLinkedPlayFuzzyTieNeedsTheEpisodeToAgree(t *testing.T) {
+	const e3 = "/mnt/flodni/tv/Show (2020)/Season.01/Show_S01E03_cccccccc.mkv"
+	a, b := linkedEnv(t, "") // both S01E02
+	s3 := &PlaybackState{Path: e3, OpenedAt: time.Now()}
+	app.playbackRegistry.Store(e3, s3)
+	t.Cleanup(func() { app.playbackRegistry.Delete(e3) })
+	linkedNames(lkA, lkB, e3) // both E02 stubs linked: no pick
+	if got := playRule(t, lkPayload("media.play", "")); got == ruleLinked {
+		t.Fatal("a tie across episodes was settled by a link")
+	}
+	_, _ = a, b
+	// Only E03 linked: the payload says E02, so E03 must not be picked.
+	linkedNames(e3)
+	if got := playRule(t, lkPayload("media.play", "")); got == ruleLinked || s3.GetStatus() {
+		t.Fatal("a linked stub of another episode was picked")
 	}
 }
 
@@ -224,7 +276,7 @@ func TestWalkLinkedStubsReadsLinksOnly(t *testing.T) {
 	}
 	done := make(chan result, 1)
 	go func() {
-		s, _, ok := walkLinkedStubs([]string{filepath.Join(root, "missing"), root}, nil, walkLimits{MaxEntries: 1000})
+		s, _, ok := walkLinkedStubs([]string{root}, nil, walkLimits{MaxEntries: 1000})
 		done <- result{s, ok}
 	}()
 	var got result
@@ -234,7 +286,7 @@ func TestWalkLinkedStubsReadsLinksOnly(t *testing.T) {
 		t.Fatal("the walk hung: it opened a file")
 	}
 	if !got.ok {
-		t.Fatal("a missing root made the walk fail")
+		t.Fatal("the walk failed")
 	}
 	want := []string{"Stub_A.mkv", "Stub_B.mkv", "Stub_C.mkv"}
 	for _, w := range want {
@@ -312,7 +364,7 @@ func TestLinkedWalkerPublishesAndDebouncesEarlyWalks(t *testing.T) {
 func TestLinkedWalkerWithoutRootsPublishesNothing(t *testing.T) {
 	a := newTestApp(t)
 	s := stubSet{"Stub_Old.mkv": {}}
-	a.linked.set.Store(&s) // a root removed from the config since the last walk
+	a.linked.publish(s, time.Now()) // a root removed from the config since the last walk
 	stop := make(chan struct{})
 	finished := make(chan struct{})
 	go func() {
@@ -342,5 +394,88 @@ func TestLinkedRootsAreThePathMapTargets(t *testing.T) {
 	globalConfig.Store(&config.Config{})
 	if got := linkedRoots(); len(got) != 0 {
 		t.Fatalf("roots with no plex_path_map = %v", got)
+	}
+}
+
+func TestWalkLinkedStubsRootFailureDoesNotPublish(t *testing.T) {
+	root := t.TempDir()
+	pmLink(t, root, "a.mkv", "/x/Stub_A.mkv")
+	var warned []string
+	lim := walkLimits{MaxEntries: 100, Warn: func(p string, _ error) { warned = append(warned, p) }}
+	if _, _, ok := walkLinkedStubs([]string{root, filepath.Join(root, "missing")}, nil, lim); ok {
+		t.Fatal("a missing root still published a set")
+	}
+	if len(warned) == 0 {
+		t.Fatal("a missing root was not reported")
+	}
+}
+
+func TestWalkLinkedStubsResolvesASymlinkedRootOnce(t *testing.T) {
+	real, holder := t.TempDir(), t.TempDir()
+	pmLink(t, real, "a.mkv", "/x/Stub_A.mkv")
+	pmLink(t, real, "sub/b.mkv", "../Stub_B.mkv")
+	rootLink := filepath.Join(holder, "lib")
+	if err := os.Symlink(real, rootLink); err != nil {
+		t.Fatal(err)
+	}
+	set, _, ok := walkLinkedStubs([]string{rootLink}, nil, walkLimits{MaxEntries: 100})
+	if !ok || len(set) != 2 {
+		t.Fatalf("ok=%v set=%v, want Stub_A and Stub_B only", ok, set)
+	}
+	if _, in := set[filepath.Base(real)]; in {
+		t.Fatal("the root's own target name was recorded")
+	}
+}
+
+func TestLinkedSetOlderThanThreeWalksIsIgnored(t *testing.T) {
+	a := newTestApp(t)
+	a.linked.publish(stubSet{"x.mkv": {}}, time.Now().Add(-2*linkedWalkInterval))
+	if a.linked.current() == nil {
+		t.Fatal("a set two walks old was dropped")
+	}
+	a.linked.publish(stubSet{"x.mkv": {}}, time.Now().Add(-3*linkedWalkInterval-time.Second))
+	if a.linked.current() != nil {
+		t.Fatal("a stale set still narrows matches")
+	}
+}
+
+func TestLinkedWalkerKeepsTheSetWhenARootFails(t *testing.T) {
+	a := newTestApp(t)
+	s := stubSet{"Stub_Old.mkv": {}}
+	a.linked.publish(s, time.Now())
+	stop := make(chan struct{})
+	finished := make(chan struct{})
+	go func() {
+		runLinkedWalker(&a.linked, func() []string { return []string{filepath.Join(t.TempDir(), "gone")} }, stop, time.Hour, time.Millisecond)
+		close(finished)
+	}()
+	for i := 0; i < 500 && a.linked.walks.Load() == 0; i++ {
+		time.Sleep(10 * time.Millisecond)
+	}
+	close(stop)
+	<-finished
+	if _, ok := a.linked.current()["Stub_Old.mkv"]; !ok {
+		t.Fatal("a failed root dropped the previous set")
+	}
+}
+
+func TestLinkedWalkerForgetsWarningsAfterACleanWalk(t *testing.T) {
+	a := newTestApp(t)
+	a.linked.warn.Store("/old/path", struct{}{})
+	root := t.TempDir()
+	pmLink(t, root, "a.mkv", "/x/Stub_A.mkv")
+	stop := make(chan struct{})
+	finished := make(chan struct{})
+	go func() {
+		runLinkedWalker(&a.linked, func() []string { return []string{root} }, stop, time.Hour, time.Millisecond)
+		close(finished)
+	}()
+	for i := 0; i < 500 && a.linked.current() == nil; i++ {
+		time.Sleep(10 * time.Millisecond)
+	}
+	close(stop)
+	<-finished
+	if _, ok := a.linked.warn.Load("/old/path"); ok {
+		t.Fatal("a clean walk kept its old warnings")
 	}
 }

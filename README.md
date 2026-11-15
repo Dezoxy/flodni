@@ -246,20 +246,27 @@ fails, the features are just inactive.
   the directory listing and `readlink` only: it never follows a link, opens a
   file or touches a target, and a dangling link still counts. It publishes the
   set of stub base names some library symlink points at (a relative target is
-  read against the link's folder). When the IMDb pass, the library-type
-  bootstrap (step 4) or the fuzzy pass (the best level, with ties) yields more
-  than one candidate for a play, resume or stop, and exactly one of them is in
-  that set, it is the match, counted as `rule="linked"`; a stop matched this
-  way is honoured with a handle open, like a unique IMDb match, and a play
-  that picks it marks that file played. With none or several of them linked,
-  with no `plex_path_map`, or before the first walk has finished, matching is
-  as before; one candidate is never narrowed. Limits: the set is up to 5
-  minutes old, and the webhook that asks for an early walk is matched with the
-  old set; a walk that exceeds its bounds (2 million entries or 2 minutes)
-  keeps the previous set; a missing or unreadable folder is logged once and
-  skipped, so links in it count as unlinked; the roots must be mounted in this
-  container. Unit-tested against symlinks in a temporary folder; not run
-  against a media server.
+  read against the link's folder). When the IMDb pass or the fuzzy pass (the
+  best level, with ties) yields more than one candidate for a play, resume or
+  stop, and exactly one of them is in that set, that one is the match. For a
+  show, the fuzzy tie counts only files whose own season and episode equal the
+  webhook's, and none is picked when the webhook carries no season or episode.
+  A play matched this way is counted as `rule="linked"` (a stop is not counted
+  by rule), and it marks that file played when the played mark's own tiers
+  reach the same file. A stop matched this way is honoured with a handle open,
+  like a unique IMDb match, only when the file's season and episode agree with
+  the webhook's. The library-type bootstrap (step 4) is not narrowed. With none
+  or several of them linked, with no `plex_path_map`, or before the first walk
+  has finished, matching is as before; one candidate is never narrowed.
+  Limits: a set older than 15 minutes (three walks) is not used, so a walk
+  that keeps failing falls back to the matching above; the webhook that asks
+  for an early walk is matched with the old set; a walk that exceeds its
+  bounds (2 million entries or 2 minutes) or cannot read a root keeps the
+  previous set; an unreadable folder inside a root is logged once and skipped,
+  and a stub reached only through a folder symlink (never followed) or such a
+  folder counts as unlinked; a root that is itself a symlink is resolved once
+  per walk; the roots must be mounted in this container. Unit-tested against
+  symlinks in a temporary folder; not run against a media server.
 - **Other senders.** Any client may post the same JSON (`Content-Type:
   application/json`, or a form field `payload`), with the same token rule.
   The handler reads:

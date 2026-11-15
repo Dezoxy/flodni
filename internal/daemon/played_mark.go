@@ -42,7 +42,7 @@ type playedKeys struct {
 	episode         optInt
 	// linked settles a tie between several candidates by the one a library symlink
 	// points at (linked_stubs.go). Nil means off.
-	linked *linkedIndex
+	linked linkedSnap
 }
 
 // playedCandidate is a file the mount has opened: only files with a resolved hash and

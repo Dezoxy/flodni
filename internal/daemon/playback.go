@@ -186,7 +186,7 @@ type exactMatchKeys struct {
 	// stub names the library's symlinks point to (pathMapStubNames). Nil means off.
 	mappedBasenames func() []string
 	// linked breaks a tie between several IMDb candidates (linked_stubs.go). Nil means off.
-	linked *linkedIndex
+	linked linkedSnap
 }
 
 // findExactMatchRule selects the pass-1 match among the registry entries.
