@@ -640,6 +640,10 @@ func (n *VirtualMkvNode) Open(ctx context.Context, flags uint32) (fs.FileHandle,
 						noteWakeRefused(n.vMeta.Path, hashStr, "open (background)")
 						return
 					}
+					if errors.Is(err, native.ErrEngineNotReady) {
+						noteEngineNotReady(n.vMeta.Path, "open (background)")
+						return
+					}
 					logger.Info(fmt.Sprintf("[VFS] background activation failed for %s: %v", n.vMeta.Path, err), "path", n.vMeta.Path, "err", err)
 				}
 			})
@@ -672,6 +676,10 @@ func (n *VirtualMkvNode) Open(ctx context.Context, flags uint32) (fs.FileHandle,
 						if _, statErr := os.Stat(n.vMeta.Path); errors.Is(statErr, os.ErrNotExist) {
 							return nil, 0, syscall.ENOENT
 						}
+						return nil, 0, syscall.EIO
+					}
+					if errors.Is(err, native.ErrEngineNotReady) {
+						noteEngineNotReady(n.vMeta.Path, "open")
 						return nil, 0, syscall.EIO
 					}
 					logger.Info(fmt.Sprintf("[VFS] activation failed for %s: %v", n.vMeta.Path, err), "path", n.vMeta.Path, "err", err)

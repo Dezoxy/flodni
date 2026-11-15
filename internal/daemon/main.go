@@ -73,6 +73,9 @@ var raCache = readahead.New(readahead.Config{
 	Go:     safeGo,
 })
 
+// engineReadyBound is how long start-up waits for the engine before it goes on.
+const engineReadyBound = 60 * time.Second
+
 var globalRateLimiter *ratelimit.RateLimiter
 var globalLockManager *lockmgr.LockManager
 var globalDirCache *vfs.DirCache
@@ -281,8 +284,12 @@ func Run() {
 		logger.Info("Starting Embedded GoStorm Engine...")
 		server.Start() // Starts Web Server on 8090 and Engine
 	}()
-	// Give engine a moment to init (hash maps etc)
-	time.Sleep(2 * time.Second)
+	// Wait for the engine's client, not a fixed time: a wake before it is up is
+	// native.ErrEngineNotReady. Bounded, so an engine that never comes up cannot hold the
+	// daemon: then it goes on, as it always did, and a wake stays transient.
+	if !torr.WaitEngineReady(engineReadyBound) {
+		logger.Warn(fmt.Sprintf("WARNING: the engine was not ready after %s; continuing, wakes answer 'engine not ready' until it is", engineReadyBound), "bound", engineReadyBound.String())
+	}
 
 	// Before the cache can evict: the played state it orders victims by. The state
 	// database attaches below once it is open.

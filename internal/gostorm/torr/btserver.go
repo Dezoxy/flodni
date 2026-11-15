@@ -153,6 +153,7 @@ func (bt *BTServer) Connect() error {
 	if err != nil {
 		return err
 	}
+	markEngineReady()
 	go bt.StartTicker()
 	return nil
 }
