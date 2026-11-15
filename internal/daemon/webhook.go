@@ -114,7 +114,7 @@ func handlePlexWebhook(w http.ResponseWriter, r *http.Request) {
 
 		logger.Debug(fmt.Sprintf("[DEBUG] Webhook for '%s' / '%s' (%d). Current registry:", targetTitle, seriesTitle, targetYear), "target_title", targetTitle, "series_title", seriesTitle, "target_year", targetYear)
 		app.playbackRegistry.Range(func(key, value interface{}) bool {
-			logger.Info(fmt.Sprintf("  - Registered: %s", key.(string)))
+			logger.Debug(fmt.Sprintf("  - Registered: %s", key.(string)))
 			return true
 		})
 
@@ -182,71 +182,12 @@ func handlePlexWebhook(w http.ResponseWriter, r *http.Request) {
 
 		// Pass 2: Fuzzy matches only if no exact match found.
 		if exactMatch == "" {
-			var bestMatch string
-			var bestState *PlaybackState
-			bestLevel := 0             // higher = better match
-			var ties []exactMatchEntry // every entry at bestLevel
-
-			app.playbackRegistry.Range(func(key, value interface{}) bool {
-				path := key.(string)
-				filename := strings.ToLower(filepath.Base(path))
-				level := 0
-
-				// Tentativo 2: Match per Titolo completo (dot and underscore separators)
-				if targetTitle != "" && (strings.Contains(filename, strings.ReplaceAll(targetTitle, " ", ".")) ||
-					strings.Contains(filename, strings.ReplaceAll(targetTitle, " ", "_"))) {
-					level = 3
-				}
-
-				// Tentativo 3: Match per Titolo Serie (TV Shows)
-				if level == 0 && seriesTitle != "" {
-					if strings.Contains(filename, strings.ReplaceAll(seriesTitle, " ", ".")) ||
-						strings.Contains(filename, strings.ReplaceAll(seriesTitle, " ", "_")) {
-						level = 2
-					} else {
-						words := strings.Fields(seriesTitle)
-						if len(words) > 0 && len(words[0]) > 4 {
-							cleanWord := strings.TrimRight(words[0], ":.,;!?")
-							if len(cleanWord) > 4 && strings.Contains(filename, cleanWord) {
-								level = 1
-							}
-						}
-					}
-				}
-
-				// Tentativo 4: Match per prima parola + anno (first word > 3 chars to avoid "the", "a")
-				if level == 0 && len(strings.Fields(targetTitle)) > 0 {
-					firstWord := strings.Fields(targetTitle)[0]
-					if len(firstWord) > 3 && strings.Contains(filename, firstWord) {
-						if targetYear > 0 && strings.Contains(filename, strconv.Itoa(targetYear)) {
-							level = 1
-						}
-					}
-				}
-
-				if level > bestLevel {
-					bestLevel = level
-					bestMatch = path
-					bestState = value.(*PlaybackState)
-					ties = ties[:0]
-				}
-				if level > 0 && level == bestLevel {
-					ties = append(ties, exactMatchEntry{path: path, state: value.(*PlaybackState)})
-				}
-				return true
-			})
-			// A title tie with a known year keeps the files of that year ("Alien" is a
-			// substring of "Aliens"); it only narrows, never adds a candidate.
-			if ties = withYear(ties, payload.Metadata.Year); len(ties) > 0 {
-				bestMatch, bestState = ties[0].path, ties[0].state
-			}
-			exactMatch = bestMatch
-			exactState = bestState
+			f := fuzzyMatch(snap, payload.Metadata.LibrarySectionType, targetTitle, seriesTitle, payload.Metadata.Year, payload.Metadata.ParentIndex, payload.Metadata.Index)
+			exactMatch, exactState = f.path, f.state
 			if exactMatch != "" {
 				matchRule = ruleFuzzy
-				// Several files fit equally well: the one a library symlink points at.
-				if e, ok := snap.pickEntry(sameItem(ties, payload.Metadata.LibrarySectionType, payload.Metadata.ParentIndex, payload.Metadata.Index, payload.Metadata.Year)); ok {
-					exactMatch, exactState, matchRule = e.path, e.state, ruleLinked
+				if f.linked {
+					matchRule = ruleLinked
 				}
 			}
 		}
@@ -280,9 +221,12 @@ func handlePlexWebhook(w http.ResponseWriter, r *http.Request) {
 			exactState.mu.Lock()
 			exactState.IsStopped = false
 			// Cache webhookImdbID into state for fast IMDB matching in future sessions.
-			// A pass-1 match is precise (filename or IMDB ID) and cannot cross-pollinate
-			// episodes of a season pack; the pass-1c/fuzzy fallbacks are less precise.
-			if exactState.ImdbID == "" && webhookImdbID != "" {
+			// A pass-1 match is precise (filename, path map or IMDB ID) and cannot
+			// cross-pollinate episodes of a season pack. The pass-1c bootstrap counts as
+			// one (rule imdb): saving the id is its whole purpose, and it only fires for
+			// the one file of the type that has no id. A linked pick is the file a
+			// library symlink points at. A fuzzy match is a name guess: never cached.
+			if exactState.ImdbID == "" && webhookImdbID != "" && matchRule != ruleFuzzy {
 				exactState.ImdbID = webhookImdbID
 				logger.Info(fmt.Sprintf("[PLEX] IMDB ID cached for future matching: %s → %s", filepath.Base(exactMatch), webhookImdbID), "file", filepath.Base(exactMatch), "webhook_imdb_i_d", webhookImdbID)
 			}
@@ -307,7 +251,6 @@ func handlePlexWebhook(w http.ResponseWriter, r *http.Request) {
 		targetTitle := strings.ToLower(payload.Metadata.Title)
 		seriesTitle := strings.ToLower(payload.Metadata.GrandparentTitle)
 		snap := app.linked.snapshot() // one read of the set for the match and the mark
-		targetYear := payload.Metadata.Year.v
 
 		stopImdbID := ""
 		if m := reImdbID.FindStringSubmatch(payloadStr); len(m) > 1 {
@@ -335,60 +278,11 @@ func handlePlexWebhook(w http.ResponseWriter, r *http.Request) {
 
 		// Pass 2: Fuzzy matches only if no exact match.
 		if stopMatch == "" {
-			bestLevel := 0
-			var ties []exactMatchEntry // every entry at bestLevel
-			app.playbackRegistry.Range(func(key, value interface{}) bool {
-				path := key.(string)
-				filename := strings.ToLower(filepath.Base(path))
-				level := 0
-
-				if targetTitle != "" && (strings.Contains(filename, strings.ReplaceAll(targetTitle, " ", ".")) ||
-					strings.Contains(filename, strings.ReplaceAll(targetTitle, " ", "_"))) {
-					level = 3
-				}
-
-				if level == 0 && seriesTitle != "" {
-					if strings.Contains(filename, strings.ReplaceAll(seriesTitle, " ", ".")) ||
-						strings.Contains(filename, strings.ReplaceAll(seriesTitle, " ", "_")) {
-						level = 2
-					} else {
-						words := strings.Fields(seriesTitle)
-						if len(words) > 0 && len(words[0]) > 4 {
-							cleanWord := strings.TrimRight(words[0], ":.,;!?")
-							if len(cleanWord) > 4 && strings.Contains(filename, cleanWord) {
-								level = 1
-							}
-						}
-					}
-				}
-
-				if level == 0 && len(strings.Fields(targetTitle)) > 0 {
-					firstWord := strings.Fields(targetTitle)[0]
-					if len(firstWord) > 3 && strings.Contains(filename, firstWord) {
-						if targetYear > 0 && strings.Contains(filename, strconv.Itoa(targetYear)) {
-							level = 1
-						}
-					}
-				}
-
-				if level > bestLevel {
-					bestLevel = level
-					stopMatch = path
-					stopState = value.(*PlaybackState)
-					stopMatchFromFuzzy = true
-					ties = ties[:0]
-				}
-				if level > 0 && level == bestLevel {
-					ties = append(ties, exactMatchEntry{path: path, state: value.(*PlaybackState)})
-				}
-				return true
-			})
-			if ties = withYear(ties, payload.Metadata.Year); len(ties) > 0 {
-				stopMatch, stopState = ties[0].path, ties[0].state
-			}
-			// Several files fit equally well: the one a library symlink points at.
-			if e, ok := snap.pickEntry(sameItem(ties, payload.Metadata.LibrarySectionType, payload.Metadata.ParentIndex, payload.Metadata.Index, payload.Metadata.Year)); ok {
-				stopMatch, stopState, stopRule, stopMatchFromFuzzy = e.path, e.state, ruleLinked, false
+			f := fuzzyMatch(snap, payload.Metadata.LibrarySectionType, targetTitle, seriesTitle, payload.Metadata.Year, payload.Metadata.ParentIndex, payload.Metadata.Index)
+			stopMatch, stopState = f.path, f.state
+			stopMatchFromFuzzy = f.path != "" && !f.linked
+			if f.linked {
+				stopRule = ruleLinked
 			}
 		}
 
@@ -475,4 +369,82 @@ func handlePlexWebhook(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	w.WriteHeader(200)
+}
+
+// fuzzyPick is what the fuzzy pass settled on. path is empty when nothing fit.
+type fuzzyPick struct {
+	path   string
+	state  *PlaybackState
+	level  int               // 3 title, 2 series, 1 first word (series, or title with year); 0 none
+	ties   []exactMatchEntry // every entry at level, after the year narrowing
+	linked bool              // the one a library symlink points at settled a tie
+}
+
+// fuzzyMatch is the name-similarity pass of a play, resume and stop. The best level
+// wins (3 the title, 2 the series title, 1 the series' first word or the title's first
+// word with the year); a tie keeps the files of the webhook's year, then the one linked
+// stub whose file agrees with the webhook. With none of that, a tie is a map-order pick.
+func fuzzyMatch(snap linkedSnap, section, targetTitle, seriesTitle string, year, season, episode optInt) fuzzyPick {
+	targetYear := year.v
+	var best fuzzyPick
+	app.playbackRegistry.Range(func(key, value interface{}) bool {
+		path := key.(string)
+		filename := strings.ToLower(filepath.Base(path))
+		level := 0
+
+		// Tentativo 2: Match per Titolo completo (dot and underscore separators)
+		if targetTitle != "" && (strings.Contains(filename, strings.ReplaceAll(targetTitle, " ", ".")) ||
+			strings.Contains(filename, strings.ReplaceAll(targetTitle, " ", "_"))) {
+			level = 3
+		}
+
+		// Tentativo 3: Match per Titolo Serie (TV Shows)
+		if level == 0 && seriesTitle != "" {
+			if strings.Contains(filename, strings.ReplaceAll(seriesTitle, " ", ".")) ||
+				strings.Contains(filename, strings.ReplaceAll(seriesTitle, " ", "_")) {
+				level = 2
+			} else {
+				words := strings.Fields(seriesTitle)
+				if len(words) > 0 && len(words[0]) > 4 {
+					cleanWord := strings.TrimRight(words[0], ":.,;!?")
+					if len(cleanWord) > 4 && strings.Contains(filename, cleanWord) {
+						level = 1
+					}
+				}
+			}
+		}
+
+		// Tentativo 4: Match per prima parola + anno (first word > 3 chars to avoid "the", "a")
+		if level == 0 && len(strings.Fields(targetTitle)) > 0 {
+			firstWord := strings.Fields(targetTitle)[0]
+			if len(firstWord) > 3 && strings.Contains(filename, firstWord) {
+				if targetYear > 0 && strings.Contains(filename, strconv.Itoa(targetYear)) {
+					level = 1
+				}
+			}
+		}
+
+		if level > best.level {
+			best.level = level
+			best.path = path
+			best.state = value.(*PlaybackState)
+			best.ties = best.ties[:0]
+		}
+		if level > 0 && level == best.level {
+			best.ties = append(best.ties, exactMatchEntry{path: path, state: value.(*PlaybackState)})
+		}
+		return true
+	})
+	// A title tie with a known year keeps the files of that year ("Alien" is a
+	// substring of "Aliens"); it only narrows, never adds a candidate.
+	if best.ties = withYear(best.ties, year); len(best.ties) > 0 {
+		best.path, best.state = best.ties[0].path, best.ties[0].state
+	}
+	if best.path != "" {
+		// Several files fit equally well: the one a library symlink points at.
+		if e, ok := snap.pickEntry(sameItem(best.ties, section, season, episode, year)); ok {
+			best.path, best.state, best.linked = e.path, e.state, true
+		}
+	}
+	return best
 }
