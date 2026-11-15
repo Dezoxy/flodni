@@ -6,7 +6,9 @@ import (
 	"flodni/internal/config"
 	"fmt"
 	"net/http"
+	"net/url"
 	"os"
+	"strings"
 	"syscall"
 	"time"
 )
@@ -15,7 +17,12 @@ import (
 func handleConfig(w http.ResponseWriter, r *http.Request) {
 	if r.Method == "GET" {
 		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(gc().Redacted())
+		// The tokens are never returned; plex_token_source tells the panel whether a
+		// Plex token is in use and where it comes from ("env", "file" or "").
+		_ = json.NewEncoder(w).Encode(struct {
+			config.Config
+			PlexTokenSource string `json:"plex_token_source"`
+		}{gc().Redacted(), gc().PlexTokenSource()})
 		return
 	}
 	if r.Method == "POST" {
@@ -35,6 +42,14 @@ func handleConfig(w http.ResponseWriter, r *http.Request) {
 		if app.controlToken == "" && newCfg.APIToken != "" {
 			refuseOpenPort(w, r, http.StatusForbidden,
 				"api_token cannot be set or changed through the API while no token is enforced"+setTokenHint)
+			return
+		}
+		// Same for the Plex token: it is a credential for another system, so with no
+		// token enforced a client could not be trusted to replace it, or to point the
+		// URL it is sent to somewhere else.
+		if app.controlToken == "" && newCfg.Plex.Token != "" {
+			refuseOpenPort(w, r, http.StatusForbidden,
+				"plex.token cannot be set or changed through the API while no token is enforced"+setPlexTokenHint)
 			return
 		}
 		onDisk := config.LoadConfig()
@@ -58,6 +73,11 @@ func handleConfig(w http.ResponseWriter, r *http.Request) {
 			// Keep the token the file holds now, not the one read at start: the owner may
 			// have added one by hand and not restarted yet.
 			newCfg.APIToken = onDisk.ResolveAPIToken("")
+			if plexURLChanged(newCfg.Plex.URL, onDisk.Plex.URL) {
+				refuseOpenPort(w, r, http.StatusForbidden,
+					"plex.url cannot be changed through the API while no token is enforced"+setPlexTokenHint)
+				return
+			}
 		} else {
 			// The panel never sees the token; an empty post keeps the one in the file.
 			newCfg.APIToken = gc().ResolveAPIToken(newCfg.APIToken)
@@ -67,6 +87,19 @@ func handleConfig(w http.ResponseWriter, r *http.Request) {
 		if app.controlToken != "" {
 			onDisk.HostsSaveChanged(&newCfg, gc())
 		}
+		// The stored token goes wherever plex.url points, and the panel cannot read it
+		// back, so a changed URL without a typed token would let a caller aim the token
+		// at a host of their choosing.
+		if newCfg.Plex.Token == "" && onDisk.Plex.Token != "" && plexURLChanged(newCfg.Plex.URL, onDisk.Plex.URL) {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusConflict)
+			_ = json.NewEncoder(w).Encode(map[string]string{"error": "re-enter the Plex token when changing plex.url"})
+			return
+		}
+		// The panel never sees the Plex token either. An empty post keeps the one the
+		// file holds now (read fresh, like the api_token hand edit); a typed one is
+		// taken as given. An environment token is never written to the file.
+		newCfg.Plex.Token = onDisk.ResolvePlexToken(newCfg.Plex.Token)
 		// Paths that came from the command line are not written to the
 		// file: keep what the file had.
 		if newCfg.PhysicalSourcePath == physicalSourcePath {
@@ -98,6 +131,26 @@ func handleConfig(w http.ResponseWriter, r *http.Request) {
 // setTokenHint says where a token is set when the API may not set it.
 const setTokenHint = ": set api_token through the FLODNI_API_TOKEN environment variable " +
 	"or by editing config.json, then restart flodni"
+
+// setPlexTokenHint says where the Plex settings are set when the API may not set them.
+const setPlexTokenHint = ": set plex.token through the FLODNI_PLEX_TOKEN environment variable " +
+	"or plex.url and plex.token by editing config.json, then restart flodni"
+
+// plexURLChanged reports whether posted points the Plex token somewhere else than
+// stored: a different scheme, host or port. An empty post sends the token nowhere.
+func plexURLChanged(posted, stored string) bool {
+	if posted == "" {
+		return false
+	}
+	origin := func(s string) string {
+		u, err := url.Parse(strings.TrimSpace(s))
+		if err != nil || u.Host == "" {
+			return strings.ToLower(strings.TrimRight(strings.TrimSpace(s), "/"))
+		}
+		return strings.ToLower(u.Scheme + "://" + u.Host)
+	}
+	return origin(posted) != origin(stored)
+}
 
 // refuseOpenPort answers a refused open-port request with a JSON error and logs it the
 // way the bearer middleware logs a 401 (method, path, address).

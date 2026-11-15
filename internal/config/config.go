@@ -87,6 +87,12 @@ type Config struct {
 	// override, so a panel save never writes the environment's token to disk.
 	fileAPIToken string
 
+	// filePlexToken is Plex.Token as read from config.json, and plexTokenFromEnv says
+	// the environment supplied the one in use. A panel save writes the file's token,
+	// never the environment's. GET /api/config never returns the token either.
+	filePlexToken    string
+	plexTokenFromEnv bool
+
 	// --- FUSE Paths ---
 	// Fallback when CLI args are omitted. CLI args always take precedence.
 	PhysicalSourcePath string `json:"physical_source_path"` // Real MKV dir (e.g. /mnt/torrserver)
@@ -287,10 +293,33 @@ func (c *Config) Save() error {
 }
 
 // Redacted returns a copy that is safe to send to the control panel: the API
-// token is blanked.
+// token and the Plex token are blanked.
 func (c Config) Redacted() Config {
 	c.APIToken = ""
+	c.Plex.Token = ""
 	return c
+}
+
+// PlexTokenSource says where the Plex token in use comes from: "env", "file" or ""
+// (none). The panel shows it instead of the token.
+func (c Config) PlexTokenSource() string {
+	switch {
+	case c.plexTokenFromEnv:
+		return "env"
+	case c.Plex.Token != "":
+		return "file"
+	}
+	return ""
+}
+
+// ResolvePlexToken returns the Plex token to persist when the panel posts a config.
+// The panel never sees the token, so an empty value keeps the one in config.json
+// (never the environment's); anything else is taken as given.
+func (c *Config) ResolvePlexToken(posted string) string {
+	if posted == "" {
+		return c.filePlexToken
+	}
+	return posted
 }
 
 // ResolveAPIToken returns the token to persist when the panel posts a config.
@@ -397,6 +426,7 @@ func LoadConfig() Config {
 			flog.Std.Info(fmt.Sprintf("[Config] Loaded settings from %s", cfg.ConfigPath), "config_path", cfg.ConfigPath)
 			cfg.fileAPIToken = cfg.APIToken
 			cfg.fileAllowedHosts = append([]string(nil), cfg.AllowedHosts...)
+			cfg.filePlexToken = cfg.Plex.Token
 			// Backward compat: if gostorm_url was not present in config, fall back to legacy torrserver_url key
 			if cfg.GoStormBaseURL == "" {
 				var raw map[string]json.RawMessage
@@ -468,6 +498,7 @@ func (c *Config) applyEnvOverrides() {
 	}
 	if v := firstEnv("FLODNI_PLEX_TOKEN", "TIRAMISU_PLEX_TOKEN", "GOSTREAM_PLEX_TOKEN", "PLEX_TOKEN"); v != "" {
 		c.Plex.Token = v
+		c.plexTokenFromEnv = true
 	}
 	if v := os.Getenv("FLODNI_API_TOKEN"); v != "" {
 		c.APIToken = v

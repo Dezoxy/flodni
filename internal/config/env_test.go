@@ -86,3 +86,36 @@ func TestAPITokenEnvAndRedaction(t *testing.T) {
 		t.Errorf("explicit post: got %q", got)
 	}
 }
+
+func TestPlexTokenRedactionAndResolve(t *testing.T) {
+	for _, k := range []string{"FLODNI_PLEX_TOKEN", "TIRAMISU_PLEX_TOKEN", "GOSTREAM_PLEX_TOKEN", "PLEX_TOKEN"} {
+		t.Setenv(k, "")
+	}
+	var c Config
+	c.Plex.Token, c.filePlexToken = "from-file", "from-file"
+	if got := c.Redacted().Plex.Token; got != "" {
+		t.Errorf("Redacted leaks the Plex token: %q", got)
+	}
+	if c.Plex.Token != "from-file" {
+		t.Error("Redacted must not modify the receiver")
+	}
+	if got := c.PlexTokenSource(); got != "file" {
+		t.Errorf("source = %q, want file", got)
+	}
+	t.Setenv("FLODNI_PLEX_TOKEN", "from-env")
+	c.applyEnvOverrides()
+	if got := c.PlexTokenSource(); got != "env" {
+		t.Errorf("source = %q, want env", got)
+	}
+	// An empty post keeps the file's token, never the environment's.
+	if got := c.ResolvePlexToken(""); got != "from-file" {
+		t.Errorf("empty post: got %q, want the file token", got)
+	}
+	if got := c.ResolvePlexToken("new"); got != "new" {
+		t.Errorf("explicit post: got %q", got)
+	}
+	var none Config
+	if got := none.PlexTokenSource(); got != "" {
+		t.Errorf("no token: source = %q, want empty", got)
+	}
+}

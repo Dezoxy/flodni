@@ -102,6 +102,21 @@ for example `http://host:9080/plex/webhook?token=<token>`; no other route
 does. `/control` loads without it and asks for the token on its first call,
 then keeps it in the browser's local storage. `GET /api/config` never
 returns the token, and saving from the panel leaves it unchanged.
+It does not return `plex.token` either (empty), but adds
+`plex_token_source` (`env`, `file` or empty) so the panel can say whether a
+Plex token is in use. The panel's token field starts empty: leave it empty to
+keep the stored token, type to replace it. A post with an empty or absent
+`plex.token` keeps the one `config.json` holds at that moment (a hand edit
+included); an environment token (`FLODNI_PLEX_TOKEN`) is never written to the
+file. The panel cannot clear the token; delete `plex.token` from `config.json`.
+The stored token is sent wherever `plex.url` points, so a save that changes the
+URL's scheme, host or port needs a typed token: without one it is refused with
+409 (`re-enter the Plex token when changing plex.url`), and the panel makes the
+token field required once the URL field changes. On an open port (no
+`api_token`), `POST /api/config` also refuses with 403 a non-empty `plex.token`
+and a changed `plex.url`, as it does for `api_token`; set them through
+`FLODNI_PLEX_TOKEN` or by editing `config.json`, then restart. A body that leaves
+both unchanged or absent saves as before.
 With no token enforced (the port is open), two control routes are refused with
 403 and a JSON `error`, because any client that reaches the port could
 otherwise take the service over: `POST /api/config` when the body carries a non-empty
@@ -127,7 +142,17 @@ with a cross-site POST. Only hostnames are compared, not scheme or port,
 because a TLS-terminating tunnel hands Flodni plain http with the original
 `Host` while the browser's `Origin` says `https`. A request with no `Origin`
 (Plex, curl, scripts, and the GET navigations and `<img>` loads a browser
-sends without one) is unchanged; `Origin: null` is refused. The panel's own
+sends without one) is unchanged; `Origin: null` is refused. Because a page can
+still send those GETs, `GET`/`HEAD /stream` on an open port never adds a
+torrent: it plays or reports a hash the engine already stores or holds, and
+answers 403 ("adding by GET is disabled; use `POST /torrents`") for any other
+link, for an `http(s)` or `file:` link (refused before any fetch, so no
+server-side request and no local file read), and for `&save` or `&preload`
+(they change state). A stored hash wakes from its record only, so the link's
+trackers are never used; a record without metainfo answers 404. A page can
+still wake a stored hash through `GET /stream` or `GET /play`. With a token
+set, `/stream` keeps adding a hash the engine does not hold. Add through
+`POST /torrents` or `POST /torrent/upload`. The panel's own
 save and restart calls are same-origin POSTs that do carry `Origin`, and pass
 because the hostnames match, so a reverse proxy in front of the control port
 must preserve the `Host` header (nginx: `proxy_set_header Host $host;`), or
@@ -226,6 +251,40 @@ arrives), so the counter, not the add response, is where a failed save shows.
 
 To back it up, stop flodni and copy `config.db`: a cold copy is the safe one.
 To restore, stop flodni, copy `config.db` back and start it.
+
+### Foreign trackers in stored records
+
+Some private trackers' own `.torrent` files carry a second tracker that is not
+theirs (a cross-upload, with someone else's key). It is stored in the record, and
+every wake announces to it. Two offline commands show and remove them. Both open
+`config.db` directly, so **stop flodni first**; if the file is locked they exit 2
+with "config.db is in use: stop flodni first". **Copy `config.db` before running
+`remove-host`.** Pass the engine's state directory with `--state` (the daemon's
+`--path`; without it the binary's directory). Run them as the daemon's user;
+root needs `--allow-root`. They never print a tracker URL, path, query or
+passkey, only hosts and info hashes.
+
+```
+flodni trackers audit [--hashes] [--json] [--state <dir>]
+flodni trackers remove-host [--dry-run] [--hashes] [--state <dir>] <host>
+```
+
+- `audit` is read-only. Per record, the primary tracker is the first tracker of
+  the first tier; its own domain is the last two labels of its host (three under
+  a built-in list of common two-label suffixes such as `co.uk`, `org.uk` and
+  `com.hu`). Every other host in the record is foreign. It prints one line per
+  foreign host, `host  records=N  private=N`, most records first, then a summary
+  `scanned= private= public= foreign_records=`. A record whose metainfo is
+  missing or unreadable counts as private. The domain rule is an approximation,
+  not the Public Suffix List: a suffix missing from the list makes its hosts look
+  like one domain, so a foreign host there can be missed.
+- `remove-host <host>` removes every tracker with that host (case-insensitive,
+  trailing dot ignored) from every record, drops tiers left empty and keeps the
+  order of the rest. Nothing else in the record changes; each changed record is
+  one fsynced transaction. It refuses (exit 2, nothing written) when the host is
+  the primary tracker of any record it would touch. `--dry-run` writes nothing and
+  prints the same summary, `records_changed= trackers_removed= private= public=`.
+  The flags go before the host.
 
 ## Startup report
 
@@ -1253,6 +1312,22 @@ renamed and its registry row is never re-keyed, and stubs are found by the
   the old form keeps them: an add finds the row by the old key when the new one
   has none, and replaces it in place.
 
+## Engine add semantics
+
+An add through the engine (`POST /torrents`, `/stream`, `/torrent/upload`, and
+the library's add and inspect, which call `POST /torrents`) starts from the
+link or file it was given, and for a hash the engine already stores it
+restores the stored metainfo and peers. Trackers follow hard rule 3:
+
+- **Stored, not known public** (a private torrent, or a record without
+  metainfo): the request's trackers are ignored and the record's own are used.
+  The log line carries a count only, since tracker URLs carry passkeys.
+- **Stored and known public:** the request's trackers are merged with the
+  record's, as before.
+- **Already held in memory and not known public:** the add gives the live
+  torrent no tracker.
+- **Re-adding with new trackers** is remove, then add.
+
 ## Stub contents and the stub scrub
 
 A stub is a small JSON file: `url` (the engine's stream link, which carries the
@@ -1825,8 +1900,8 @@ Every path that starts a torrent for a hash, labelled:
 | Path | Kind | What it does |
 |---|---|---|
 | A read or an open through the mount, warm on add, catch-up | wake | `native.Wake` loads the stored record (`torr.LoadStored`); the magnet is used for its hash only, and a link that is not a magnet is refused without being fetched. Refuses an unstored hash. |
-| `/play/{hash}/{id}`, `/stream` with a stored hash, and the engine's own lookup of a stored torrent | wake | `torr.LoadStored`. `/play` answers 404 for an unstored hash. |
-| `POST /torrents` (`add`), upload, `/stream?link=` on a new link | explicit add | The caller's link or file starts the torrent, a stored record or not; the stored metainfo and trackers are merged in when there is one. |
+| `/play/{hash}/{id}`, `/stream` with a stored hash, and the engine's own lookup of a stored torrent | wake | `torr.LoadStored`. `/play` takes a bare hash only (40 hex or 32 base32): 400 for anything else, an `http(s)` or `file:` value never being fetched or read, and 404 for an unstored hash or a record without metainfo; `/stream` wakes a stored hash from its record the same way. |
+| `POST /torrents` (`add`), upload, and `/stream?link=` on a new link with a token set | explicit add | The caller's link or file starts the torrent, a stored record or not; the stored metainfo and trackers are merged in when there is one. |
 
 A load, a save and a removal of one torrent are serialised in the engine, so a
 torrent that was removed stays removed: a wake that was still adding it

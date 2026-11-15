@@ -123,15 +123,28 @@ func addUnderLock(spec *torrent.TorrentSpec) (*Torrent, error) {
 	// If this torrent was previously saved, the DB has both — inject them so
 	// GotInfo() fires immediately and peers connect without waiting for tracker/DHT.
 	if cached := GetTorrentDB(spec.InfoHash); cached != nil && cached.TorrentSpec != nil {
+		// Decided before the injection below: the record's metainfo and the request's
+		// both have to show a public torrent, and no metainfo is not public.
+		recordPublic := infoBytesPublic(cached.TorrentSpec.InfoBytes) &&
+			(len(spec.InfoBytes) == 0 || infoBytesPublic(spec.InfoBytes))
 		if len(spec.InfoBytes) == 0 && len(cached.TorrentSpec.InfoBytes) > 0 {
 			spec.InfoBytes = cached.TorrentSpec.InfoBytes
 		}
 		if len(spec.PeerAddrs) == 0 && len(cached.TorrentSpec.PeerAddrs) > 0 {
 			spec.PeerAddrs = cached.TorrentSpec.PeerAddrs
 		}
-		// The trackers the torrent was first added with (its indexer's, possibly with the
-		// user's passkey) come back too.
-		spec.Trackers = mergeTrackerTiers(spec.Trackers, cached.TorrentSpec.Trackers)
+		if recordPublic {
+			// The trackers the torrent was first added with come back too.
+			spec.Trackers = mergeTrackerTiers(spec.Trackers, cached.TorrentSpec.Trackers)
+		} else {
+			// A private torrent's trackers are its record's alone (hard rule 3): a link
+			// or a file for a stored hash must not give it, or the record it is saved
+			// into, a foreign tracker. Re-adding with new trackers is remove, then add.
+			if n := countNewTrackers(spec.Trackers, cached.TorrentSpec.Trackers); n > 0 {
+				log.TLogln("add: ignored", n, "request trackers for a stored torrent that is not public")
+			}
+			spec.Trackers = cached.TorrentSpec.Trackers
+		}
 	}
 
 	btsMu.RLock()

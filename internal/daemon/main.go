@@ -200,6 +200,11 @@ func Run() {
 		os.Exit(scrubStubsMain(os.Args[2:], os.Stdout, os.Stderr))
 	}
 
+	// `flodni trackers` audits and cleans the trackers in config.db, offline.
+	if len(os.Args) > 1 && os.Args[1] == "trackers" {
+		os.Exit(trackersMain(os.Args[2:], os.Stdout, os.Stderr))
+	}
+
 	checkHardwareSupport()
 
 	var dbPath string
