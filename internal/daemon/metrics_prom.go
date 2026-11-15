@@ -11,6 +11,7 @@ import (
 	"github.com/anacrolix/torrent"
 
 	"flodni/internal/gostorm/native"
+	"flodni/internal/gostorm/settings"
 	"flodni/internal/gostorm/torr"
 	"flodni/internal/promtext"
 	"flodni/internal/warmup"
@@ -294,11 +295,11 @@ func collectPlaybackProm(w *promtext.Writer) {
 func collectReaderBudgetProm(w *promtext.Writer) {
 	w.Counter("flodni_unconfirmed_read_bytes_total",
 		"Bytes past the head and tail windows that readers took from files with no confirmed playback, whichever path served them.",
-		promSample(unconfirmedReadBytes.Load()))
+		promSample(app.unconfirmedReadBytes.Load()))
 	w.Counter("flodni_unconfirmed_read_sessions_total",
 		"Sessions that crossed the unconfirmed-read margin, counted once at close: confirmed_late if a playback webhook confirmed the file afterwards.",
-		promSample(unconfirmedSessions[rbUnconfirmed].Load(), lbl("outcome", "unconfirmed")),
-		promSample(unconfirmedSessions[rbConfirmedLate].Load(), lbl("outcome", "confirmed_late")))
+		promSample(app.unconfirmedSessions[rbUnconfirmed].Load(), lbl("outcome", "unconfirmed")),
+		promSample(app.unconfirmedSessions[rbConfirmedLate].Load(), lbl("outcome", "confirmed_late")))
 	w.Counter("flodni_unconfirmed_read_refused_reads_total",
 		"Reads the reader budget refused with EIO (refuse_unconfirmed_reads on only).",
 		promSample(app.unconfirmedRefusedReads.Load()))
@@ -317,8 +318,8 @@ func collectReaderBudgetProm(w *promtext.Writer) {
 		promSample(app.attributedFillBytes.Load()))
 	w.Counter("flodni_playback_webhooks_received_total",
 		"Playback start and resume webhooks for a movie or an episode, matched to one file or not.",
-		promSample(playbackWebhooksMatched.Load(), lbl("matched", "true")),
-		promSample(playbackWebhooksUnmatched.Load(), lbl("matched", "false")))
+		promSample(app.playbackWebhooksMatched.Load(), lbl("matched", "true")),
+		promSample(app.playbackWebhooksUnmatched.Load(), lbl("matched", "false")))
 	rules := make([]promtext.Sample, 0, numWebhookRules)
 	for i, name := range webhookRuleNames {
 		rules = append(rules, promSample(app.playbackWebhookRules[i].Load(), lbl("rule", name)))
@@ -363,6 +364,12 @@ func collectEngineReadsProm(w *promtext.Writer) {
 	w.Counter("flodni_engine_peer_redials_total",
 		"Peers the opt-in redial (redial_dropped_peer) added back to a private torrent after its only connected peer dropped. 0 with the switch off.",
 		promSample(torr.RedialCount()))
+	setErrs, remErrs, clearErrs := settings.DBWriteErrors()
+	w.Counter("flodni_engine_db_write_errors_total",
+		"Engine database commits that failed, by operation: set (a record save), rem (a record removal) or clear. The record is then not saved; alert on any increase. 0 from start.",
+		promSample(setErrs, lbl("op", "set")),
+		promSample(remErrs, lbl("op", "rem")),
+		promSample(clearErrs, lbl("op", "clear")))
 	pc := torrent.ProcessCounters()
 	w.Counter("flodni_engine_hedge_triggers_total",
 		"Tail-hedge duplicate requests the engine fired. Counted per process, so unlike hedge_trigger_count in /metrics it does not fall when a torrent expires.",

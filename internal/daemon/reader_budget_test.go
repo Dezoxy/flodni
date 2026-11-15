@@ -37,7 +37,7 @@ func confirmPlayback(path string) {
 }
 
 func rbCounts() (bytes, unconfirmed, late int64) {
-	return unconfirmedReadBytes.Load(), unconfirmedSessions[0].Load(), unconfirmedSessions[1].Load()
+	return app.unconfirmedReadBytes.Load(), app.unconfirmedSessions[0].Load(), app.unconfirmedSessions[1].Load()
 }
 
 func TestBytesOutsideWindows(t *testing.T) {
@@ -68,7 +68,6 @@ func TestBytesOutsideWindows(t *testing.T) {
 }
 
 func TestCountUnconfirmedSourcesAndConfirmation(t *testing.T) {
-	newTestApp(t)
 	s := budgetEnv(t, 1<<40)
 	b0, _, _ := rbCounts()
 
@@ -113,7 +112,6 @@ func TestRecordReadFeedsTheBudget(t *testing.T) {
 }
 
 func TestCrossingLogsOneLineUnderConcurrency(t *testing.T) {
-	newTestApp(t)
 	s := budgetEnv(t, 10<<20)
 	buf := captureSessionLog(t)
 	noteReaderCaller(s.path, 0, 1234)
@@ -161,7 +159,6 @@ func TestCrossingLogsOneLineUnderConcurrency(t *testing.T) {
 }
 
 func TestBelowMarginThenConfirmedStaysSilent(t *testing.T) {
-	newTestApp(t)
 	s := budgetEnv(t, 10<<20)
 	buf := captureSessionLog(t)
 	_, u0, l0 := rbCounts()
@@ -182,7 +179,6 @@ func TestBelowMarginThenConfirmedStaysSilent(t *testing.T) {
 }
 
 func TestConfirmedLateLogsOnceAndSessionsResolveOnceAtClose(t *testing.T) {
-	newTestApp(t)
 	for _, late := range []bool{false, true} {
 		name := "unconfirmed"
 		if late {
@@ -236,7 +232,7 @@ func TestConfirmedLateLogsOnceAndSessionsResolveOnceAtClose(t *testing.T) {
 }
 
 func webhookCounts() (matched, unmatched int64) {
-	return playbackWebhooksMatched.Load(), playbackWebhooksUnmatched.Load()
+	return app.playbackWebhooksMatched.Load(), app.playbackWebhooksUnmatched.Load()
 }
 
 func TestWebhookCountsMatchedAndUnmatchedPlaysOnly(t *testing.T) {

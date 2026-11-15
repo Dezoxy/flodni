@@ -142,7 +142,17 @@ with a cross-site POST. Only hostnames are compared, not scheme or port,
 because a TLS-terminating tunnel hands Flodni plain http with the original
 `Host` while the browser's `Origin` says `https`. A request with no `Origin`
 (Plex, curl, scripts, and the GET navigations and `<img>` loads a browser
-sends without one) is unchanged; `Origin: null` is refused. The panel's own
+sends without one) is unchanged; `Origin: null` is refused. Because a page can
+still send those GETs, `GET`/`HEAD /stream` on an open port never adds a
+torrent: it plays or reports a hash the engine already stores or holds, and
+answers 403 ("adding by GET is disabled; use `POST /torrents`") for any other
+link, for an `http(s)` or `file:` link (refused before any fetch, so no
+server-side request and no local file read), and for `&save` or `&preload`
+(they change state). A stored hash wakes from its record only, so the link's
+trackers are never used; a record without metainfo answers 404. A page can
+still wake a stored hash through `GET /stream` or `GET /play`. With a token
+set, `/stream` keeps adding a hash the engine does not hold. Add through
+`POST /torrents` or `POST /torrent/upload`. The panel's own
 save and restart calls are same-origin POSTs that do carry `Origin`, and pass
 because the hostnames match, so a reverse proxy in front of the control port
 must preserve the `Host` header (nginx: `proxy_set_header Host $host;`), or
@@ -182,8 +192,52 @@ once per torrent per 30 s and skipped when the record is unchanged; the
 idle-close save and a record update are not debounced. Watch the first-byte
 and wake metrics after upgrading.
 
+A commit that fails (a full disk, an I/O error) is not saved: the wake save
+then reports "not saved" and does not start its 30 s debounce, so the next
+save retries the record at once, and a removal that failed leaves the record in
+place. Every failure is logged and counted in
+`flodni_engine_db_write_errors_total{op}` (`set`, `rem` or `clear`, all present
+from 0). Alert on any increase: a record that did not commit exists only in
+memory and is lost at the next restart. A torrent added through the API is
+answered before its record is written (the save runs after the metadata
+arrives), so the counter, not the add response, is where a failed save shows.
+
 To back it up, stop flodni and copy `config.db`: a cold copy is the safe one.
 To restore, stop flodni, copy `config.db` back and start it.
+
+### Foreign trackers in stored records
+
+Some private trackers' own `.torrent` files carry a second tracker that is not
+theirs (a cross-upload, with someone else's key). It is stored in the record, and
+every wake announces to it. Two offline commands show and remove them. Both open
+`config.db` directly, so **stop flodni first**; if the file is locked they exit 2
+with "config.db is in use: stop flodni first". **Copy `config.db` before running
+`remove-host`.** Pass the engine's state directory with `--state` (the daemon's
+`--path`; without it the binary's directory). Run them as the daemon's user;
+root needs `--allow-root`. They never print a tracker URL, path, query or
+passkey, only hosts and info hashes.
+
+```
+flodni trackers audit [--hashes] [--json] [--state <dir>]
+flodni trackers remove-host [--dry-run] [--hashes] [--state <dir>] <host>
+```
+
+- `audit` is read-only. Per record, the primary tracker is the first tracker of
+  the first tier; its own domain is the last two labels of its host (three under
+  a built-in list of common two-label suffixes such as `co.uk`, `org.uk` and
+  `com.hu`). Every other host in the record is foreign. It prints one line per
+  foreign host, `host  records=N  private=N`, most records first, then a summary
+  `scanned= private= public= foreign_records=`. A record whose metainfo is
+  missing or unreadable counts as private. The domain rule is an approximation,
+  not the Public Suffix List: a suffix missing from the list makes its hosts look
+  like one domain, so a foreign host there can be missed.
+- `remove-host <host>` removes every tracker with that host (case-insensitive,
+  trailing dot ignored) from every record, drops tiers left empty and keeps the
+  order of the rest. Nothing else in the record changes; each changed record is
+  one fsynced transaction. It refuses (exit 2, nothing written) when the host is
+  the primary tracker of any record it would touch. `--dry-run` writes nothing and
+  prints the same summary, `records_changed= trackers_removed= private= public=`.
+  The flags go before the host.
 
 ## Startup report
 
@@ -1211,6 +1265,22 @@ renamed and its registry row is never re-keyed, and stubs are found by the
   the old form keeps them: an add finds the row by the old key when the new one
   has none, and replaces it in place.
 
+## Engine add semantics
+
+An add through the engine (`POST /torrents`, `/stream`, `/torrent/upload`, and
+the library's add and inspect, which call `POST /torrents`) starts from the
+link or file it was given, and for a hash the engine already stores it
+restores the stored metainfo and peers. Trackers follow hard rule 3:
+
+- **Stored, not known public** (a private torrent, or a record without
+  metainfo): the request's trackers are ignored and the record's own are used.
+  The log line carries a count only, since tracker URLs carry passkeys.
+- **Stored and known public:** the request's trackers are merged with the
+  record's, as before.
+- **Already held in memory and not known public:** the add gives the live
+  torrent no tracker.
+- **Re-adding with new trackers** is remove, then add.
+
 ## Stub contents and the stub scrub
 
 A stub is a small JSON file: `url` (the engine's stream link, which carries the
@@ -1783,8 +1853,8 @@ Every path that starts a torrent for a hash, labelled:
 | Path | Kind | What it does |
 |---|---|---|
 | A read or an open through the mount, warm on add, catch-up | wake | `native.Wake` loads the stored record (`torr.LoadStored`); the magnet is used for its hash only, and a link that is not a magnet is refused without being fetched. Refuses an unstored hash. |
-| `/play/{hash}/{id}`, `/stream` with a stored hash, and the engine's own lookup of a stored torrent | wake | `torr.LoadStored`. `/play` answers 404 for an unstored hash. |
-| `POST /torrents` (`add`), upload, `/stream?link=` on a new link | explicit add | The caller's link or file starts the torrent, a stored record or not; the stored metainfo and trackers are merged in when there is one. |
+| `/play/{hash}/{id}`, `/stream` with a stored hash, and the engine's own lookup of a stored torrent | wake | `torr.LoadStored`. `/play` takes a bare hash only (40 hex or 32 base32): 400 for anything else, an `http(s)` or `file:` value never being fetched or read, and 404 for an unstored hash or a record without metainfo; `/stream` wakes a stored hash from its record the same way. |
+| `POST /torrents` (`add`), upload, and `/stream?link=` on a new link with a token set | explicit add | The caller's link or file starts the torrent, a stored record or not; the stored metainfo and trackers are merged in when there is one. |
 
 A load, a save and a removal of one torrent are serialised in the engine, so a
 torrent that was removed stays removed: a wake that was still adding it
@@ -1872,6 +1942,18 @@ the `[Webhook]` status line, are described in their own sections and are byte-id
 both formats; `[DeadSwarm]` and `[TTFF]` wording is not a contract. The
 GoStorm engine's own log lines still use the standard logger, so they keep
 their old shape in both formats.
+
+**Tracker credentials in logs.** A private tracker's announce URL carries the
+user's passkey, in its path, its query or its userinfo, and a magnet carries it
+in `tr=` and `xs=`. Every log line that can hold a link, a magnet, an error built
+from one or an announce URL goes through one redactor (`internal/redact`), which
+keeps `scheme://host[:port]` and replaces the rest with `/<redacted>`: the add
+line prints `add torrent https://tracker.example/<redacted>`, a failed announce
+says which tracker failed and why. This covers the add API, the wake and
+activation errors, the discovery boost's failure list and all of the engine's
+own log lines, the debug ones included (the engine's `EnableDebug` setting
+logs every announce, with its URL, redacted). A `torrs://` link is replaced
+whole, since it packs the trackers.
 
 The conversion from `log.Printf` is `scripts/slogify` (see its README); it
 can be run again on a newer tree.
@@ -1967,6 +2049,7 @@ scraper on the same host or Docker network.
 | `flodni_engine_short_reads_total` | counter | `path` | Engine reads that ended short and were reported as success: `stream` (the sequential reader) or `fetch` (the stateless block fetch behind the FUSE fallback). 0 from start. |
 | `flodni_engine_short_read_repairs_total` | counter | `result` | Outcome of the stream reader's refill loop, per read that needed it: `repaired` after a reconnect, `unfilled` when a gap stayed. |
 | `flodni_engine_peer_redials_total` | counter | none | Peers the opt-in redial (`redial_dropped_peer`) added back to a private torrent after its only connected peer dropped. 0 with the switch off. See Engine stall gaps. |
+| `flodni_engine_db_write_errors_total` | counter | `op` | Engine database (`config.db`) commits that failed, by `op`: `set` (a record save), `rem` (a removal) or `clear`. Each is a record not saved or not removed; alert on any increase. All three present from 0. See Engine state and backup. |
 | `flodni_engine_hedge_triggers_total` | counter | none | Tail-hedge duplicate requests the engine fired. A process counter: unlike `hedge_trigger_count` in `/metrics`, it does not fall when a torrent expires. |
 | `flodni_engine_peer_ejects_total` | counter | `transport` | Outlier peers the engine dropped for a rate far under the swarm median, `tcp` or `utp`. Process counter. |
 | `flodni_engine_peer_churn_drops_total` | counter | `transport` | Peers dropped by the warmup-probe churn, `tcp` or `utp`. Process counter. |

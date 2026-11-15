@@ -67,6 +67,12 @@ func infoPublic(info *metainfo.Info) bool {
 	return info != nil && (info.Private == nil || !*info.Private)
 }
 
+// infoBytesPublic is infoPublic for raw metainfo: absent or unreadable bytes are not public.
+func infoBytesPublic(b []byte) bool {
+	var info metainfo.Info
+	return len(b) > 0 && bencode.Unmarshal(b, &info) == nil && infoPublic(&info)
+}
+
 // dropPublicTrackers removes from a private torrent's trackers every one of the public
 // lists we add ourselves (hard rule 3), keeping the torrent's own. A stored spec carries
 // whatever trackers the torrent was saved with, which for a torrent added before the
@@ -161,7 +167,29 @@ func NewTorrent(spec *torrent.TorrentSpec, bt *BTServer) (*Torrent, error) {
 		return nil, errors.New("BT client not connected")
 	}
 
-	goTorrent, _, err := client.AddTorrentSpec(spec)
+	// AddTorrentSpec merges a spec's trackers into a torrent the engine already holds.
+	// A held torrent that is not known public takes none from an add (hard rule 3):
+	// the live torrent, and the record the next save writes, keep their own.
+	// Only a held torrent whose metainfo is known public takes them; one without
+	// metainfo may be private (a .torrent for it is added by remove, then add). The
+	// live torrent is read once, under its lock: drop() nils it concurrently.
+	addSpec := spec
+	if held := bt.GetTorrent(spec.InfoHash); held != nil {
+		if live := held.UnderlyingTorrent(); live == nil || !infoPublic(live.Info()) {
+			var own [][]string
+			if live != nil {
+				mi := live.Metainfo()
+				own = mi.UpvertedAnnounceList()
+			}
+			if n := countNewTrackers(spec.Trackers, own); n > 0 {
+				log.TLogln("add: ignored", n, "request trackers for a held torrent that is not public")
+			}
+			noTrackers := *spec
+			noTrackers.Trackers = nil
+			addSpec = &noTrackers
+		}
+	}
+	goTorrent, _, err := client.AddTorrentSpec(addSpec)
 	if err != nil {
 		return nil, err
 	}
@@ -183,7 +211,7 @@ func NewTorrent(spec *torrent.TorrentSpec, bt *BTServer) (*Torrent, error) {
 	torr.lastTimeSpeed = time.Now()
 	torr.bt = bt
 	torr.closed = goTorrent.Closed()
-	torr.TorrentSpec = spec
+	torr.TorrentSpec = addSpec
 	torr.AddExpiredTime(timeout)
 	torr.Timestamp = time.Now().Unix()
 

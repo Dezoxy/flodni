@@ -4,6 +4,8 @@ import (
 	"context"
 	"fmt"
 	"time"
+
+	"flodni/internal/redact"
 )
 
 const defaultRefreshDelay = 15 * time.Second
@@ -63,7 +65,9 @@ func (m *Manager) scheduleRefresh(section int) {
 		m.mu.Unlock()
 
 		if err != nil {
-			m.cfg.Logger.Warn(fmt.Sprintf("[LibraryAPI] WARNING: library refresh failed: %v", err), "err", err)
+			// The media server's error can embed the request URL, token included.
+			msg := redact.Err(err)
+			m.cfg.Logger.Warn(fmt.Sprintf("[LibraryAPI] WARNING: library refresh failed: %s", msg), "err", msg)
 		}
 		if again {
 			m.scheduleRefresh(section)

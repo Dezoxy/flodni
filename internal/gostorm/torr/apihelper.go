@@ -15,6 +15,7 @@ import (
 	"flodni/internal/gostorm/log"
 	sets "flodni/internal/gostorm/settings"
 	"flodni/internal/gostorm/torr/utils"
+	"flodni/internal/redact"
 	"flodni/internal/warmup"
 )
 
@@ -59,13 +60,33 @@ func mergeTrackerTiers(base, extra [][]string) [][]string {
 	return append(base, missing)
 }
 
+// countNewTrackers counts the trackers of req that known lacks. Only a count is ever
+// logged: a tracker URL can carry a passkey.
+func countNewTrackers(req, known [][]string) int {
+	have := map[string]bool{}
+	for _, tier := range known {
+		for _, tr := range tier {
+			have[tr] = true
+		}
+	}
+	n := 0
+	for _, tier := range req {
+		for _, tr := range tier {
+			if !have[tr] {
+				n++
+			}
+		}
+	}
+	return n
+}
+
 // AddTorrent is the explicit add: the caller brings a spec (a magnet, a file, an
 // upload) and the torrent starts from it. A wake of a closed torrent goes through
 // LoadStored instead, which never adds from a caller's link.
 func AddTorrent(spec *torrent.TorrentSpec, title, poster string, data string, category string) (*Torrent, error) {
 	torr, err := addUnderLock(spec)
 	if err != nil {
-		log.TLogln("error add torrent:", err)
+		log.TLogln("error add torrent:", redact.Err(err))
 		return nil, err
 	}
 
@@ -127,7 +148,8 @@ func SaveTorrentToDB(torr *Torrent) {
 	}
 }
 
-// saveTorrentToDB reports whether it wrote the record.
+// saveTorrentToDB reports whether it wrote the record; false when it was skipped or the
+// commit failed.
 func saveTorrentToDB(torr *Torrent) bool {
 	// V255: Persist metadata InfoBytes to DB for instant re-activation.
 	// Without this, TorrentSpec.InfoBytes stays nil (from original magnet parse),
@@ -177,7 +199,11 @@ func saveIfHeld(torr *Torrent, posterOK bool) bool {
 		return false
 	}
 	log.TLogln("save to db:", hash)
-	AddTorrentDB(torr, posterOK)
+	if err := AddTorrentDB(torr, posterOK); err != nil {
+		// Not saved: the caller must not stamp the debounce, so the next save retries.
+		log.TLogln("save to db failed, will retry:", hash)
+		return false
+	}
 	return true
 }
 
@@ -253,7 +279,7 @@ func GetTorrent(hashHex string) *Torrent {
 			// is added, and the DB wrapper handed to the caller is all there is.
 			t, err := LoadStored(tor.Hash().HexString())
 			if err != nil {
-				log.TLogln("New torrent not loaded:", err)
+				log.TLogln("New torrent not loaded:", redact.Err(err))
 				return
 			}
 			t.GotInfo()
@@ -323,7 +349,9 @@ func updateRecord(hash metainfo.Hash, title, poster, category, data string, post
 	if data != "" {
 		rec.Data = data
 	}
-	AddTorrentDB(rec, posterOK)
+	if err := AddTorrentDB(rec, posterOK); err != nil {
+		log.TLogln("update record: not saved:", hash)
+	}
 	return rec
 }
 
@@ -339,7 +367,9 @@ func removeUnderLock(hash metainfo.Hash) bool {
 	btsMu.RLock()
 	defer btsMu.RUnlock()
 	removed := engineRemove(bts, hash)
-	RemTorrentDB(hash)
+	if err := RemTorrentDB(hash); err != nil {
+		log.TLogln("remove record: not removed:", hash)
+	}
 	lastSaveTimes.Delete(hash)
 	return removed
 }

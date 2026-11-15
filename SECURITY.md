@@ -41,9 +41,14 @@ hostname than its `Host` (scheme and port are ignored, because a TLS tunnel
 delivers plain http with the original `Host`; `Origin: null` is refused), so
 a page in a browser on the network cannot send a cross-site POST. Requests
 without `Origin` (scripts, Plex, and the GET navigations and `<img>` loads a
-browser sends without one) pass, so some GETs on 8090 (`/stream?link=` adds a
-torrent, `/play/:hash/:id` wakes a stored one) stay open to a page, and so does
-DNS rebinding. A page on the same hostname but another port is not stopped. A
+browser sends without one) pass, so a page can still wake a stored
+torrent with `GET /play/:hash/:id` or `GET /stream`, and DNS rebinding passes.
+`GET`/`HEAD /stream` on an open port never adds: a link whose hash the engine
+does not already hold, any `http(s)` or `file:` link, and `&save` or
+`&preload` get 403 before anything is fetched or added; a stored hash wakes
+from its record only, and a record without metainfo gets 404. With a token set
+`/stream` still adds a hash the engine does not hold. A page on the same
+hostname but another port is not stopped. A
 reverse proxy in front of the control port must keep the `Host` header, or the
 panel's saves get 403. The engine sends no CORS headers; `/shutdown` and the
 Plex webhook take POST only. GoStorm's server
@@ -69,6 +74,18 @@ Run `flodni scrub-stubs --dry-run <source_path>` to count them and
 and the stubs it leaves alone). Each rewrite keeps the stub's mode, owner, mtime
 and atime, set on the new file before it replaces the stub.
 
+An add never changes the trackers of a private torrent. For a hash the engine
+already stores or holds, and whose metainfo is not known public, the request's
+trackers (a magnet's `tr=`, a `torrs://` link, a `.torrent` file) are ignored
+and the log says how many, never which. Without this one add could point a
+private torrent's info hash at a foreign tracker and save it into the record.
+To change a torrent's trackers, remove it and add it again. A record that took a
+foreign tracker before this fix keeps it, and is now authoritative: remove it
+and add it again, or drop the host with `flodni trackers remove-host`. A bare
+magnet whose metadata is not known yet is still treated as public by the engine
+until the metadata arrives, so it may use DHT meanwhile; a stored record with
+metainfo is not affected.
+
 What this does not cover:
 
 - Copies of the library directory made before the scrub (backups, snapshots)
@@ -79,7 +96,39 @@ What this does not cover:
 - The engine can print a link or tracker URL in its own log lines. Redacting
   those is separate work and not done here.
 
+## Foreign trackers in private torrents
+
+A private torrent's own `.torrent` file can carry a second tracker that is not
+the torrent's (a cross-upload, with someone else's key). The engine stores it in
+the torrent's record in `config.db` and announces to it on every wake, which
+sends the info hash to a tracker outside the torrent's own. Find them with
+`flodni trackers audit` and remove a host with
+`flodni trackers remove-host <host>` (try `--dry-run` first). Stop flodni and copy
+`config.db` before either; see "Foreign trackers in stored records" in the README
+for the flags and the approximate own-domain rule. The commands print hosts and
+info hashes only, never a tracker URL or passkey. Removal is owner-triggered; the
+daemon never does it by itself, and a removed host stays removed unless the
+torrent is added again with it.
+
 ## Secrets
+
+**Logs.** A private tracker's announce URL is the user's account, and logs
+get shared when asking for help, so tracker credentials never reach a log.
+`internal/redact` is the one redactor. It works on whole strings (errors from
+`net/http` embed the full URL), keeps `scheme://host[:port]` of every
+http(s), udp and ws(s) URL and replaces userinfo, path and query with
+`/<redacted>`, replaces the `tr=` and `xs=` values of a magnet by the host of
+their URL, replaces a `torrs://` link whole, and masks stray
+`passkey=`-style values. It is applied at the add API (the link and its parse
+and add errors), the wake and activation failure lines, the discovery boost's
+announce failures and, through the engine client's logger, every line the
+engine writes, including the debug lines `EnableDebug` turns on. The Plex
+library refresh puts `X-Plex-Token` in its request URL, and `net/http` errors embed
+the URL, so that error is redacted where it is built and again where it is logged.
+The engine's `Client config:` line is redacted too (`BlockListURL` can hold a key).
+The tracker scrape has its own cleaner for what a tracker sends back. Not covered: lines
+of code that does not go through these paths, such as a new `log` call that
+prints a link directly; the redactor is a net, not a license to log URLs.
 
 The repository holds no secrets; `config.json` is ignored by git and
 `config.json.example` carries placeholders. `config.json` holds `api_token` and the Plex token in clear text: a save from the panel keeps the file's existing permission bits (a new file is created 0600), so keep it unreadable to other users. `GET /api/config` returns neither secret; the panel shows only whether a Plex token is set and where it comes from, and a save with the field empty keeps the stored one (the environment's is never written to the file). Changing `plex.url` needs the token typed again, and on an open port neither `plex.url` nor `plex.token` can be changed through the API, because the stored token is sent to whatever host the URL names. Or pass the secrets as `FLODNI_API_TOKEN` and `FLODNI_PLEX_TOKEN` instead. CI runs gitleaks on the full

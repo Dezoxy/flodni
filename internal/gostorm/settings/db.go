@@ -40,8 +40,12 @@ func NewTDB() GoStormDB {
 // older, wider one is tightened on the open descriptor, so a swap of the path cannot
 // redirect the chmod.
 func openBolt(path string) (*bolt.DB, error) {
+	return openBoltTimeout(path, 5*time.Second)
+}
+
+func openBoltTimeout(path string, timeout time.Duration) (*bolt.DB, error) {
 	return bolt.Open(path, 0o600, &bolt.Options{
-		Timeout: 5 * time.Second,
+		Timeout: timeout,
 		OpenFile: func(name string, flag int, mode os.FileMode) (*os.File, error) {
 			f, err := os.OpenFile(name, flag, mode)
 			if err != nil {

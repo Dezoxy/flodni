@@ -43,6 +43,20 @@ func StoredScrapeTarget(hashHex string) []ScrapeTarget {
 // database opens in the engine's start-up, a moment after the daemon starts.
 func ScrapeReady() bool { return sets.TorrentsReady() }
 
+// InfoBytesPrivate is the stored-record form of the private test: metadata that is
+// absent, undecodable or flagged private counts as private, the same verdict
+// scrapeTargetsOf reaches. The offline tracker audit uses it.
+func InfoBytesPrivate(infoBytes []byte) bool {
+	if len(infoBytes) == 0 {
+		return true
+	}
+	var info metainfo.Info
+	if bencode.Unmarshal(infoBytes, &info) != nil {
+		return true
+	}
+	return !infoPublic(&info)
+}
+
 func trackerHost(tr string) string {
 	u, err := url.Parse(tr)
 	if err != nil {
