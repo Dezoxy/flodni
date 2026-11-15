@@ -61,7 +61,6 @@ func kaReleases() (stop, ceiling int64) {
 
 // A confirmed torrent with a recent read is held; the gauge counts it.
 func TestKeepaliveHoldsConfirmedRecentRead(t *testing.T) {
-	newTestApp(t)
 	keepaliveFixture(t, 15, 4)
 	kaPlay("/m/a.mkv", kaHashA, 2*time.Minute)
 	if !keepaliveHold(kaHashA) {
@@ -76,7 +75,6 @@ func TestKeepaliveHoldsConfirmedRecentRead(t *testing.T) {
 // recent webhook with no read holds. Nothing else extends it, so a pause (which leaves
 // no mark) cannot.
 func TestKeepaliveActivityIsReadOrConfirm(t *testing.T) {
-	newTestApp(t)
 	keepaliveFixture(t, 15, 4)
 	ps := kaPlay("/m/a.mkv", kaHashA, 20*time.Minute)
 	if keepaliveHold(kaHashA) {
@@ -93,7 +91,6 @@ func TestKeepaliveActivityIsReadOrConfirm(t *testing.T) {
 
 // Past the ceiling the hold ends and is counted once as a ceiling release.
 func TestKeepaliveCeilingReleases(t *testing.T) {
-	newTestApp(t)
 	now := keepaliveFixture(t, 15, 4)
 	kaPlay("/m/a.mkv", kaHashA, 10*time.Minute)
 	if !keepaliveHold(kaHashA) {
@@ -117,7 +114,6 @@ func TestKeepaliveCeilingReleases(t *testing.T) {
 // A stop webhook releases at once, inside the one-second cache window, counted as a
 // stop release.
 func TestKeepaliveStopReleasesAtOnce(t *testing.T) {
-	newTestApp(t)
 	keepaliveFixture(t, 15, 4)
 	ps := kaPlay("/m/a.mkv", kaHashA, time.Minute)
 	if !keepaliveHold(kaHashA) {
@@ -138,7 +134,6 @@ func TestKeepaliveStopReleasesAtOnce(t *testing.T) {
 
 // Without invalidation the stop shows within a second, never later.
 func TestKeepaliveStopVisibleAfterTheCacheWindow(t *testing.T) {
-	newTestApp(t)
 	now := keepaliveFixture(t, 15, 4)
 	ps := kaPlay("/m/a.mkv", kaHashA, time.Minute)
 	keepaliveHold(kaHashA)
@@ -153,7 +148,6 @@ func TestKeepaliveStopVisibleAfterTheCacheWindow(t *testing.T) {
 
 // An unconfirmed torrent is never held, however fresh its reads, and costs no counter.
 func TestKeepaliveIgnoresUnconfirmed(t *testing.T) {
-	newTestApp(t)
 	keepaliveFixture(t, 15, 4)
 	ps := kaPlay("/m/a.mkv", kaHashA, time.Second)
 	ps.IsHealthy = false
@@ -168,7 +162,6 @@ func TestKeepaliveIgnoresUnconfirmed(t *testing.T) {
 // Two episodes of one pack: one stopped, the other still playing keeps the torrent; the
 // stopped one's reads do not count.
 func TestKeepaliveSiblingEpisodes(t *testing.T) {
-	newTestApp(t)
 	keepaliveFixture(t, 15, 4)
 	ep1 := kaPlay("/m/e1.mkv", kaHashA, time.Minute)
 	kaPlay("/m/e2.mkv", kaHashA, 20*time.Minute) // stale: past the ceiling alone
@@ -187,7 +180,6 @@ func TestKeepaliveSiblingEpisodes(t *testing.T) {
 // The cap holds the most recently active torrents; the rest lose and are counted once
 // per episode as evicted, not as a release.
 func TestKeepaliveCapRanksByRecency(t *testing.T) {
-	newTestApp(t)
 	keepaliveFixture(t, 15, 2)
 	kaPlay("/m/a.mkv", kaHashA, 5*time.Minute)
 	kaPlay("/m/b.mkv", kaHashB, time.Minute)
@@ -213,7 +205,6 @@ func TestKeepaliveCapRanksByRecency(t *testing.T) {
 // A held torrent pushed out by a more recent one is counted as evicted, and leaves the
 // gauge.
 func TestKeepaliveCapEvictsAHeldTorrent(t *testing.T) {
-	newTestApp(t)
 	now := keepaliveFixture(t, 15, 1)
 	kaPlay("/m/a.mkv", kaHashA, 2*time.Minute)
 	if !keepaliveHold(kaHashA) {
@@ -242,7 +233,6 @@ func TestKeepaliveCapEvictsAHeldTorrent(t *testing.T) {
 
 // Minutes 0 is the one off switch: nothing is held, nothing is counted.
 func TestKeepaliveOffWithZeroMinutes(t *testing.T) {
-	newTestApp(t)
 	keepaliveFixture(t, 0, 4)
 	kaPlay("/m/a.mkv", kaHashA, time.Second)
 	if keepaliveHold(kaHashA) {
@@ -255,7 +245,6 @@ func TestKeepaliveOffWithZeroMinutes(t *testing.T) {
 
 // Switching the keep-alive off live releases the held set without counting releases.
 func TestKeepaliveSwitchedOffDropsHeld(t *testing.T) {
-	newTestApp(t)
 	keepaliveFixture(t, 15, 4)
 	kaPlay("/m/a.mkv", kaHashA, time.Second)
 	keepaliveHold(kaHashA)
@@ -267,7 +256,6 @@ func TestKeepaliveSwitchedOffDropsHeld(t *testing.T) {
 
 // A torrent no longer asked about (closed by something else) leaves the gauge.
 func TestKeepaliveHeldGaugeForgetsTheUnasked(t *testing.T) {
-	newTestApp(t)
 	now := keepaliveFixture(t, 15, 4)
 	kaPlay("/m/a.mkv", kaHashA, time.Second)
 	keepaliveHold(kaHashA)
@@ -281,7 +269,6 @@ func TestKeepaliveHeldGaugeForgetsTheUnasked(t *testing.T) {
 // at once, scrapes in the grace do not lose the held entry, and the release is counted
 // when the engine asks again.
 func TestKeepaliveStopReleaseSurvivesTheGrace(t *testing.T) {
-	newTestApp(t)
 	now := keepaliveFixture(t, 15, 4)
 	ps := kaPlay("/m/a.mkv", kaHashA, time.Minute)
 	if !keepaliveHold(kaHashA) {
@@ -310,7 +297,6 @@ func TestKeepaliveStopReleaseSurvivesTheGrace(t *testing.T) {
 // The predicate runs under muTorrent on the engine's ticker, so it must not reach the
 // engine: neither file may import the engine packages, and it works with no engine up.
 func TestKeepalivePredicateIsEngineFree(t *testing.T) {
-	newTestApp(t)
 	for _, f := range []string{"keepalive.go", "confirmed_counters.go"} {
 		af, err := parser.ParseFile(token.NewFileSet(), f, nil, parser.ImportsOnly)
 		if err != nil {

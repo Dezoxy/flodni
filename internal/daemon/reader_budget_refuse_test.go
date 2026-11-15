@@ -19,10 +19,9 @@ func refuseEnv(t *testing.T, margin int64) (*TTFFSession, *MkvHandle) {
 	prevR, prevH, prevP := refuseUnconfirmedReads, unconfirmedReadHold, unconfirmedHoldPoll
 	refuseUnconfirmedReads = func() bool { return true }
 	unconfirmedReadHold, unconfirmedHoldPoll = 300*time.Millisecond, 10*time.Millisecond
-	prevW := playbackWebhooksMatched.Swap(1)
+	app.playbackWebhooksMatched.Store(1)
 	t.Cleanup(func() {
 		refuseUnconfirmedReads, unconfirmedReadHold, unconfirmedHoldPoll = prevR, prevH, prevP
-		playbackWebhooksMatched.Store(prevW)
 	})
 	return s, &MkvHandle{path: s.path, size: s.size}
 }
@@ -37,7 +36,6 @@ func refuseSnapshot() refuseCounts {
 }
 
 func TestBudgetBlocksFetchPredicate(t *testing.T) {
-	newTestApp(t)
 	const mid = 200 << 20 // past both windows
 	head := warmup.FileSize
 	type setup func(t *testing.T, s *TTFFSession)
@@ -75,7 +73,7 @@ func TestBudgetBlocksFetchPredicate(t *testing.T) {
 			case "switch":
 				refuseUnconfirmedReads = func() bool { return false }
 			case "armed":
-				playbackWebhooksMatched.Store(0)
+				app.playbackWebhooksMatched.Store(0)
 			}
 			if tt.setup != nil {
 				tt.setup(t, s)
@@ -92,7 +90,6 @@ func TestBudgetBlocksFetchPredicate(t *testing.T) {
 }
 
 func TestFreshMarginAfterConfirmThenStop(t *testing.T) {
-	newTestApp(t)
 	s, _ := refuseEnv(t, 10<<20)
 	const mid = 200 << 20
 	s.countUnconfirmed(srcFetchBlock, 12<<20, mid)
@@ -119,7 +116,6 @@ func TestFreshMarginAfterConfirmThenStop(t *testing.T) {
 }
 
 func TestFloorIsSetEvenWhenTheSessionNeverCrossed(t *testing.T) {
-	newTestApp(t)
 	s, _ := refuseEnv(t, 10<<20)
 	s.countUnconfirmed(srcFetchBlock, 4<<20, 200<<20)
 	confirmPlayback(s.path)
@@ -141,7 +137,6 @@ func TestGateIsANoOpWhenNothingBlocks(t *testing.T) {
 }
 
 func TestGateHoldLiftsOnConfirmation(t *testing.T) {
-	newTestApp(t)
 	s, h := refuseEnv(t, 0)
 	unconfirmedReadHold = 5 * time.Second
 	c0 := refuseSnapshot()
@@ -250,7 +245,6 @@ func TestNewHandleGetsItsOwnHold(t *testing.T) {
 }
 
 func TestHoldRearmsAfterAConfirmation(t *testing.T) {
-	newTestApp(t)
 	s, h := refuseEnv(t, 0)
 	if errno := h.budgetGate(context.Background(), 200<<20, 4096); errno != errnoBudgetRefused {
 		t.Fatalf("errno = %v", errno)
@@ -293,7 +287,6 @@ func TestSessionClosedMidHoldDoesNotLift(t *testing.T) {
 }
 
 func TestConfirmationAfterARefusalCountsOncePerSession(t *testing.T) {
-	newTestApp(t)
 	s, h := refuseEnv(t, 0)
 	buf := captureSessionLog(t)
 	s.countUnconfirmed(srcFetchBlock, 1<<20, 200<<20) // margin 0: crosses at the first byte
@@ -323,7 +316,6 @@ func TestConfirmationAfterARefusalCountsOncePerSession(t *testing.T) {
 }
 
 func TestConfirmationWithoutARefusalDoesNotCount(t *testing.T) {
-	newTestApp(t)
 	s, _ := refuseEnv(t, 10<<20)
 	c0 := refuseSnapshot()
 	confirmPlayback(s.path)
@@ -348,7 +340,7 @@ func TestOverMarginReportsEnforcedTruthfully(t *testing.T) {
 			s, _ := refuseEnv(t, 1<<20)
 			refuseUnconfirmedReads = func() bool { return tt.on }
 			if !tt.armed {
-				playbackWebhooksMatched.Store(0)
+				app.playbackWebhooksMatched.Store(0)
 			}
 			buf := captureSessionLog(t)
 			s.countUnconfirmed(srcFetchBlock, 2<<20, 200<<20)

@@ -81,6 +81,7 @@ func MigrateTorrents() {
 		return nil
 	})
 	_ = db.Close() // opened to read; the read error is checked below
+	failed := false
 	if err == nil && len(torrs) > 0 {
 		for _, torr := range torrs {
 			spec, err := utils.ParseLink(torr.Magnet)
@@ -94,13 +95,20 @@ func MigrateTorrents() {
 			}
 			log.TLogln(migrateTorrentMsg, torr.Name, torr.Hash, torr.Size)
 			TorrentsMigrated.Add(1)
-			AddTorrent(&TorrentDB{
+			if err := AddTorrent(&TorrentDB{
 				TorrentSpec: spec,
 				Title:       title,
 				Timestamp:   torr.Timestamp,
 				Size:        torr.Size,
-			})
+			}); err != nil {
+				failed = true
+			}
 		}
+	}
+	if failed {
+		// The old file is the only copy of a record that did not commit.
+		log.TLogln("Migrate torrents: a record did not commit, keeping torrserver.db")
+		return
 	}
 	if err := os.Remove(filepath.Join(Path, "torrserver.db")); err != nil {
 		log.TLogln("Migrate torrents: could not remove torrserver.db:", err)

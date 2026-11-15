@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"flodni/internal/catalog"
+	"flodni/internal/redact"
 )
 
 // Client refreshes a media server library section. Plex addresses one section and does
@@ -42,12 +43,12 @@ func (c *PlexClient) RefreshLibrary(ctx context.Context, sectionID int) error {
 	urlStr := fmt.Sprintf("%s/library/sections/%d/refresh?X-Plex-Token=%s", c.URL, sectionID, c.Token)
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, urlStr, nil)
 	if err != nil {
-		return err
+		return redactedError{err}
 	}
 
 	resp, err := catalog.Do(ctx, c.http, req)
 	if err != nil {
-		return err
+		return redactedError{err}
 	}
 	defer resp.Body.Close()
 
@@ -57,3 +58,11 @@ func (c *PlexClient) RefreshLibrary(ctx context.Context, sectionID int) error {
 
 	return nil
 }
+
+// redactedError is an error from a request whose URL carries X-Plex-Token. net/http
+// embeds the whole URL in its errors, so Error() is redacted; Unwrap keeps errors.Is and
+// errors.As working for the caller.
+type redactedError struct{ err error }
+
+func (e redactedError) Error() string { return redact.Err(e.err) }
+func (e redactedError) Unwrap() error { return e.err }

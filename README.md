@@ -167,6 +167,16 @@ once per torrent per 30 s and skipped when the record is unchanged; the
 idle-close save and a record update are not debounced. Watch the first-byte
 and wake metrics after upgrading.
 
+A commit that fails (a full disk, an I/O error) is not saved: the wake save
+then reports "not saved" and does not start its 30 s debounce, so the next
+save retries the record at once, and a removal that failed leaves the record in
+place. Every failure is logged and counted in
+`flodni_engine_db_write_errors_total{op}` (`set`, `rem` or `clear`, all present
+from 0). Alert on any increase: a record that did not commit exists only in
+memory and is lost at the next restart. A torrent added through the API is
+answered before its record is written (the save runs after the metadata
+arrives), so the counter, not the add response, is where a failed save shows.
+
 To back it up, stop flodni and copy `config.db`: a cold copy is the safe one.
 To restore, stop flodni, copy `config.db` back and start it.
 
@@ -1892,6 +1902,18 @@ both formats; `[DeadSwarm]` and `[TTFF]` wording is not a contract. The
 GoStorm engine's own log lines still use the standard logger, so they keep
 their old shape in both formats.
 
+**Tracker credentials in logs.** A private tracker's announce URL carries the
+user's passkey, in its path, its query or its userinfo, and a magnet carries it
+in `tr=` and `xs=`. Every log line that can hold a link, a magnet, an error built
+from one or an announce URL goes through one redactor (`internal/redact`), which
+keeps `scheme://host[:port]` and replaces the rest with `/<redacted>`: the add
+line prints `add torrent https://tracker.example/<redacted>`, a failed announce
+says which tracker failed and why. This covers the add API, the wake and
+activation errors, the discovery boost's failure list and all of the engine's
+own log lines, the debug ones included (the engine's `EnableDebug` setting
+logs every announce, with its URL, redacted). A `torrs://` link is replaced
+whole, since it packs the trackers.
+
 The conversion from `log.Printf` is `scripts/slogify` (see its README); it
 can be run again on a newer tree.
 
@@ -1986,6 +2008,7 @@ scraper on the same host or Docker network.
 | `flodni_engine_short_reads_total` | counter | `path` | Engine reads that ended short and were reported as success: `stream` (the sequential reader) or `fetch` (the stateless block fetch behind the FUSE fallback). 0 from start. |
 | `flodni_engine_short_read_repairs_total` | counter | `result` | Outcome of the stream reader's refill loop, per read that needed it: `repaired` after a reconnect, `unfilled` when a gap stayed. |
 | `flodni_engine_peer_redials_total` | counter | none | Peers the opt-in redial (`redial_dropped_peer`) added back to a private torrent after its only connected peer dropped. 0 with the switch off. See Engine stall gaps. |
+| `flodni_engine_db_write_errors_total` | counter | `op` | Engine database (`config.db`) commits that failed, by `op`: `set` (a record save), `rem` (a removal) or `clear`. Each is a record not saved or not removed; alert on any increase. All three present from 0. See Engine state and backup. |
 | `flodni_engine_hedge_triggers_total` | counter | none | Tail-hedge duplicate requests the engine fired. A process counter: unlike `hedge_trigger_count` in `/metrics`, it does not fall when a torrent expires. |
 | `flodni_engine_peer_ejects_total` | counter | `transport` | Outlier peers the engine dropped for a rate far under the swarm median, `tcp` or `utp`. Process counter. |
 | `flodni_engine_peer_churn_drops_total` | counter | `transport` | Peers dropped by the warmup-probe churn, `tcp` or `utp`. Process counter. |

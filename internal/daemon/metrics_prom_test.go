@@ -136,7 +136,7 @@ func TestHandlePrometheus(t *testing.T) {
 		"flodni_wake_refused_total",
 		"flodni_warm_fill_bytes_total", "flodni_warm_cache_failures_total", "flodni_warm_queue_files", "flodni_warm_paused",
 		"flodni_stub_index_mismatch_total",
-		"flodni_engine_short_reads_total", "flodni_engine_short_read_repairs_total", "flodni_engine_peer_redials_total", "flodni_sessions_open",
+		"flodni_engine_short_reads_total", "flodni_engine_short_read_repairs_total", "flodni_engine_peer_redials_total", "flodni_engine_db_write_errors_total", "flodni_sessions_open",
 		"flodni_engine_hedge_triggers_total", "flodni_engine_peer_ejects_total", "flodni_engine_peer_churn_drops_total",
 		"flodni_engine_gradient2_backoff_samples_total", "flodni_readahead_evictions_total", "flodni_warmup_head_fill_duration_seconds",
 		"go_goroutines", "go_memstats_heap_inuse_bytes", "go_memstats_sys_bytes", "go_gc_cycles_total",
@@ -165,6 +165,9 @@ func TestHandlePrometheus(t *testing.T) {
 		`flodni_keepalive_releases_total{reason="stop"}`,
 		`flodni_keepalive_releases_total{reason="ceiling"}`,
 		`flodni_keepalive_evicted_total`,
+		`flodni_engine_db_write_errors_total{op="set"}`,
+		`flodni_engine_db_write_errors_total{op="rem"}`,
+		`flodni_engine_db_write_errors_total{op="clear"}`,
 		`flodni_keepalive_held_torrents`,
 		`flodni_read_stalls_total{confirmed="false"}`,
 		`flodni_unconfirmed_read_bytes_total`,
@@ -330,5 +333,28 @@ func TestRuntimeAndProcessFamilyTypes(t *testing.T) {
 		}
 	} else if strings.Contains(body, "process_open_fds") {
 		t.Error("process_open_fds exported without /proc")
+	}
+}
+
+// TestReaderBudgetSeriesValues pins the exposition of the four counters App holds for the
+// unconfirmed-read budget and the playback webhook count.
+func TestReaderBudgetSeriesValues(t *testing.T) {
+	a := newTestApp(t)
+	a.unconfirmedReadBytes.Store(1234)
+	a.unconfirmedSessions[rbUnconfirmed].Store(3)
+	a.unconfirmedSessions[rbConfirmedLate].Store(2)
+	a.playbackWebhooksMatched.Store(7)
+	a.playbackWebhooksUnmatched.Store(5)
+	body := scrape(t).Body.String()
+	for _, want := range []string{
+		"flodni_unconfirmed_read_bytes_total 1234\n",
+		"flodni_unconfirmed_read_sessions_total{outcome=\"unconfirmed\"} 3\n",
+		"flodni_unconfirmed_read_sessions_total{outcome=\"confirmed_late\"} 2\n",
+		"flodni_playback_webhooks_received_total{matched=\"true\"} 7\n",
+		"flodni_playback_webhooks_received_total{matched=\"false\"} 5\n",
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("scrape lacks %q", want)
+		}
 	}
 }

@@ -17,7 +17,8 @@ type tsFiles struct {
 
 // AddTorrentDB writes the record. posterOK says the poster URL passed CheckImgUrl; the
 // caller checks it first, because that is a network call and must not run under lifeMu.
-func AddTorrentDB(torr *Torrent, posterOK bool) {
+// It returns the commit error: a record that did not commit is not saved.
+func AddTorrentDB(torr *Torrent, posterOK bool) error {
 	t := new(settings.TorrentDB)
 	t.TorrentSpec = torr.TorrentSpec
 	t.Title = torr.Title
@@ -43,7 +44,7 @@ func AddTorrentDB(torr *Torrent, posterOK bool) {
 	// don't override timestamp from DB on edit
 	t.Timestamp = torr.Timestamp // time.Now().Unix()
 
-	settings.AddTorrent(t)
+	return settings.AddTorrent(t)
 }
 
 // StoredFiles is the engine's file list saved with a torrent's record (id, path, length),
@@ -90,8 +91,8 @@ func GetTorrentDB(hash metainfo.Hash) *Torrent {
 	return torr
 }
 
-func RemTorrentDB(hash metainfo.Hash) {
-	settings.RemTorrent(hash)
+func RemTorrentDB(hash metainfo.Hash) error {
+	return settings.RemTorrent(hash)
 }
 
 func ListTorrentsDB() map[metainfo.Hash]*Torrent {
