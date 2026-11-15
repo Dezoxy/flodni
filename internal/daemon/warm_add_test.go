@@ -125,7 +125,6 @@ func playbackOpenSetup(t *testing.T) {
 }
 
 func TestPlaybackOpen(t *testing.T) {
-	newTestApp(t)
 	inferred := func() *PlaybackState {
 		return &PlaybackState{Path: "/m/a.mkv", ReadCount: 5, LastSeekOff: 10 * mb, LastReadAt: time.Now()}
 	}
@@ -166,7 +165,6 @@ func TestPlaybackOpen(t *testing.T) {
 }
 
 func TestPlaybackOpenIsCachedForOneSecond(t *testing.T) {
-	newTestApp(t)
 	playbackOpenSetup(t)
 	now := time.Unix(1_800_000_000, 0)
 	playbackOpenNow = func() time.Time { return now }

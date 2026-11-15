@@ -15,6 +15,7 @@ import (
 	"flodni/internal/gostorm/log"
 	sets "flodni/internal/gostorm/settings"
 	"flodni/internal/gostorm/torr/utils"
+	"flodni/internal/redact"
 	"flodni/internal/warmup"
 )
 
@@ -65,7 +66,7 @@ func mergeTrackerTiers(base, extra [][]string) [][]string {
 func AddTorrent(spec *torrent.TorrentSpec, title, poster string, data string, category string) (*Torrent, error) {
 	torr, err := addUnderLock(spec)
 	if err != nil {
-		log.TLogln("error add torrent:", err)
+		log.TLogln("error add torrent:", redact.Err(err))
 		return nil, err
 	}
 
@@ -258,7 +259,7 @@ func GetTorrent(hashHex string) *Torrent {
 			// is added, and the DB wrapper handed to the caller is all there is.
 			t, err := LoadStored(tor.Hash().HexString())
 			if err != nil {
-				log.TLogln("New torrent not loaded:", err)
+				log.TLogln("New torrent not loaded:", redact.Err(err))
 				return
 			}
 			t.GotInfo()

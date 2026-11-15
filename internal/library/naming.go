@@ -269,10 +269,32 @@ func IsVideoFile(path string) bool {
 	return false
 }
 
+var reHex40 = regexp.MustCompile(`^[a-f0-9]{40}$`)
+
+// StubMagnet is the only magnet a stub carries: the info hash and nothing else.
+// A tracker URL in a magnet can hold a private tracker's passkey, and nothing reads
+// the stub's magnet back, so no tr=, dn= or xs= parameter is ever written. The hash
+// is spelled in lowercase hex; ok is false for anything that is not a 20-byte hash.
+func StubMagnet(hash string) (magnet string, ok bool) {
+	h := canonicalHashKey(hash)
+	if !reHex40.MatchString(h) {
+		return "", false
+	}
+	return "magnet:?xt=urn:btih:" + h, true
+}
+
+// marshalStub is the stub encoder: keys sorted, & < > escaped.
+func marshalStub(fields interface{}) ([]byte, error) { return json.Marshal(fields) }
+
 // WriteStub writes the virtual .mkv: a small JSON file the FUSE layer exposes at the
-// declared size.
-func WriteStub(path, streamURL string, size int64, magnet, imdbID string) error {
-	data, err := json.Marshal(map[string]interface{}{
+// declared size. It takes the info hash, not a magnet, so a caller cannot hand it
+// tracker URLs: the stub's magnet is always StubMagnet(hash).
+func WriteStub(path, streamURL string, size int64, hash, imdbID string) error {
+	magnet, ok := StubMagnet(hash)
+	if !ok {
+		return fmt.Errorf("stub needs a 40-hex info hash")
+	}
+	data, err := marshalStub(map[string]interface{}{
 		"url":    streamURL,
 		"size":   size,
 		"magnet": magnet,

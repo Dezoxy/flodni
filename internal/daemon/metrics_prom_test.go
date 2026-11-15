@@ -335,3 +335,26 @@ func TestRuntimeAndProcessFamilyTypes(t *testing.T) {
 		t.Error("process_open_fds exported without /proc")
 	}
 }
+
+// TestReaderBudgetSeriesValues pins the exposition of the four counters App holds for the
+// unconfirmed-read budget and the playback webhook count.
+func TestReaderBudgetSeriesValues(t *testing.T) {
+	a := newTestApp(t)
+	a.unconfirmedReadBytes.Store(1234)
+	a.unconfirmedSessions[rbUnconfirmed].Store(3)
+	a.unconfirmedSessions[rbConfirmedLate].Store(2)
+	a.playbackWebhooksMatched.Store(7)
+	a.playbackWebhooksUnmatched.Store(5)
+	body := scrape(t).Body.String()
+	for _, want := range []string{
+		"flodni_unconfirmed_read_bytes_total 1234\n",
+		"flodni_unconfirmed_read_sessions_total{outcome=\"unconfirmed\"} 3\n",
+		"flodni_unconfirmed_read_sessions_total{outcome=\"confirmed_late\"} 2\n",
+		"flodni_playback_webhooks_received_total{matched=\"true\"} 7\n",
+		"flodni_playback_webhooks_received_total{matched=\"false\"} 5\n",
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("scrape lacks %q", want)
+		}
+	}
+}

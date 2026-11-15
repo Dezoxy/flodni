@@ -116,7 +116,6 @@ func TestSwitchOffFetchesAsBefore(t *testing.T) {
 }
 
 func TestPrefetchSitesAskThePredicate(t *testing.T) {
-	newTestApp(t)
 	// The WarmLanding site (a new handle's first read past the head) is the only
 	// prefetch that runs before the cache lookup; with the switch off it fetches.
 	cases := []struct {
@@ -230,7 +229,6 @@ func TestReadMapsAPartialHitThenARefusedSubReadToEIO(t *testing.T) {
 // from the last one, with a pump reader attached) and the prefetch after a fetch, which
 // is the one that stops on the read that itself crosses the margin.
 func TestSeekWarmLandingAsksThePredicate(t *testing.T) {
-	newTestApp(t)
 	for _, on := range []bool{true, false} {
 		t.Run(map[bool]string{true: "refusal on", false: "switch off"}[on], func(t *testing.T) {
 			fe, _, h := wireEnv(t)
@@ -249,7 +247,6 @@ func TestSeekWarmLandingAsksThePredicate(t *testing.T) {
 }
 
 func TestPrefetchAfterTheCrossingFetchAsksThePredicate(t *testing.T) {
-	newTestApp(t)
 	for _, on := range []bool{true, false} {
 		t.Run(map[bool]string{true: "refusal on", false: "switch off"}[on], func(t *testing.T) {
 			fe, s, h := wireEnv(t)
@@ -339,7 +336,6 @@ func runPump(h *MkvHandle, ctx context.Context, rd *fakeReader, ps *NativePumpSt
 }
 
 func TestPumpParksPastTheMarginAndResumesOnConfirmation(t *testing.T) {
-	newTestApp(t)
 	h, ps, s := pumpBudgetEnv(t)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
