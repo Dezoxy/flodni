@@ -18,7 +18,7 @@ import (
 // @Tags			API
 //
 // @Success		200
-// @Router			/shutdown [get]
+// @Router			/shutdown [post]
 func shutdown(c *gin.Context) {
 	reasonStr := strings.ReplaceAll(c.Param("reason"), `/`, "")
 	if sets.ReadOnly && reasonStr == "" {

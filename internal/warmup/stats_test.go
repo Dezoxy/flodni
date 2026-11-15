@@ -45,7 +45,9 @@ func TestEvictionCountersByWindow(t *testing.T) {
 
 	d := indexCache(t, t.TempDir())
 	const oldHead, oldTail = int64(40 << 20), int64(40 << 20)
-	const bigSize = quota - 10<<20
+	// The first eviction ends under the quota but above the low-water mark, so the second
+	// is taken for headroom; the survivor sits under the mark once both are gone.
+	const bigSize = quota - 60<<20
 	sparseFile(t, d.filePath("oldh", 1), oldHead, 2*time.Hour)
 	sparseFile(t, d.tailPath("oldt", 1), oldTail, time.Hour)
 	// Evicting the oldest file alone leaves the total over the quota; the second ends it.

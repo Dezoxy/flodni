@@ -13,8 +13,10 @@ type requestI struct {
 func SetupRoute(route gin.IRouter) {
 	authorized := route.Group("/", auth.CheckAuth())
 
-	authorized.GET("/shutdown", shutdown)
-	authorized.GET("/shutdown/*reason", shutdown)
+	// POST only: a GET from a web page carries no Origin header, so the open-port
+	// Origin gate could not tell it from a script.
+	authorized.POST("/shutdown", shutdown)
+	authorized.POST("/shutdown/*reason", shutdown)
 
 	authorized.POST("/settings", settings)
 

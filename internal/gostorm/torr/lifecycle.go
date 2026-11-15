@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"sync"
+	"time"
 
 	"github.com/anacrolix/torrent"
 
@@ -30,11 +31,46 @@ var newTorrent = NewTorrent
 // (hard rule 3).
 var ErrNotStored = errors.New("the engine does not store this torrent")
 
+// ErrEngineNotReady means the engine is not up yet, so nothing can be said about
+// whether the hash is stored. It is transient and deliberately not an ErrNotStored:
+// no caller may record it as "not stored", latch it, or ask an operator to re-add
+// anything because of it.
+var ErrEngineNotReady = errors.New("the engine is not ready yet")
+
+var (
+	engineReady     = make(chan struct{})
+	engineReadyOnce sync.Once
+)
+
+// markEngineReady closes the ready signal, once: the engine's client is up.
+func markEngineReady() { engineReadyOnce.Do(func() { close(engineReady) }) }
+
+// WaitEngineReady blocks until the engine is up or the bound passes, and reports
+// which. It returns at once when the engine already is.
+func WaitEngineReady(bound time.Duration) bool { return waitSignal(engineReady, bound) }
+
+func waitSignal(ready <-chan struct{}, bound time.Duration) bool {
+	select {
+	case <-ready:
+		return true
+	default:
+	}
+	t := time.NewTimer(bound)
+	defer t.Stop()
+	select {
+	case <-ready:
+		return true
+	case <-t.C:
+		return false
+	}
+}
+
 // LoadStored wakes a torrent the engine closed, from its stored record only. It
 // returns the wrapper the engine already holds, else adds one from the record's own
 // spec (its metainfo, trackers and peers; no magnet is parsed) and restores what
 // the record kept besides. A hash without a record, or whose record has no
-// metainfo, is ErrNotStored: nothing is added.
+// metainfo, is ErrNotStored: nothing is added. A wake before the engine is up is
+// ErrEngineNotReady, which is not a verdict on the hash.
 func LoadStored(hashHex string) (*Torrent, error) {
 	hash, ok := parseHash(hashHex)
 	if !ok {
@@ -47,8 +83,8 @@ func LoadStored(hashHex string) (*Torrent, error) {
 	localBts := bts
 	btsMu.RUnlock()
 	if localBts == nil {
-		// No engine, so nothing is stored and nothing may be added.
-		return nil, fmt.Errorf("%w: the engine is not started", ErrNotStored)
+		// No engine yet: nothing may be added, but this says nothing about the hash.
+		return nil, ErrEngineNotReady
 	}
 	if held := localBts.GetTorrent(hash); held != nil {
 		return held, nil

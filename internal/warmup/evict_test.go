@@ -335,3 +335,82 @@ func TestEvictToOnANilCacheDoesNothing(t *testing.T) {
 		t.Fatalf("result = %+v", res)
 	}
 }
+
+// A quota check that had to evict goes below the quota, to the low-water mark, so the
+// next head write finds room and starts no walk of its own.
+func TestEvictionGoesDownToTheLowWaterMark(t *testing.T) {
+	d := evictEnv(t)
+	// Eleven files of 100 MiB (head 80 + tail 20), ages 11h..1h: 1100 MiB. Down to the
+	// quota alone takes one file (1000 MiB); the mark (972.8 MiB) takes two.
+	for i := range 11 {
+		stem := string(rune('a'+i)) + "-1"
+		age := time.Duration(11-i) * time.Hour
+		sparseFile(t, d.dir+"/"+stem+warmupSuffix, 80*mb, age)
+		sparseFile(t, d.dir+"/"+stem+tailSuffix, 20*mb, age)
+	}
+	setTotal(d, 1100*mb)
+
+	d.mu.Lock()
+	ev, room := d.enforceQuotaLocked(0, evictOpts{trigger: "test"})
+	d.mu.Unlock()
+	if !room {
+		t.Fatal("no room")
+	}
+	if got, low := d.TrackedBytes(), lowWaterBytes(quota); got > low {
+		t.Fatalf("total %d MiB after eviction, low-water mark %d MiB", got/mb, low/mb)
+	}
+	if len(ev) != 2 || ev[0].Key.Hash != "a" || ev[1].Key.Hash != "b" {
+		t.Fatalf("evicted %+v, want a then b (oldest first)", ev)
+	}
+
+	// A second head write right after finds room and walks nothing.
+	walks := d.walks.Load()
+	d.mu.Lock()
+	_, room = d.enforceQuotaLocked(64*mb, evictOpts{exclude: FileKey{"new", 1}, trigger: TriggerHeadCreate})
+	d.mu.Unlock()
+	if !room || d.walks.Load() != walks {
+		t.Fatalf("second check walked again (room %v, walks %d -> %d)", room, walks, d.walks.Load())
+	}
+}
+
+// Headroom comes from files never played only: once the quota is met, the walk stops
+// at the first played file even though the low-water mark is lower.
+func TestLowWaterMarkNeverEvictsPlayedFiles(t *testing.T) {
+	d := evictEnv(t)
+	// a (oldest, never played) 60, b and c played: 1070 MiB. Without a, 1010: under the
+	// quota, above the mark (972.8). b and c must stay.
+	sparseFile(t, d.dir+"/a-1"+warmupSuffix, 60*mb, 3*time.Hour)
+	sparseFile(t, d.dir+"/b-1"+warmupSuffix, 500*mb, 2*time.Hour)
+	sparseFile(t, d.dir+"/c-1"+warmupSuffix, 510*mb, time.Hour)
+	setTotal(d, 1070*mb)
+	IsPlayed = func(k FileKey) bool { return k.Hash != "a" }
+
+	d.mu.Lock()
+	ev, room := d.enforceQuotaLocked(0, evictOpts{trigger: "test"})
+	d.mu.Unlock()
+	if !room || len(ev) != 1 || ev[0].Key.Hash != "a" {
+		t.Fatalf("room %v, evicted %+v", room, ev)
+	}
+	if !exists(d.dir+"/b-1"+warmupSuffix) || !exists(d.dir+"/c-1"+warmupSuffix) {
+		t.Fatal("a played file was evicted for headroom")
+	}
+}
+
+// Played files are still taken when the quota cannot be met without them, but only as
+// many as the quota needs, not down to the mark.
+func TestLowWaterMarkTakesPlayedFilesOnlyForTheQuota(t *testing.T) {
+	d := evictEnv(t)
+	// All played: 1100 MiB. Without b, 1000: under the quota, above the mark.
+	sparseFile(t, d.dir+"/b-1"+warmupSuffix, 100*mb, 2*time.Hour)
+	sparseFile(t, d.dir+"/c-1"+warmupSuffix, 500*mb, time.Hour)
+	sparseFile(t, d.dir+"/d-1"+warmupSuffix, 500*mb, 30*time.Minute)
+	setTotal(d, 1100*mb)
+	IsPlayed = func(FileKey) bool { return true }
+
+	d.mu.Lock()
+	ev, room := d.enforceQuotaLocked(0, evictOpts{trigger: "test"})
+	d.mu.Unlock()
+	if !room || len(ev) != 1 || ev[0].Key.Hash != "b" {
+		t.Fatalf("room %v, evicted %+v", room, ev)
+	}
+}

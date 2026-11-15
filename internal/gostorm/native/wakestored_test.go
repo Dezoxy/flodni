@@ -16,9 +16,11 @@ import (
 // Hard rule 3. WakeStored is how warm on add revives a closed torrent. It may only do
 // so for a hash the engine still stores: the stored record keeps the trackers and the
 // private flag, and a bare magnet for a hash with no record would be added with public
-// trackers and the DHT. These tests need no engine: with none started, nothing is stored.
+// trackers and the DHT. These tests need no running engine: an engine-less BTServer
+// holds no record.
 
 func TestWakeStoredRefusesAHashTheEngineDoesNotStore(t *testing.T) {
+	engineFixture(t)
 	c := NewNativeClient()
 	const hash = "0123456789abcdef0123456789abcdef01234567"
 	err := c.WakeStored(context.Background(), hash)
@@ -120,5 +122,24 @@ func TestWakeRefusesALinkThatIsNotAMagnet(t *testing.T) {
 		if err := c.Wake(context.Background(), link, -1); !errors.Is(err, ErrNotStored) {
 			t.Errorf("Wake(%q) = %v, want ErrNotStored", link, err)
 		}
+	}
+}
+
+// Before the engine is up a wake is ErrEngineNotReady, which is not ErrNotStored: no
+// caller may take it for a verdict on the hash.
+func TestWakeBeforeTheEngineIsUpIsNotReadyNotUnstored(t *testing.T) {
+	torr.InitApiHelper(nil)
+	c := NewNativeClient()
+	const hash = "0123456789abcdef0123456789abcdef01234567"
+	for name, err := range map[string]error{
+		"WakeStored": c.WakeStored(context.Background(), hash),
+		"Wake":       c.Wake(context.Background(), storedMagnet(hash), -1),
+	} {
+		if !errors.Is(err, ErrEngineNotReady) || errors.Is(err, ErrNotStored) {
+			t.Errorf("%s = %v, want ErrEngineNotReady and not ErrNotStored", name, err)
+		}
+	}
+	if _, ok := c.activeHashes.Load(hash); ok {
+		t.Fatal("a wake before ready left the hash marked active")
 	}
 }
