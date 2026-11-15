@@ -270,26 +270,26 @@ flodni trackers remove-host [--dry-run] [--hashes] [--state <dir>] <host>
 ```
 
 - `audit` is read-only. Per record, the primary tracker is the first tracker of
-  the first tier, and its site is the first label of its registrable domain: the
-  last two labels of its host (three under a built-in list of common two-label
-  suffixes such as `co.uk`, `org.uk` and `com.hu`), so `tracker.example.com` and
-  `t.example.org` are both the site `example`. A host of the same site is the
-  record's own, since trackers often serve the same torrents from a second
-  top-level domain; every other host is foreign. It prints one line per foreign
-  host, `host  records=N  private=N`, most records first, then a summary
-  `scanned= private= public= foreign_records=`. A record whose metainfo is
-  missing or unreadable counts as private. The rule is an approximation, not the
-  Public Suffix List: two unrelated sites that share a name on different
-  top-level domains count as one, so a foreign host there can be missed, never
-  the reverse.
+  the first tier, and its own domain is the registrable domain of its host: the
+  last two labels (three under a built-in list of common two-label suffixes such
+  as `co.uk`, `org.uk` and `com.hu`). Every other host is listed, most records
+  first, as `host  records=N  private=N`. A host whose site name (the first
+  label of its registrable domain) is the primary's, such as `t.example.org`
+  beside `tracker.example.com`, is listed apart under "same site, other domain":
+  it is usually the tracker's own second domain, but a lookalike reads the same,
+  so it is never hidden. The summary is `scanned= private= public=
+  foreign_records= same_site_records=`, and `--json` marks each host with
+  `same_site`. A record whose metainfo is missing or unreadable counts as
+  private. The domain rule is an approximation, not the Public Suffix List.
 - `remove-host <host>` removes every tracker with that host (case-insensitive,
   trailing dot ignored) from every record, drops tiers left empty and keeps the
   order of the rest. Nothing else in the record changes; each changed record is
-  one fsynced transaction. It refuses (exit 2, nothing written) when the host is
-  the record's own tracker for any record it would touch: its primary, or
-  another domain of the same site. `--dry-run` writes nothing and prints the
-  same summary, `records_changed= trackers_removed= private= public=`. The flags
-  go before the host.
+  one fsynced transaction. It refuses (exit 2, nothing written) a host in the
+  primary tracker's own domain of any record it would touch, always, and a
+  same-site host unless `--allow-same-site` is given: check that host in the
+  audit first. `--dry-run` writes nothing and prints the same summary,
+  `records_changed= trackers_removed= private= public=`. The flags go before the
+  host.
 
 ## Startup report
 
