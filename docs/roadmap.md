@@ -621,7 +621,8 @@ The vendored engine stays as it is apart from fixes, and advisories for
 
 Requests from running v0.2.0 on a real host.
 
-1. **Pick the linked file when a webhook matches several.** Plex Media Server's
+1. **Pick the linked file when a webhook matches several.** [FINISHED] Built
+    (#199). Plex Media Server's
     own webhook names no file, so a play is matched by IMDb id, the library-type
     bootstrap or a fuzzy title. In a library of Sonarr or Radarr symlinks into
     the mount, several stubs can share one IMDb id: a release an upgrade

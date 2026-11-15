@@ -185,6 +185,8 @@ type exactMatchKeys struct {
 	// mappedBasenames is asked only when no basename matched, before the IMDB id: the
 	// stub names the library's symlinks point to (pathMapStubNames). Nil means off.
 	mappedBasenames func() []string
+	// linked breaks a tie between several IMDb candidates (linked_stubs.go). Nil means off.
+	linked linkedSnap
 }
 
 // findExactMatchRule selects the pass-1 match among the registry entries.
@@ -196,8 +198,10 @@ type exactMatchKeys struct {
 // (metadata identity), which also protects against an IMDB id polluted by a
 // previous mis-matched media.play.
 //
-// It also says which rule matched: ruleBasename, rulePathMap or ruleIMDB (ruleNone
-// when nothing did). The path map sits between the file name and the IMDB id.
+// It also says which rule matched: ruleBasename, rulePathMap, ruleIMDB or ruleLinked
+// (ruleNone when nothing did). The path map sits between the file name and the IMDB id.
+// When several entries carry the IMDB id, the only one a library symlink points at wins
+// as ruleLinked; with none or several linked, the first stays the match, as before.
 func findExactMatchRule(keys exactMatchKeys, entries []exactMatchEntry) (string, *PlaybackState, int) {
 	byBase := func(names []string) (string, *PlaybackState) {
 		for _, e := range entries {
@@ -222,13 +226,22 @@ func findExactMatchRule(keys exactMatchKeys, entries []exactMatchEntry) (string,
 		}
 	}
 	if keys.imdbID != "" {
+		var same []exactMatchEntry
 		for _, e := range entries {
 			if e.state == nil {
 				continue
 			}
 			if imdb := e.state.GetImdbID(); imdb != "" && imdb == keys.imdbID {
-				return e.path, e.state, ruleIMDB
+				same = append(same, e)
 			}
+		}
+		if len(same) > 1 {
+			if e, ok := keys.linked.pickEntry(same); ok {
+				return e.path, e.state, ruleLinked
+			}
+		}
+		if len(same) > 0 {
+			return same[0].path, same[0].state, ruleIMDB
 		}
 	}
 	return "", nil, ruleNone

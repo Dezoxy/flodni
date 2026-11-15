@@ -225,6 +225,9 @@ type Config struct {
 	// the longest matching prefix: the mapped path is checked once with Lstat and, if
 	// it is a symlink, the base name of its target is matched. Both sides must be
 	// absolute; an entry that is not is dropped with a warning at load. Read live.
+	// The targets are also the library roots a background walker reads (lstat and
+	// readlink only) to tell the stub a library symlink points at from a stub it
+	// does not, when a webhook matches several (daemon/linked_stubs.go).
 	PlexPathMap map[string]string `json:"plex_path_map"`
 
 	// --- External Services (V1.4.6) ---

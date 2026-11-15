@@ -335,7 +335,7 @@ func TestWebhookRuleSeriesRenderAtZero(t *testing.T) {
 		}
 	})
 	body := scrape(t).Body.String()
-	for _, name := range []string{"basename", "path_map", "imdb", "fuzzy", "none"} {
+	for _, name := range []string{"basename", "path_map", "imdb", "fuzzy", "linked", "none"} {
 		if want := `flodni_playback_webhook_match_rule_total{rule="` + name + `"} 0` + "\n"; !strings.Contains(body, want) {
 			t.Errorf("missing %q", want)
 		}

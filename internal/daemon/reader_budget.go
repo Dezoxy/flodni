@@ -114,18 +114,21 @@ const (
 const errnoBudgetRefused = syscall.EDQUOT
 
 // The rule that resolved a play or resume webhook, in the order they are tried.
+// ruleLinked is a tie-break, not a step: it names an IMDb, bootstrap or fuzzy match
+// that had several candidates and was settled by the one a library symlink points at.
 const (
 	ruleBasename = iota
 	rulePathMap
 	ruleIMDB
 	ruleFuzzy
+	ruleLinked
 	ruleNone
 	numWebhookRules
 )
 
 // webhookRuleNames are the values of the rule label of
 // flodni_playback_webhook_match_rule_total, indexed by the constants above.
-var webhookRuleNames = [numWebhookRules]string{"basename", "path_map", "imdb", "fuzzy", "none"}
+var webhookRuleNames = [numWebhookRules]string{"basename", "path_map", "imdb", "fuzzy", "linked", "none"}
 
 // App.playbackWebhookRules counts play and resume webhooks by the rule that resolved
 // them, since process start.

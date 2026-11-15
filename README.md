@@ -233,9 +233,43 @@ fails, the features are just inactive.
 - **Which rule matched.**
   `flodni_playback_webhook_match_rule_total{rule}` counts the same webhooks
   by rule: `basename`, `path_map`, `imdb` (the id, or the bootstrap), `fuzzy`
-  or `none`. `fuzzy` is a guess. With Plex as the sender, `basename` and
-  `path_map` stay at 0 and plays land on `imdb` or `fuzzy`; `imdb` is exact
-  only while one registered file holds that id.
+  or `none`, and `linked` (below). `fuzzy` is a guess. With Plex as the
+  sender, `basename` and `path_map` stay at 0 and plays land on `imdb`,
+  `linked` or `fuzzy`; `imdb` is exact only while one registered file holds
+  that id.
+- **Several files fit: the linked one.** Where a library holds Sonarr or Radarr
+  symlinks into the mount, a release an upgrade replaced stays as its own stub
+  and no symlink points at it any more, so several stubs can share one IMDb
+  id. A background task, never the webhook handler, walks the targets of
+  `plex_path_map` (the container-side roots) every 5 minutes, and once more,
+  at most every 30 seconds, after a webhook found several candidates. It uses
+  the directory listing and `readlink` only: it never follows a link, opens a
+  file or touches a target, and a dangling link still counts. It publishes the
+  set of stub base names some library symlink points at (a relative target is
+  read against the link's folder). When the IMDb pass or the fuzzy pass (the
+  best level, with ties) yields more than one candidate for a play, resume or
+  stop, and exactly one of them is in that set, that one is the match. For a
+  show, the fuzzy tie counts only files whose own season and episode equal the
+  webhook's, and none is picked when the webhook carries no season or episode;
+  for a movie, only files whose name carries the webhook's year, and none is
+  picked when it carries no year (a title can be a substring of another).
+  A play matched this way is counted as `rule="linked"` (a stop is not counted
+  by rule), and it marks that file played when the played mark's own tiers
+  reach the same file. A stop matched this way is honoured with a handle open,
+  like a unique IMDb match, only when the file's season and episode (a
+  movie's year) agree with the webhook's. The library-type bootstrap (step 4)
+  is not narrowed. With none or several of them linked, with no
+  `plex_path_map`, or before the first walk has finished, matching is as
+  before; one candidate is never narrowed.
+  Limits: a set older than 15 minutes (three walks) is not used, so a walk
+  that keeps failing falls back to the matching above; the webhook that asks
+  for an early walk is matched with the old set; a walk that exceeds its
+  bounds (2 million entries or 2 minutes) or cannot read a root keeps the
+  previous set; an unreadable folder inside a root is logged once and skipped,
+  and a stub reached only through a folder symlink (never followed) or such a
+  folder counts as unlinked; a root that is itself a symlink is resolved once
+  per walk; the roots must be mounted in this container. Unit-tested against
+  symlinks in a temporary folder; not run against a media server.
 - **Other senders.** Any client may post the same JSON (`Content-Type:
   application/json`, or a form field `payload`), with the same token rule.
   The handler reads:
@@ -1741,7 +1775,7 @@ scraper on the same host or Docker network.
 | `flodni_keepalive_evicted_total` | counter | none | Confirmed torrents that lost their hold to `playback_keepalive_max_torrents`, once per episode. Present from 0. |
 | `flodni_keepalive_held_torrents` | gauge | none | Idle torrents the keep-alive is keeping open now (a torrent with a reader is not counted). |
 | `flodni_playback_webhooks_received_total` | counter | `matched` | Play and resume webhooks for a movie or an episode; `matched` is `true` when the webhook resolved to one file, else `false`. |
-| `flodni_playback_webhook_match_rule_total` | counter | `rule` | The same webhooks by the rule that resolved them: `basename`, `path_map`, `imdb`, `fuzzy` or `none`; every value present from 0. See Play webhook. |
+| `flodni_playback_webhook_match_rule_total` | counter | `rule` | The same webhooks by the rule that resolved them: `basename`, `path_map`, `imdb`, `fuzzy`, `linked` or `none`; every value present from 0. See Play webhook. |
 | `flodni_playback_webhook_last_timestamp_seconds` | gauge | `matched` | Unix time of the last play or resume webhook for a movie or an episode, `matched` as above; 0 = none seen. Persisted hourly with the state database. See Play webhook. |
 | `flodni_unconfirmed_read_last_session_timestamp_seconds` | gauge | none | Unix time of the last session that crossed `unconfirmed_read_margin_mb` and closed unconfirmed; 0 = none seen. |
 | `flodni_warning` | gauge | `name` | 1 while an advisory warning holds, else 0. `no_play_webhook`: see Play webhook. Never affects `/api/health` status. |

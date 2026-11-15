@@ -40,6 +40,9 @@ type playedKeys struct {
 	year            int
 	season          optInt
 	episode         optInt
+	// linked settles a tie between several candidates by the one a library symlink
+	// points at (linked_stubs.go). Nil means off.
+	linked linkedSnap
 }
 
 // playedCandidate is a file the mount has opened: only files with a resolved hash and
@@ -115,6 +118,9 @@ func fileSeasonEpisode(name string) (season, episode int, ok bool) {
 //     decides;
 //  3. the name: a movie by title (and year, to tell two apart), an episode by series
 //     title AND season AND episode, all read from the file name.
+//
+// In tiers 2 and 3, several equal candidates are settled by the one a library symlink
+// points at (linked_stubs.go) when exactly one is; otherwise none is marked, as before.
 func choosePlayedFile(k playedKeys, cands []playedCandidate) (playedCandidate, bool) {
 	var none playedCandidate
 	only := func(m []playedCandidate) (playedCandidate, bool) {
@@ -122,6 +128,21 @@ func choosePlayedFile(k playedKeys, cands []playedCandidate) (playedCandidate, b
 			return m[0], true
 		}
 		return none, false
+	}
+
+	// onlyOrLinked is only, except that several candidates are settled by the one a
+	// library symlink points at, when exactly one is.
+	onlyOrLinked := func(m []playedCandidate) (playedCandidate, bool) {
+		if len(m) > 1 {
+			paths := make([]string, len(m))
+			for i, c := range m {
+				paths[i] = c.path
+			}
+			if i, ok := k.linked.pickPath(paths); ok {
+				return m[i], true
+			}
+		}
+		return only(m)
 	}
 
 	named := func(names []string) []playedCandidate {
@@ -152,7 +173,7 @@ func choosePlayedFile(k playedKeys, cands []playedCandidate) (playedCandidate, b
 				byID = append(byID, c)
 			}
 		}
-		if c, ok := only(byID); ok {
+		if c, ok := onlyOrLinked(byID); ok {
 			if k.section != "show" {
 				return c, true
 			}
@@ -189,7 +210,7 @@ func choosePlayedFile(k playedKeys, cands []playedCandidate) (playedCandidate, b
 			}
 			m = narrowed
 		}
-		return only(m)
+		return onlyOrLinked(m)
 	case "show":
 		if !k.season.ok || !k.episode.ok {
 			return none, false
@@ -203,7 +224,7 @@ func choosePlayedFile(k playedKeys, cands []playedCandidate) (playedCandidate, b
 				m = append(m, c)
 			}
 		}
-		return only(m)
+		return onlyOrLinked(m)
 	}
 	return none, false
 }
