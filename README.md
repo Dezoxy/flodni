@@ -1158,6 +1158,57 @@ renamed and its registry row is never re-keyed, and stubs are found by the
   the old form keeps them: an add finds the row by the old key when the new one
   has none, and replaces it in place.
 
+## Stub contents and the stub scrub
+
+A stub is a small JSON file: `url` (the engine's stream link, which carries the
+info hash and the file index), `size`, `imdb` and `magnet`, written with sorted
+keys. The `magnet` is always the bare `magnet:?xt=urn:btih:<40-hex info hash>`:
+no `tr=`, `dn=` or `xs=`. A request's magnet, or the announce list of an
+uploaded `.torrent`, goes to the engine and no further, because a private
+tracker's announce URL carries the account's passkey. Nothing reads the stub's
+magnet back (a wake takes the hash from the stream link and the engine's stored
+record), so nothing is lost. `library.WriteStub` takes the hash, not a magnet,
+so no add path (magnet, `.torrent`, pack, replace) can write a tracker. Stubs
+are written with mode 0644, as before.
+
+Stubs written by older versions may still hold the full magnet. `flodni
+scrub-stubs [--dry-run] [source_path]` rewrites those once, on request; the
+daemon never does it on its own. `source_path` is the directory the daemon is
+given as its source (it holds `movies/` and `tv/`), or `physical_source_path`
+from `config.json` when omitted.
+
+- **What it changes.** Only the `magnet` field, rebuilt from the hash the old
+  one carried. Every other field and its bytes stay as written, because the
+  rewrite goes through the stub encoder and a stub the encoder would not
+  reproduce byte for byte is left alone and reported. A line-based legacy stub
+  has its magnet line replaced the same way.
+- **What it leaves.** A stub whose magnet is already bare or empty is not
+  written. A file that is not a stub (not JSON or line-format with an
+  `http(s)` link and a size, or larger than 64 KiB) is never opened for
+  writing. Only `.mkv` files are looked at.
+- **mtime guarantee.** Each rewrite is an atomic replace (`atomicfile`) that
+  keeps the mode and owner, then puts the original mtime and atime back with
+  `utimensat`, because the mount reports the stub's mtime to the media server
+  and a changed mtime makes it rescan the title. The new file is visible with
+  the new mtime for the instant between the rename and the restore.
+- **Dry run.** `--dry-run` writes nothing; `rewritten` counts the stubs a real
+  run would rewrite.
+- **Output.** One line, `scrub-stubs: scanned=N rewritten=N skipped=N errors=N`,
+  and one `scrub-stubs: <path>: <reason>` line per error on stderr, with a fixed
+  reason. It never prints a magnet or a URL. Exit 0, 1 when any error was
+  reported, 2 on a bad path.
+- **With the daemon running.** It is safe to run beside the daemon, for
+  example with `docker exec <container> flodni scrub-stubs /path/to/source`:
+  each file is replaced atomically and a stub that changed since the scrub read
+  it is skipped, not overwritten. The remaining window is the instant between
+  that check and the rename, so do not run it during an add. Run it as the
+  daemon's user, or the ownership restore may fail and is reported.
+
+The engine's own record of a torrent (its saved `config.db` entry) still holds
+the magnet or `.torrent` it was added with, trackers included: a closed torrent
+wakes from it. The stub scrub does not touch it, and no library, health, audit
+or file-facts response returns it.
+
 ## Removing a title
 
 `POST /api/library/remove` takes a `path` or a `hash`. A hash removes every

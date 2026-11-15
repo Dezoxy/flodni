@@ -47,6 +47,18 @@ lockout.
 The full analysis (assets, trust boundaries, threats and the gaps above) is
 in the [threat model](docs/architecture/security/threat-model.md).
 
+## Tracker passkeys
+
+A private tracker's announce URL carries the account's passkey. Stubs no longer
+store it: every new stub's `magnet` is the bare info hash. Stubs written by
+older versions may still hold the request's magnet with its trackers, mode 0644;
+run `flodni scrub-stubs --dry-run` to count them and `flodni scrub-stubs` to
+rewrite them (see "Stub contents and the stub scrub" in the README). The scrub
+keeps each stub's mtime and atime. Copies of the library directory made before
+the scrub (backups, snapshots) still hold the old magnets. The engine's own
+stored record of a torrent keeps its trackers, because a wake needs them; it is
+not served by any library route.
+
 ## Secrets
 
 The repository holds no secrets; `config.json` is ignored by git and

@@ -523,9 +523,9 @@ func (m *Manager) add(ctx context.Context, req AddRequest) (*AddResponse, error)
 
 	var res addResult
 	if kind == "tv" {
-		res, err = m.addEpisodes(ctx, req, hash, magnet, info, dropped)
+		res, err = m.addEpisodes(ctx, req, hash, info, dropped)
 	} else {
-		res.files, err = m.addMovie(req, hash, magnet, info)
+		res.files, err = m.addMovie(req, hash, info)
 	}
 	if err != nil {
 		dropped[hash] = true
@@ -657,14 +657,14 @@ func (m *Manager) validate(req *AddRequest) (string, string, error) {
 	return kind, hash, nil
 }
 
-func (m *Manager) addMovie(req AddRequest, hash, magnet string, info *TorrentStats) ([]AddedFile, error) {
+func (m *Manager) addMovie(req AddRequest, hash string, info *TorrentStats) ([]AddedFile, error) {
 	file, err := m.pickFile(req.FileIndex, info.FileStats)
 	if err != nil {
 		return nil, err
 	}
 
 	path := m.moviePath(req, hash)
-	if err := WriteStub(path, m.streamURL(hash, file.ID), file.Length, magnet, req.IMDB); err != nil {
+	if err := WriteStub(path, m.streamURL(hash, file.ID), file.Length, hash, req.IMDB); err != nil {
 		return nil, errf(http.StatusInternalServerError, "cannot write %s: %v", filepath.Base(path), err)
 	}
 	return []AddedFile{{
@@ -775,7 +775,7 @@ func (m *Manager) readReplacementSample(ctx context.Context, hash string, files 
 	return first
 }
 
-func (m *Manager) addEpisodes(ctx context.Context, req AddRequest, hash, magnet string, info *TorrentStats, dropped map[string]bool) (addResult, error) {
+func (m *Manager) addEpisodes(ctx context.Context, req AddRequest, hash string, info *TorrentStats, dropped map[string]bool) (addResult, error) {
 	type episodeFile struct {
 		file    FileStat
 		season  int
@@ -965,7 +965,7 @@ func (m *Manager) addEpisodes(ctx context.Context, req AddRequest, hash, magnet 
 		// Episode stubs carry no imdb id, as the TV sync writes them: the webhook
 		// matcher pairs a Plex episode event with an open file by looking at states
 		// whose id is empty, and a series id here takes the episode out of it.
-		if err := WriteStub(path, m.streamURL(hash, w.file.ID), w.file.Length, magnet, ""); err != nil {
+		if err := WriteStub(path, m.streamURL(hash, w.file.ID), w.file.Length, hash, ""); err != nil {
 			rollback()
 			return addResult{}, errf(http.StatusInternalServerError, "cannot write the stub for S%02dE%02d: %v", w.season, w.episode, err)
 		}

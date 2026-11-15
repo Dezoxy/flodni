@@ -226,7 +226,7 @@ func TestRefusedAddMakesNoEngineCall(t *testing.T) {
 			tv := t.TempDir()
 			m := New(Config{TVDir: tv, GoStorm: eng, Registry: reg, GoStormURL: "http://engine"})
 			oldStub := filepath.Join(tv, "Show", "Season.01", EpisodeFilename("Show", 1, 1, oldHash[:8]))
-			if err := WriteStub(oldStub, m.streamURL(oldHash, 1), 1000, "magnet:?xt=urn:btih:"+oldHash, ""); err != nil {
+			if err := WriteStub(oldStub, m.streamURL(oldHash, 1), 1000, oldHash, ""); err != nil {
 				t.Fatal(err)
 			}
 			key := EpisodeKey("Show", 1, 1)
@@ -282,7 +282,7 @@ func TestDryRunMakesNoEngineCall(t *testing.T) {
 				GoStorm: eng, Registry: reg, GoStormURL: "http://engine"})
 			if c.prior {
 				p := filepath.Join(root, "tv", "Show", "Season.01", EpisodeFilename("Show", 1, 1, oldHash[:8]))
-				if err := WriteStub(p, m.streamURL(oldHash, 1), 1000, "magnet:?xt=urn:btih:"+oldHash, ""); err != nil {
+				if err := WriteStub(p, m.streamURL(oldHash, 1), 1000, oldHash, ""); err != nil {
 					t.Fatal(err)
 				}
 				key := EpisodeKey("Show", 1, 1)
