@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"flodni/internal/gostorm/torr"
+	"flodni/internal/redact"
 )
 
 const (
@@ -147,6 +148,7 @@ func summarizeFailures(failures []string) string {
 	}
 	parts := make([]string, 0, len(shown))
 	for _, f := range shown {
+		f = redact.String(f)
 		if len(f) > maxFailureChars {
 			f = f[:maxFailureChars-3] + "..."
 		}

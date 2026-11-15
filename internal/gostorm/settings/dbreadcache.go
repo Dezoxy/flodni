@@ -1,6 +1,7 @@
 package settings
 
 import (
+	"errors"
 	"sync"
 	"sync/atomic"
 
@@ -63,21 +64,31 @@ func (v *DBReadCache) Get(xPath, name string) []byte {
 }
 
 func (v *DBReadCache) Set(xPath, name string, value []byte) {
+	_ = v.trySet(xPath, name, value)
+}
+
+// errDBClosed is the error of a write that arrives after CloseDB: it is lost, and counted.
+var errDBClosed = errors.New("settings: database is closed")
+
+// trySet is Set that reports a failed commit. The cache holds committed data only: a
+// failed commit leaves it as it was, so the next identical save differs from it and
+// commits again.
+func (v *DBReadCache) trySet(xPath, name string, value []byte) error {
 	if ReadOnly {
 		if IsDebug() {
 			log.TLogln("DBReadCache.Set: Read-only DB mode!", name)
 		}
-		return
+		return nil
 	}
 	if v.closed.Load() {
 		log.TLogln("DBReadCache.Set: DB is closed, cannot set", name)
-		return
+		countWriteError(opSet)
+		return errDBClosed
 	}
 
-	// The cache holds committed data only: a failed commit leaves it as it was, so the
-	// next identical save differs from it and commits again.
-	if !v.commit(func(c committer) error { return c.trySet(xPath, name, value) }, func(db GoStormDB) { db.Set(xPath, name, value) }) {
-		return
+	if err := tryWrite(v.db, func(c committer) error { return c.trySet(xPath, name, value) }, func(db GoStormDB) { db.Set(xPath, name, value) }); err != nil {
+		countWriteError(opSet)
+		return err
 	}
 
 	cacheKey := v.makeDataCacheKey(xPath, name)
@@ -93,16 +104,20 @@ func (v *DBReadCache) Set(xPath, name string, value []byte) {
 		delete(v.listCache, xPath)
 	}
 	v.listCacheMutex.Unlock()
+	return nil
 }
 
-// commit runs a write on the database under the cache and reports whether it committed.
-// A database that cannot report (not a committer) is assumed to have committed.
-func (v *DBReadCache) commit(try func(committer) error, plain func(GoStormDB)) bool {
-	if c, ok := v.db.(committer); ok {
-		return try(c) == nil
+// tryWrite runs a write on a database and returns its commit error. A database that
+// cannot report (not a committer) is assumed to have committed.
+func tryWrite(db GoStormDB, try func(committer) error, plain func(GoStormDB)) error {
+	if err := commitFault(); err != nil {
+		return err
 	}
-	plain(v.db)
-	return true
+	if c, ok := db.(committer); ok {
+		return try(c)
+	}
+	plain(db)
+	return nil
 }
 
 func (v *DBReadCache) List(xPath string) []string {
@@ -129,19 +144,25 @@ func (v *DBReadCache) List(xPath string) []string {
 }
 
 func (v *DBReadCache) Rem(xPath, name string) {
+	_ = v.tryRem(xPath, name)
+}
+
+func (v *DBReadCache) tryRem(xPath, name string) error {
 	if ReadOnly {
 		if IsDebug() {
 			log.TLogln("DBReadCache.Rem: Read-only DB mode!", name)
 		}
-		return
+		return nil
 	}
 	if v.closed.Load() {
 		log.TLogln("DBReadCache.Rem: DB is closed, cannot remove", name)
-		return
+		countWriteError(opRem)
+		return errDBClosed
 	}
 
-	if !v.commit(func(c committer) error { return c.tryRem(xPath, name) }, func(db GoStormDB) { db.Rem(xPath, name) }) {
-		return
+	if err := tryWrite(v.db, func(c committer) error { return c.tryRem(xPath, name) }, func(db GoStormDB) { db.Rem(xPath, name) }); err != nil {
+		countWriteError(opRem)
+		return err
 	}
 
 	cacheKey := v.makeDataCacheKey(xPath, name)
@@ -157,23 +178,30 @@ func (v *DBReadCache) Rem(xPath, name string) {
 		delete(v.listCache, xPath)
 	}
 	v.listCacheMutex.Unlock()
+	return nil
 }
 
 func (v *DBReadCache) Clear(xPath string) {
+	_ = v.tryClear(xPath)
+}
+
+func (v *DBReadCache) tryClear(xPath string) error {
 	if ReadOnly {
 		if IsDebug() {
 			log.TLogln("DBReadCache.Clear: Read-only DB mode!", xPath)
 		}
-		return
+		return nil
 	}
 
 	if v.closed.Load() {
 		log.TLogln("DBReadCache.Clear: DB is closed, cannot clear", xPath)
-		return
+		countWriteError(opClear)
+		return errDBClosed
 	}
 	// Clear the underlying DB first; the cache follows only if that committed.
-	if !v.commit(func(c committer) error { return c.tryClear(xPath) }, func(db GoStormDB) { db.Clear(xPath) }) {
-		return
+	if err := tryWrite(v.db, func(c committer) error { return c.tryClear(xPath) }, func(db GoStormDB) { db.Clear(xPath) }); err != nil {
+		countWriteError(opClear)
+		return err
 	}
 
 	// Clear cache
@@ -187,6 +215,7 @@ func (v *DBReadCache) Clear(xPath string) {
 		v.dataCache.removePath(xPath)
 	}
 	v.dataCacheMutex.Unlock()
+	return nil
 }
 
 func (v *DBReadCache) makeDataCacheKey(xPath, name string) [2]string {

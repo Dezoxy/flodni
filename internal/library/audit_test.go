@@ -19,7 +19,7 @@ func auditStub(t *testing.T, e *charEnv, dir, name, hash string, index int, size
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if err := WriteStub(p, e.m.streamURL(hash, index), size, "m", ""); err != nil {
+	if err := WriteStub(p, e.m.streamURL(hash, index), size, hash, ""); err != nil {
 		t.Fatal(err)
 	}
 	return p

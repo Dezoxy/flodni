@@ -95,7 +95,6 @@ func playRule(t *testing.T, payload string) int {
 }
 
 func TestPathMapMatchesTheSymlinkTarget(t *testing.T) {
-	newTestApp(t)
 	root := t.TempDir()
 	state := pathMapEnv(t, map[string]string{"/series/": root + "/series/"})
 	pmLink(t, root, pmLibFile, pmStub)
@@ -126,7 +125,6 @@ func TestPathMapFollowsARelativeLink(t *testing.T) {
 }
 
 func TestPathMapLongestPrefixWins(t *testing.T) {
-	newTestApp(t)
 	root := t.TempDir()
 	good, bad := filepath.Join(root, "good"), filepath.Join(root, "bad")
 	pathMapEnv(t, map[string]string{"/series/": bad + "/", "/series/Show Name (2020)/": good + "/"})
@@ -325,15 +323,7 @@ func TestPathMapResolvesAtMostEightParts(t *testing.T) {
 }
 
 func TestWebhookRuleSeriesRenderAtZero(t *testing.T) {
-	var saved [numWebhookRules]int64
-	for i := range saved {
-		saved[i] = app.playbackWebhookRules[i].Swap(0)
-	}
-	t.Cleanup(func() {
-		for i := range saved {
-			app.playbackWebhookRules[i].Store(saved[i])
-		}
-	})
+	newTestApp(t)
 	body := scrape(t).Body.String()
 	for _, name := range []string{"basename", "path_map", "imdb", "fuzzy", "linked", "none"} {
 		if want := `flodni_playback_webhook_match_rule_total{rule="` + name + `"} 0` + "\n"; !strings.Contains(body, want) {

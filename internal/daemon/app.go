@@ -35,6 +35,15 @@ type App struct {
 	unconfirmedHolds                 [2]atomic.Int64 // by rbHoldLifted, rbHoldRefused
 	unconfirmedConfirmedAfterRefusal atomic.Int64    // sessions, once each
 	playbackWebhookRules             [numWebhookRules]atomic.Int64
+	unconfirmedReadBytes             atomic.Int64
+	unconfirmedSessions              [2]atomic.Int64 // by rbUnconfirmed, rbConfirmedLate; resolved at close
+
+	// Movie and episode play/resume webhooks, by whether they resolved to one file. The
+	// gate arms on the matched count: refusal starts only once a webhook has matched a
+	// file since the process started, so a media server that never sends one is never
+	// cut off.
+	playbackWebhooksMatched   atomic.Int64
+	playbackWebhooksUnmatched atomic.Int64
 
 	// linked is the set of stub names a library symlink points at (linked_stubs.go).
 	linked linkedIndex

@@ -69,7 +69,7 @@ func TestUnlinkThroughTheMountLeavesNoReadabilityRow(t *testing.T) {
 
 	movies := t.TempDir()
 	stub := filepath.Join(movies, "Movie_2000_0123abcd.mkv")
-	if err := library.WriteStub(stub, "http://engine/stream?link="+rHash+"&index=1&play", 1<<30, "", ""); err != nil {
+	if err := library.WriteStub(stub, "http://engine/stream?link="+rHash+"&index=1&play", 1<<30, rHash, ""); err != nil {
 		t.Fatal(err)
 	}
 	mgr := library.New(library.Config{
