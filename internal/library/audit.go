@@ -3,6 +3,7 @@ package library
 import (
 	"net/http"
 	"sort"
+	"strings"
 )
 
 // auditCap bounds each array in the audit answer; the totals stay exact.
@@ -44,6 +45,10 @@ type AuditReport struct {
 	NoFileList      AuditNoFileList `json:"no_file_list"`
 	// Unreadable counts stubs that carry no readable hash; they cannot be checked.
 	Unreadable int `json:"unreadable"`
+	// OrphanRecords are the engine's stored torrent records no stub references: hash
+	// and stored name, sorted by hash. Report only; nothing is removed. A stub that
+	// could not be read may reference one of them (see Unreadable).
+	OrphanRecords []StoredRecord `json:"orphan_records"`
 }
 
 // Audit compares every stub's index with the file list in the engine's stored record
@@ -53,7 +58,8 @@ func (m *Manager) Audit() (*AuditReport, error) {
 	if m.cfg.StoredFiles == nil {
 		return nil, errf(http.StatusServiceUnavailable, "stored records are not available")
 	}
-	rep := &AuditReport{Mismatched: []AuditMismatch{}, NoFileList: AuditNoFileList{Hashes: []string{}}}
+	rep := &AuditReport{Mismatched: []AuditMismatch{}, NoFileList: AuditNoFileList{Hashes: []string{}}, OrphanRecords: []StoredRecord{}}
+	referenced := map[string]bool{}
 	lists := map[string][]TorrentFile{} // one record read per torrent
 	noList := map[string]bool{}
 	for _, kind := range []string{"movie", "tv"} {
@@ -66,6 +72,7 @@ func (m *Manager) Audit() (*AuditReport, error) {
 				rep.Unreadable++
 				continue
 			}
+			referenced[it.Hash] = true
 			files, ok := lists[it.Hash]
 			if !ok {
 				files = m.cfg.StoredFiles(it.Hash)
@@ -107,6 +114,15 @@ func (m *Manager) Audit() (*AuditReport, error) {
 	sort.Strings(rep.NoFileList.Hashes)
 	if len(rep.NoFileList.Hashes) > auditCap {
 		rep.NoFileList.Hashes = rep.NoFileList.Hashes[:auditCap]
+	}
+	if m.cfg.StoredRecords != nil {
+		for _, r := range m.cfg.StoredRecords() {
+			h := strings.ToLower(r.Hash)
+			if h != "" && !referenced[h] {
+				rep.OrphanRecords = append(rep.OrphanRecords, StoredRecord{Hash: h, Name: r.Name})
+			}
+		}
+		sort.Slice(rep.OrphanRecords, func(i, j int) bool { return rep.OrphanRecords[i].Hash < rep.OrphanRecords[j].Hash })
 	}
 	sort.Slice(rep.Mismatched, func(i, j int) bool { return rep.Mismatched[i].Path < rep.Mismatched[j].Path })
 	return rep, nil

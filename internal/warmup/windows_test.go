@@ -110,7 +110,8 @@ func TestWindowsEntriesVanish(t *testing.T) {
 		d.sizeCache.Store(d.filePath("big", 1), sizeEntry{size: quota - 512<<10, updatedAt: time.Now()})
 		atomic.AddInt64(&d.totalSize, quota-512<<10)
 		d.mu.Lock()
-		evicted, _ := d.enforceQuotaLocked(0, evictOpts{})
+		// "big" is the survivor by exclusion: the low-water mark would otherwise take it too.
+		evicted, _ := d.enforceQuotaLocked(0, evictOpts{exclude: FileKey{"big", 1}})
 		d.mu.Unlock()
 		if len(evicted) != 1 || evicted[0].Key != (FileKey{"old", 1}) {
 			t.Fatalf("evicted %+v, want the old file", evicted)

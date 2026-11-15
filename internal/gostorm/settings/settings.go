@@ -336,6 +336,8 @@ func SetStoragePreferences(prefs map[string]interface{}) error {
 }
 
 func CloseDB() {
+	mu.Lock()
+	defer mu.Unlock()
 	if tdb != nil {
 		tdb.CloseDB()
 	}

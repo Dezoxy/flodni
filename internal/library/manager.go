@@ -3,8 +3,10 @@ package library
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"flodni/internal/flog"
 	"fmt"
+	"io/fs"
 	"log/slog"
 	"net/http"
 	"os"
@@ -16,6 +18,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"flodni/internal/metadb"
@@ -73,6 +76,14 @@ type Config struct {
 	// ids), read without waking the torrent; nil when there is none. GET
 	// /api/library/audit needs it.
 	StoredFiles func(hash string) []TorrentFile
+	// StoredRecords, when set, lists the torrent records the engine stores (hash in
+	// lower-case hex and the stored name). GET /api/library/audit reports the ones no
+	// stub references as orphan_records.
+	StoredRecords func() []StoredRecord
+	// Linked, when set, is the daemon's set of stub base names some library symlink
+	// points at, nil while there is no usable set (no walk yet, no root, too old). It
+	// feeds the linked field of the list. It must be cheap and must not touch the disk.
+	Linked func() map[string]struct{}
 	// FileState, when set, reports the daemon's per-file facts (warm record, played and
 	// eviction marks, an open session) for GET /api/library/file; nil reads as none.
 	FileState func(hash string, fileIndex int) FileFacts
@@ -104,6 +115,10 @@ type Manager struct {
 	mu        sync.Mutex
 	hashLocks *keyLocks // one lock per info hash
 	showLocks *keyLocks // one per show: exclusive for packs, shared for single episodes
+
+	// unlinked is the count of stubs with linked=false in the last list of each kind
+	// (movies, tv); nil until listed, or when that list had no linked set.
+	unlinked [2]atomic.Pointer[int]
 
 	refreshPending map[int]bool
 	refreshDirty   map[int]bool
@@ -318,6 +333,16 @@ type Item struct {
 	// ModTime is the stub's mtime, which orders the catch-up feeder (newest first). It
 	// is not part of the API answer.
 	ModTime time.Time `json:"-"`
+	// Linked is true when a library symlink points at this stub's base name, false when
+	// none does, and null (nil) when there is no linked set to say.
+	Linked *bool `json:"linked"`
+}
+
+// StoredRecord is a torrent record the engine stores: its hash (lower-case hex) and
+// stored name. Nothing else of the record is carried.
+type StoredRecord struct {
+	Hash string `json:"hash"`
+	Name string `json:"name"`
 }
 
 var (
@@ -572,7 +597,7 @@ func (m *Manager) alreadyPresent(kind, hash string, req AddRequest) ([]AddedFile
 		return nil, nil
 	}
 	// The name carries only eight digits of the hash: the stub's link says whose it is.
-	st := readStub(path)
+	st, _ := readStub(path)
 	if st.Hash != canonicalHashKey(hash) {
 		return nil, nil
 	}
@@ -1012,7 +1037,7 @@ func (m *Manager) addEpisodes(ctx context.Context, req AddRequest, hash string, 
 		if !p.hadEntry || p.entry.FilePath == "" || p.entry.FilePath == p.path {
 			continue
 		}
-		old := ReplacedFile{Path: p.entry.FilePath, Hash: p.entry.Hash, FileIndex: readStub(p.entry.FilePath).FileIndex}
+		old := ReplacedFile{Path: p.entry.FilePath, Hash: p.entry.Hash, FileIndex: stubIndex(p.entry.FilePath)}
 		_, statErr := os.Stat(p.entry.FilePath)
 		stubWasThere := statErr == nil
 		if err := m.deleteStub(ctx, p.entry.FilePath); err != nil {
@@ -1112,7 +1137,7 @@ func (m *Manager) dryRun(req AddRequest, kind, hash string) (*AddResponse, error
 	if v.replacing != nil {
 		resp.Decision = DecisionReplaced
 		resp.Replaced = []ReplacedFile{{Path: v.replacing.FilePath, Hash: v.replacing.Hash,
-			FileIndex: readStub(v.replacing.FilePath).FileIndex}}
+			FileIndex: stubIndex(v.replacing.FilePath)}}
 	}
 	return resp, nil
 }
@@ -1162,12 +1187,18 @@ func (m *Manager) dropTorrentIfUnused(ctx context.Context, hash string) bool {
 	defer unlock()
 
 	for _, kind := range []string{"movie", "tv"} {
-		found, err := m.findByHash(kind, hash)
+		found, unreadable, err := m.scanByHash(kind, hash)
 		if err != nil {
 			m.cfg.Logger.Warn(fmt.Sprintf("[LibraryAPI] WARNING: keeping torrent %s, cannot check its stubs: %v", hash, err), "hash", hash, "err", err)
 			return false
 		}
 		if len(found) > 0 {
+			return false
+		}
+		// A stub that could not be read may be the one that links here (another
+		// episode of a pack): the torrent stays until it can be read.
+		if len(unreadable) > 0 {
+			m.cfg.Logger.Warn(fmt.Sprintf("[LibraryAPI] WARNING: keeping torrent %s, %d stub(s) could not be read and may use it (first: %s)", hash, len(unreadable), unreadable[0]), "hash", hash, "unreadable", len(unreadable), "first_unreadable", unreadable[0])
 			return false
 		}
 	}
@@ -1266,6 +1297,15 @@ func (m *Manager) mediaDirs() []string {
 // the name match read none. A stub that does not parse, or links to no hash, is
 // skipped and counted; the walk logs the count once.
 func (m *Manager) findByHash(kind, hash string) ([]AddedFile, error) {
+	out, _, err := m.scanByHash(kind, hash)
+	return out, err
+}
+
+// scanByHash is findByHash that also returns the stubs it could not read (an I/O error
+// or unparseable content), which are neither matches nor known not to match. Only the
+// "is this torrent still used" check needs them; a stub that reads fine and carries no
+// hash is in neither list.
+func (m *Manager) scanByHash(kind, hash string) (out []AddedFile, unreadable []string, err error) {
 	dir := m.cfg.MoviesDir
 	if kind == "tv" {
 		dir = m.cfg.TVDir
@@ -1273,9 +1313,8 @@ func (m *Manager) findByHash(kind, hash string) ([]AddedFile, error) {
 	// readStub lowercases the link's hash; compare it with the hex spelling, which is
 	// also what a base32 request means.
 	hash = canonicalHashKey(hash)
-	var out []AddedFile
 	skipped, firstSkipped := 0, ""
-	err := filepath.Walk(dir, func(path string, info os.FileInfo, err error) error {
+	err = filepath.Walk(dir, func(path string, info os.FileInfo, err error) error {
 		if err != nil {
 			// A directory we cannot read would silently shrink the answer, and a
 			// missing stub here means a duplicate add.
@@ -1284,7 +1323,10 @@ func (m *Manager) findByHash(kind, hash string) ([]AddedFile, error) {
 		if info.IsDir() || !strings.HasSuffix(strings.ToLower(path), ".mkv") {
 			return nil
 		}
-		st := readStub(path)
+		st, rerr := readStub(path)
+		if rerr != nil && !errors.Is(rerr, fs.ErrNotExist) { // a stub that vanished uses nothing
+			unreadable = append(unreadable, path)
+		}
 		if st.Hash == "" {
 			if skipped == 0 {
 				firstSkipped = path
@@ -1306,9 +1348,9 @@ func (m *Manager) findByHash(kind, hash string) ([]AddedFile, error) {
 		m.cfg.Logger.Warn(fmt.Sprintf("[LibraryAPI] WARNING: skipped %d stub(s) under %s with no readable hash (first: %s)", skipped, dir, firstSkipped), "skipped", skipped, "dir", dir, "first_skipped", firstSkipped)
 	}
 	if err != nil && !os.IsNotExist(err) {
-		return nil, errf(http.StatusInternalServerError, "cannot read %s: %v", dir, err)
+		return nil, nil, errf(http.StatusInternalServerError, "cannot read %s: %v", dir, err)
 	}
-	return out, nil
+	return out, unreadable, nil
 }
 
 // Remove deletes the stubs for a title, the torrent behind them, and the registry
@@ -1353,7 +1395,8 @@ func (m *Manager) Remove(ctx context.Context, req RemoveRequest) (*RemoveRespons
 	var failed []string
 	hashes := map[string]bool{}
 	for _, path := range targets {
-		hash := readStub(path).Hash
+		st, _ := readStub(path)
+		hash := st.Hash
 		if err := m.deleteStub(ctx, path); err != nil {
 			m.cfg.Logger.Warn(fmt.Sprintf("[LibraryAPI] WARNING: cannot delete %s: %v", path, err), "path", path, "err", err)
 			failed = append(failed, path)
@@ -1477,6 +1520,15 @@ func (m *Manager) List(kind string) ([]Item, error) {
 	if dir == "" {
 		return items, nil
 	}
+	slot := 0
+	if dir == m.cfg.TVDir && dir != m.cfg.MoviesDir {
+		slot = 1
+	}
+	var linked map[string]struct{}
+	if m.cfg.Linked != nil {
+		linked = m.cfg.Linked()
+	}
+	unlinked := 0
 	err := filepath.Walk(dir, func(path string, info os.FileInfo, err error) error {
 		if err != nil {
 			return err
@@ -1484,19 +1536,43 @@ func (m *Manager) List(kind string) ([]Item, error) {
 		if info.IsDir() || !strings.HasSuffix(strings.ToLower(path), ".mkv") {
 			return nil
 		}
-		st := readStub(path)
+		st, _ := readStub(path)
 		season, episode := ParseSeasonEpisode(filepath.Base(path))
-		items = append(items, Item{
+		it := Item{
 			Path: path, FusePath: m.fusePath(path), Size: st.Size, Hash: st.Hash,
 			IMDB: st.IMDB, FileIndex: st.FileIndex, Season: season, Episode: episode,
 			ModTime: info.ModTime(),
-		})
+		}
+		if linked != nil {
+			_, ok := linked[filepath.Base(path)]
+			it.Linked = &ok
+			if !ok {
+				unlinked++
+			}
+		}
+		items = append(items, it)
 		return nil
 	})
 	if err != nil && !os.IsNotExist(err) {
 		return nil, errf(http.StatusInternalServerError, "cannot read %s: %v", dir, err)
 	}
+	if linked != nil {
+		m.unlinked[slot].Store(&unlinked)
+	} else {
+		m.unlinked[slot].Store(nil)
+	}
 	return items, nil
+}
+
+// UnlinkedStubs is the number of stubs no library symlink points at, as of the last
+// list of movies and the last list of tv. It reads no disk. It reports false until both
+// have been listed with a linked set to compare against.
+func (m *Manager) UnlinkedStubs() (int, bool) {
+	a, b := m.unlinked[0].Load(), m.unlinked[1].Load()
+	if a == nil || b == nil {
+		return 0, false
+	}
+	return *a + *b, true
 }
 
 // stub is what a virtual .mkv on disk says about itself.
@@ -1507,12 +1583,20 @@ type stub struct {
 	FileIndex int
 }
 
+// stubIndex is the file index a stub carries, 0 when it cannot be read.
+func stubIndex(path string) int {
+	st, _ := readStub(path)
+	return st.FileIndex
+}
+
 // readStub reads a stub file. Legacy line-based stubs carry the stream URL on the first
-// line and nothing else.
-func readStub(path string) stub {
+// line and nothing else. It returns the zero stub and the error when the file cannot be
+// read or is JSON that does not parse: such a stub is unknown, which is not the same as
+// a stub that reads fine and links to no hash (a nil error with an empty Hash).
+func readStub(path string) (stub, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
-		return stub{}
+		return stub{}, err
 	}
 	content := strings.TrimSpace(string(data))
 
@@ -1525,7 +1609,7 @@ func readStub(path string) stub {
 			IMDB string `json:"imdb"`
 		}
 		if err := json.Unmarshal(data, &obj); err != nil {
-			return stub{}
+			return stub{}, err
 		}
 		url, out.Size, out.IMDB = obj.URL, obj.Size, obj.IMDB
 	} else {
@@ -1553,7 +1637,7 @@ func readStub(path string) stub {
 	if m := reStubIndex.FindStringSubmatch(url); len(m) > 1 {
 		out.FileIndex, _ = strconv.Atoi(m[1])
 	}
-	return out
+	return out, nil
 }
 
 // minVideoSize is the size below which a file named as a sample is dropped: a fixed

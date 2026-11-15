@@ -38,8 +38,8 @@ const unstoredLogHashes = 5
 var libraryUnstored atomic.Pointer[int]
 
 // engineHasMetainfo reports whether the engine's database holds a record for the hash
-// with the torrent's metainfo. A record without it can only be re-added from a bare
-// magnet. One database read; a record that does not decode counts as absent.
+// with the torrent's metainfo. A record without it is refused a wake. One database
+// read; a record that does not decode counts as absent.
 func engineHasMetainfo(hash string) bool {
 	var h metainfo.Hash
 	if err := h.FromHexString(hash); err != nil {
@@ -480,8 +480,7 @@ func (b *StartupCacheBuilder) runPruneFileState(complete bool) pruneResult {
 // WARNING naming the first few hashes (no paths) and sets libraryUnstored. With none
 // missing it logs a plain line, so a log shows the count ran. It reads the
 // engine database once per distinct hash, in this background goroutine after the walk,
-// so it never delays the mount. It changes nothing: such a torrent still wakes from its
-// bare magnet today.
+// so it never delays the mount. It changes nothing.
 func (b *StartupCacheBuilder) warnUnstored() {
 	b.mu.Lock()
 	hashes := make([]string, 0, len(b.foundHashes))
@@ -509,7 +508,7 @@ func (b *StartupCacheBuilder) warnUnstored() {
 		return
 	}
 	shown := missing[:min(n, unstoredLogHashes)]
-	b.logger.Warn(fmt.Sprintf("WARNING: %d of %d library torrents have no stored engine record with metainfo (first %d: %s); one opened after an idle close is re-added from its bare magnet", n, len(hashes), len(shown), strings.Join(shown, " ")), "n", n)
+	b.logger.Warn(fmt.Sprintf("WARNING: %d of %d library torrents have no stored engine record with metainfo (first %d: %s); one opened after an idle close is refused until it is added again", n, len(hashes), len(shown), strings.Join(shown, " ")), "n", n)
 }
 
 // Statistics helpers (thread-safe)

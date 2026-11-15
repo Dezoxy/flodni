@@ -119,8 +119,25 @@ file is created 0600), and secrets are better passed as the
 `FLODNI_API_TOKEN` and `FLODNI_PLEX_TOKEN` environment variables than stored
 in the file. The
 same token covers GoStorm's port 8090 (every route except `GET /echo`, header
-only, no `?token=`); external clients of 8090 must send it. There is no TLS:
-see `SECURITY.md`.
+only, no `?token=`); external clients of 8090 must send it. On an open port
+(no token) both servers refuse a request that carries an `Origin` header whose
+hostname differs from the `Host` it was sent to: 403, logged with method, path
+and address, so a web page in a browser on your network cannot drive the API
+with a cross-site POST. Only hostnames are compared, not scheme or port,
+because a TLS-terminating tunnel hands Flodni plain http with the original
+`Host` while the browser's `Origin` says `https`. A request with no `Origin`
+(Plex, curl, scripts, and the GET navigations and `<img>` loads a browser
+sends without one) is unchanged; `Origin: null` is refused. The panel's own
+save and restart calls are same-origin POSTs that do carry `Origin`, and pass
+because the hostnames match, so a reverse proxy in front of the control port
+must preserve the `Host` header (nginx: `proxy_set_header Host $host;`), or
+every panel save gets 403; a Cloudflare tunnel preserves it by default. A page
+on the same hostname but another port is not stopped. The engine on 8090 no
+longer sends CORS headers; its `wipe` torrent action, which deleted every
+stored torrent and had no caller, is gone; and `/shutdown` and the Plex
+webhook no longer answer GET (`/shutdown` is `POST`, the webhook 405s other
+methods), because a GET from a web page carries no `Origin`. There is no
+TLS: see `SECURITY.md`.
 
 `GET /api/health` on the control port reports the mount, the engine and the
 state database, each as `{"ok": ..., "reason": "..."}`, with an overall
@@ -136,6 +153,22 @@ when nothing is wrong. Its one value today is `no_play_webhook`, an advisory:
 it never changes `status` or the HTTP code, so a deployment without a play
 webhook stays healthy. The array is computed from memory, without a check.
 See "Play webhook" below for what raises it.
+
+### Engine state and backup
+
+`config.db`, in the engine's state directory, holds the only copy of each
+torrent's metainfo since the strict wake (see "A stub the engine does not
+store"). Every commit to it is fsynced, so a crash or a power loss keeps the
+records already saved. The file is created with mode 0600; a wider existing
+file is tightened to 0600 at start, with one log line. On shutdown the daemon
+unmounts, then stops the engine and closes the database. A commit costs two
+fdatasyncs (plus a sync when the file grows). The wake save is debounced to
+once per torrent per 30 s and skipped when the record is unchanged; the
+idle-close save and a record update are not debounced. Watch the first-byte
+and wake metrics after upgrading.
+
+To back it up, stop flodni and copy `config.db`: a cold copy is the safe one.
+To restore, stop flodni, copy `config.db` back and start it.
 
 ## Startup report
 
@@ -469,7 +502,8 @@ line below is the one log format that is).
 - `not_stored` is not a swarm failure. A read through the mount on a torrent
   the engine refused to wake (see "A stub the engine does not store") sets
   `last_failure_reason` to `not_stored`, `last_failure_source` to `mount` and
-  `last_failure_at`, once per handle. It does not change `consecutive_failures`
+  `last_failure_at`, once per handle. A wake before the engine is up
+  (`engine not ready`) is never recorded. It does not change `consecutive_failures`
   or `first_failure_at`, so such a torrent is not listed by `?failing=1` or
   `?min_failures=N`, and it is never a dead-swarm verdict. A session on it
   reports `failed_reads` 0. A later swarm read or failure replaces the reason.
@@ -985,7 +1019,11 @@ that window is not counted.
 
 With the warmup cache on, a new head file that would pass the quota evicts
 whole media files, head and tail together. Files never played go first, then
-played files; each class goes oldest written first. This is built and runs
+played files; each class goes oldest written first. An eviction does not stop at
+the quota: it goes down to 95% of it (a fixed mark, not a setting), so the next
+head writes find room instead of each starting another directory walk. The
+headroom comes from files never played; a played file is taken only as far as
+the quota needs. This is built and runs
 today. The cache also keeps an in-memory list of which files are warm; it is
 internal and not served, and only the aggregates below are exported
 (`flodni_warmup_files`). Evicting the least recently read file is built but
@@ -1239,7 +1277,10 @@ eight digits older tools put in the name (first eight for episodes, last eight
 for movies) are not used, so a stub of another torrent that shares them is
 left alone. The call reads each stub under both folders. A stub with no
 readable hash is skipped and logged once per call. The torrent is dropped once
-no stub links to it.
+no stub links to it. A stub that cannot be read at all (an I/O error, or JSON that
+does not parse) is not "no hash": it may be a sibling episode of a season pack,
+so the torrent is kept and one line names the first such path. A stub that reads
+fine and links to no hash is still skipped, as before.
 
 ## Replacing a release
 
@@ -1263,6 +1304,24 @@ episodes are dead but whose sampled files read still replaces the old stubs,
 and those episodes then fail on first play. Reading every file would delay
 every replacement by the slowest episode of the pack.
 
+## Listing stubs
+
+`GET /api/library/list` (control port, `type=movies` or `type=tv`) reports each
+stub with `path`, `fuse_path`, `size`, `hash`, `imdb`, `file_index`, `season` and
+`episode`, and `linked`:
+
+| `linked` | Meaning |
+|---|---|
+| `true` | A library symlink points at this stub's base name. |
+| `false` | None does: nothing the media server sees uses this stub. |
+| `null` | There is no linked set to compare against: no walk has finished, no `plex_path_map` target is configured, or the set is older than three walk intervals. |
+
+The set is the one the play webhook uses to break a tie between candidate
+stubs. It is kept in memory and refreshed every five minutes; `list` reads no
+extra file. Report only: nothing is removed or changed because a stub is
+unlinked, and a stub linked by a link outside the `plex_path_map` targets reads
+as `false`.
+
 ## Auditing stubs against the engine's file list
 
 `GET /api/library/audit` (control port, behind `api_token` like the other
@@ -1276,7 +1335,8 @@ record or state, and it runs only when asked, never at start.
  "mismatched": [{"path": "...", "hash": "...", "index": 3, "stub_size": 200,
                  "engine_length": 100, "reason": "length_differs"}],
  "no_file_list": {"stubs": 2, "torrents": 1, "hashes": ["..."]},
- "unreadable": 0}
+ "unreadable": 0,
+ "orphan_records": [{"hash": "...", "name": "..."}]}
 ```
 
 | Field | Meaning |
@@ -1286,6 +1346,7 @@ record or state, and it runs only when asked, never at start.
 | `reason` `length_differs` | The index names a file of another length than the stub's `size`. |
 | `no_file_list` | Stubs whose record holds no file list (saved before the metainfo arrived). They cannot be checked until one wake stores the list; the audit does not wake them. |
 | `unreadable` | Stubs with no readable hash. |
+| `orphan_records` | Torrent records the engine stores that no stub references, as `hash` (lower-case hex) and the stored `name`, sorted by hash and not capped. Nothing else of a record is shown, and a name that looks like a URL or magnet link is left empty. Report only: nothing is removed. An unreadable stub may reference one of them, so check `unreadable` first. `[]` when there are none. |
 
 `mismatched` and `no_file_list.hashes` hold at most 200 entries each;
 `mismatched_total` and `truncated` give the full count. Repair a reported
@@ -1668,12 +1729,12 @@ with no record, or a record without the metainfo, is refused. This is the
 strict wake (`docs/roadmap.md`, step 1): a wake from a bare magnet would add
 the torrent with the DHT and the public trackers and no private flag known
 until the metainfo arrived (hard rule 3). Such a stub, from a library add made
-before the engine saved it, a lost `config.db` or a raw engine `rem` with the
-stub left, stops opening until it is added again. At startup the daemon logs
-one `WARNING: N of M library torrents have no stored engine record with
-metainfo` line, naming the first five hashes, and exports
-`flodni_library_torrents_unstored` (counted once, after the library walk), so
-read it before deploying the strict wake.
+before the engine saved it, a lost `config.db` (see "Engine state and
+backup") or a raw engine `rem` with the stub left, stops opening until it is
+added again. At startup the daemon logs one `WARNING: N of M library
+torrents have no stored engine record with metainfo` line, naming the first
+five hashes, and exports `flodni_library_torrents_unstored` (counted once,
+after the library walk), so read it before deploying the strict wake.
 
 What a refusal looks like:
 
@@ -1685,6 +1746,13 @@ What a refusal looks like:
 - Neither is a dead swarm. No failed read is marked and no dead-swarm verdict
   follows. The readability record gets its own reason, `not_stored` (see
   "Readability record"), and `flodni_wake_refused_total` counts it.
+- A wake that comes before the engine is up is not a refusal. It is the
+  separate, transient `ErrEngineNotReady`: an open or a read answers the same
+  `EIO`, logs `engine not ready` (at most one line per 10 s), and writes
+  nothing: no `not_stored` in the readability record, no latch on the handle
+  or in warm on add, no `flodni_wake_refused_total`. The next read asks again.
+  Start-up waits for the engine to come up (up to 60 s, then logs a WARNING and
+  goes on) instead of a fixed 2 s.
 
 The library adds the engine now saves at once (`save_to_db`), so only existing
 stubs are affected. To repair one, add the hash to the engine with
@@ -1866,6 +1934,7 @@ scraper on the same host or Docker network.
 | `flodni_warmup_write_queue_drops_total` | counter | none | Head chunks dropped because the warmup write queue was full. |
 | `flodni_readability_torrents` | gauge | `state` | Library torrents by readability: `failed` has a failure streak, `ok` has none and a read served by the swarm, `never_read` is the rest (no record, or a streak reset by a metainfo without a read). Not exported when the state database is off. |
 | `flodni_library_torrents_unstored` | gauge | none | Library torrents with no stored engine record holding metainfo, counted once at startup after the library walk and not refreshed. Not exported until counted. See "A stub the engine does not store". |
+| `flodni_library_unlinked_stubs` | gauge | none | Stubs no library symlink points at (`linked` is `false` in `GET /api/library/list`), as of the last list of movies and of tv (a client list, the audit and a catch-up pass refresh it). Not exported, rather than 0, while there is no linked set or a kind has not been listed yet. See "Listing stubs". |
 | `flodni_stub_index_mismatch_total` | counter | none | Library paths whose stub file index differs from the file an open resolved by size and name, once per path per process. Non-zero means a stale stub. See "A stub whose file index is stale". |
 | `flodni_tracker_scrapes_total` | counter | `result` | Experimental. Tracker scrapes per torrent and tracker: `ok` (answered), `error` (the request failed or the answer left the torrent out), `skipped` (no BEP 48 scrape URL or an unsupported scheme). All values present from 0 once the scraper runs. See Tracker scrape. |
 | `flodni_torrents_by_seeders` | gauge | `bucket` | Experimental. Torrents by the seeders of their latest scrape answer: `0`, `1-2`, `3+`. A torrent with an error entry is in none. |

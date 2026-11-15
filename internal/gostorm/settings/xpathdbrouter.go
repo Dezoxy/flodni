@@ -112,10 +112,8 @@ func (v *XPathDBRouter) CloseDB() {
 	for _, db := range v.dbs {
 		db.CloseDB()
 	}
-	v.dbs = nil
-	v.routes = nil
-	v.route2db = nil
-	v.dbNames = nil
+	// The routes stay: a late write must reach a closed database and fail there, not
+	// find no database at all.
 }
 
 func (v *XPathDBRouter) getDBName(db GoStormDB) string {
