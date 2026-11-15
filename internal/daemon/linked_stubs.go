@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -308,26 +309,34 @@ func runLinkedWalker(l *linkedIndex, roots func() []string, stop <-chan struct{}
 	}
 }
 
-// episodeAgrees reports whether the file can be what the webhook played. A show's
-// fuzzy match is series-wide, so a linked pick needs the file's own season and episode
-// (read as the played mark reads them) to equal the webhook's, and both to be set; a
-// movie has nothing more to check.
-func episodeAgrees(path, section string, season, episode optInt) bool {
-	if section != "show" {
-		return true
+// fileAgrees reports whether the file can be what the webhook played. A fuzzy match is
+// a name similarity, not an identity: a show's tie is series-wide and a movie's is a
+// title substring ("Alien" in "Aliens"). So a linked pick needs more. A show's file must
+// carry the webhook's season and episode (read as the played mark reads them), both set.
+// A movie's file must carry the webhook's year as a whole token, the year set.
+func fileAgrees(path, section string, season, episode, year optInt) bool {
+	base := filepath.Base(path)
+	switch section {
+	case "show":
+		if !season.ok || !episode.ok {
+			return false
+		}
+		s, e, found := fileSeasonEpisode(base)
+		return found && s == season.v && e == episode.v
+	case "movie":
+		if !year.ok || year.v <= 0 {
+			return false
+		}
+		return hasTokens(nameTokens(base), []string{strconv.Itoa(year.v)})
 	}
-	if !season.ok || !episode.ok {
-		return false
-	}
-	s, e, found := fileSeasonEpisode(filepath.Base(path))
-	return found && s == season.v && e == episode.v
+	return true
 }
 
-// sameEpisode keeps the entries episodeAgrees accepts.
-func sameEpisode(es []exactMatchEntry, section string, season, episode optInt) []exactMatchEntry {
+// sameItem keeps the entries fileAgrees accepts.
+func sameItem(es []exactMatchEntry, section string, season, episode, year optInt) []exactMatchEntry {
 	var out []exactMatchEntry
 	for _, e := range es {
-		if episodeAgrees(e.path, section, season, episode) {
+		if fileAgrees(e.path, section, season, episode, year) {
 			out = append(out, e)
 		}
 	}

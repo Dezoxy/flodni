@@ -250,13 +250,15 @@ fails, the features are just inactive.
   best level, with ties) yields more than one candidate for a play, resume or
   stop, and exactly one of them is in that set, that one is the match. For a
   show, the fuzzy tie counts only files whose own season and episode equal the
-  webhook's, and none is picked when the webhook carries no season or episode.
+  webhook's, and none is picked when the webhook carries no season or episode;
+  for a movie, only files whose name carries the webhook's year, and none is
+  picked when it carries no year (a title can be a substring of another).
   A play matched this way is counted as `rule="linked"` (a stop is not counted
   by rule), and it marks that file played when the played mark's own tiers
   reach the same file. A stop matched this way is honoured with a handle open,
-  like a unique IMDb match, only when the file's season and episode agree with
-  the webhook's. The library-type bootstrap (step 4) is not narrowed. With none
-  or several of them linked, with no `plex_path_map`, or before the first walk
+  like a unique IMDb match, only when the file's season and episode (a
+  movie's year) agree with the webhook's. The library-type bootstrap (step 4)
+  is not narrowed. With none or several of them linked, with no `plex_path_map`, or before the first walk
   has finished, matching is as before; one candidate is never narrowed.
   Limits: a set older than 15 minutes (three walks) is not used, so a walk
   that keeps failing falls back to the matching above; the webhook that asks

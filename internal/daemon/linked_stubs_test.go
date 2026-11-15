@@ -177,11 +177,89 @@ func TestLinkedPlayFuzzyTieNeedsTheEpisodeToAgree(t *testing.T) {
 	if got := playRule(t, lkPayload("media.play", "")); got == ruleLinked {
 		t.Fatal("a tie across episodes was settled by a link")
 	}
-	_, _ = a, b
+	_, _, _ = a, b, s3
 	// Only E03 linked: the payload says E02, so E03 must not be picked.
 	linkedNames(e3)
-	if got := playRule(t, lkPayload("media.play", "")); got == ruleLinked || s3.GetStatus() {
+	if got := playRule(t, lkPayload("media.play", "")); got == ruleLinked {
 		t.Fatal("a linked stub of another episode was picked")
+	}
+}
+
+const (
+	mvAliens = "/mnt/flodni/movies/Aliens.1986.1080p.BluRay.mkv"
+	mvAlien  = "/mnt/flodni/movies/Alien.1979.1080p.BluRay.mkv"
+	mvSameA  = "/mnt/flodni/movies/Heat.1995.1080p.WEB.aaaaaaaa.mkv"
+	mvSameB  = "/mnt/flodni/movies/Heat.1995.1080p.WEB.bbbbbbbb.mkv"
+)
+
+func mvPayload(event, title, year string) string {
+	y := ""
+	if year != "" {
+		y = `,"year":` + year
+	}
+	return `{"event":"` + event + `","Metadata":{"title":"` + title + `","librarySectionType":"movie"` + y + `}}`
+}
+
+func mvEnv(t *testing.T, paths ...string) map[string]*PlaybackState {
+	t.Helper()
+	linkedEnv(t, "")
+	out := map[string]*PlaybackState{}
+	for _, p := range paths {
+		st := &PlaybackState{Path: p, OpenedAt: time.Now()}
+		app.playbackRegistry.Store(p, st)
+		out[p] = st
+		p := p
+		t.Cleanup(func() { app.playbackRegistry.Delete(p) })
+	}
+	return out
+}
+
+// "Alien" is a substring of "Aliens": a late stop for a movie whose entry is gone ties
+// both, and the linked, open one must not be released.
+func TestLinkedStopForAnotherMovieReleasesNothing(t *testing.T) {
+	for _, year := range []string{"", "1979"} {
+		m := mvEnv(t, mvAliens, mvAlien)
+		linkedNames(mvAliens)
+		for p, st := range m {
+			st.SetHealthy(true)
+			openHandle(t, p)
+		}
+		postWebhook(t, mvPayload("media.stop", "Alien", year))
+		if !m[mvAliens].GetStatus() || !m[mvAlien].GetStatus() {
+			t.Fatalf("year %q: a stop for another movie released a stream being watched", year)
+		}
+	}
+}
+
+func TestLinkedPlayOfAnotherMovieIsNotPicked(t *testing.T) {
+	for _, year := range []string{"", "1979"} {
+		m := mvEnv(t, mvAliens, mvAlien)
+		linkedNames(mvAliens)
+		if got := playRule(t, mvPayload("media.play", "Alien", year)); got == ruleLinked {
+			t.Fatalf("year %q: a title substring was settled by a link", year)
+		}
+		if m[mvAliens].GetStatus() {
+			t.Fatalf("year %q: the linked stub of another movie was confirmed", year)
+		}
+	}
+}
+
+func TestLinkedStubOfTheSameMovieStillWins(t *testing.T) {
+	m := mvEnv(t, mvSameA, mvSameB)
+	linkedNames(mvSameB)
+	if got := playRule(t, mvPayload("media.play", "Heat", "1995")); got != ruleLinked {
+		t.Fatalf("rule = %d, want linked (%d)", got, ruleLinked)
+	}
+	if !m[mvSameB].GetStatus() || m[mvSameA].GetStatus() {
+		t.Fatal("the linked copy of the movie was not the one confirmed")
+	}
+	for p, st := range m {
+		st.SetHealthy(true)
+		openHandle(t, p)
+	}
+	postWebhook(t, mvPayload("media.stop", "Heat", "1995"))
+	if m[mvSameB].GetStatus() || !m[mvSameA].GetStatus() {
+		t.Fatal("the stop did not release the linked copy alone")
 	}
 }
 

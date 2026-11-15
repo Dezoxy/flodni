@@ -240,7 +240,7 @@ func handlePlexWebhook(w http.ResponseWriter, r *http.Request) {
 			if exactMatch != "" {
 				matchRule = ruleFuzzy
 				// Several files fit equally well: the one a library symlink points at.
-				if e, ok := snap.pickEntry(sameEpisode(ties, payload.Metadata.LibrarySectionType, payload.Metadata.ParentIndex, payload.Metadata.Index)); ok {
+				if e, ok := snap.pickEntry(sameItem(ties, payload.Metadata.LibrarySectionType, payload.Metadata.ParentIndex, payload.Metadata.Index, payload.Metadata.Year)); ok {
 					exactMatch, exactState, matchRule = e.path, e.state, ruleLinked
 				}
 			}
@@ -379,7 +379,7 @@ func handlePlexWebhook(w http.ResponseWriter, r *http.Request) {
 				return true
 			})
 			// Several files fit equally well: the one a library symlink points at.
-			if e, ok := snap.pickEntry(sameEpisode(ties, payload.Metadata.LibrarySectionType, payload.Metadata.ParentIndex, payload.Metadata.Index)); ok {
+			if e, ok := snap.pickEntry(sameItem(ties, payload.Metadata.LibrarySectionType, payload.Metadata.ParentIndex, payload.Metadata.Index, payload.Metadata.Year)); ok {
 				stopMatch, stopState, stopRule, stopMatchFromFuzzy = e.path, e.state, ruleLinked, false
 			}
 		}
@@ -397,8 +397,8 @@ func handlePlexWebhook(w http.ResponseWriter, r *http.Request) {
 				}
 			}
 		}
-		// A linked match is trusted only when the file is the episode the webhook says.
-		linkedStop := stopRule == ruleLinked && episodeAgrees(stopMatch, payload.Metadata.LibrarySectionType, payload.Metadata.ParentIndex, payload.Metadata.Index)
+		// A linked match is trusted only when the file is the episode or the movie year the webhook says.
+		linkedStop := stopRule == ruleLinked && fileAgrees(stopMatch, payload.Metadata.LibrarySectionType, payload.Metadata.ParentIndex, payload.Metadata.Index, payload.Metadata.Year)
 		imdbUnique := false
 		if stopMatch != "" && !matchByBasename && !stopMatchFromFuzzy && stopImdbID != "" {
 			n := 0
