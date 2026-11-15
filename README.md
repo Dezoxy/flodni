@@ -119,8 +119,18 @@ file is created 0600), and secrets are better passed as the
 `FLODNI_API_TOKEN` and `FLODNI_PLEX_TOKEN` environment variables than stored
 in the file. The
 same token covers GoStorm's port 8090 (every route except `GET /echo`, header
-only, no `?token=`); external clients of 8090 must send it. There is no TLS:
-see `SECURITY.md`.
+only, no `?token=`); external clients of 8090 must send it. On an open port
+(no token) both servers refuse a request that carries an `Origin` header whose
+hostname differs from the `Host` it was sent to: 403, logged with method, path
+and address, so a web page in a browser on your network cannot drive the API
+with a cross-site POST. Only hostnames are compared, not scheme or port,
+because a TLS-terminating tunnel hands Flodni plain http with the original
+`Host` while the browser's `Origin` says `https`. A request with no `Origin`
+(Plex, curl, scripts, the panel and its proxy) is unchanged; `Origin: null`
+is refused. A page on the same hostname but another port is not stopped. The
+engine on 8090 no longer sends CORS headers, and its `wipe` torrent action,
+which deleted every stored torrent and had no caller, is gone. There is no
+TLS: see `SECURITY.md`.
 
 `GET /api/health` on the control port reports the mount, the engine and the
 state database, each as `{"ok": ..., "reason": "..."}`, with an overall

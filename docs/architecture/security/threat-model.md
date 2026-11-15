@@ -31,6 +31,7 @@ one.
 | Maintainer | Holds the token; uses the panel and automation. Trusted. |
 | Media server | Posts play webhooks; reads the mount. Trusted, but cannot send headers on webhooks. |
 | LAN client | Can reach the published ports; holds no token. Untrusted when a token is set. |
+| Browser on the network | A web page the maintainer or a household member opens, on any site. Holds no token and sends requests from their machine to the open ports, so it reaches a loopback or private address the page's own server could not. Sends an `Origin` header on cross-site requests. |
 | Internet client | Reaches the ports only if they are forwarded or published. Untrusted. |
 | Local user on the host | Can read the mount (`AllowOther` is on) and the files on disk. Not defended against here. |
 
@@ -63,6 +64,7 @@ IDs are stable; each row names the boundary it belongs to.
 | T-12 | B1 | Information disclosure | Unauthenticated health leaks state | `GET /api/health` returns status words only; `GET /control` serves the static panel, which holds no data | Its `warnings` array tells a caller whether play webhooks are arriving |
 | T-13 | B3 | Information disclosure | A local user on the host reads media through the mount | None beyond file modes on the stubs | Out of scope: the host is trusted, and `AllowOther` is needed for the media server |
 | T-14 | B1, B2 | Repudiation | No record of who changed what | 401s are logged; routine calls are not | Gap: one shared token, no per-caller identity, no audit log |
+| T-15 | B1, B2 | Spoofing, Tampering | With no token, a page in a browser on the network POSTs to the open port (a `text/plain` body needs no preflight, and the handlers parse JSON without checking Content-Type), so config write, library add and remove run with no token | With no token, `internal/apiauth` answers 403 to any request whose `Origin` hostname differs from its `Host` hostname, logged with method, path and address; `Origin: null` and an unparsable `Origin` are refused; the engine sends no CORS headers (`Access-Control-Allow-Origin: *` and private-network access were removed) | Gap: only hostnames are compared, because a TLS tunnel delivers plain http with the original `Host`, so a page on the same hostname but another port (another service on the host) is not stopped; a request with no `Origin` passes (a non-browser client, or a page that can strip it, is the T-02 case); with a token set the check is off and the token is the gate |
 
 ### Known gaps
 
@@ -80,6 +82,9 @@ Ordered by what to fix first. None is scheduled here; see
 4. No rate limiting or lockout (T-08).
 5. One shared token with no scopes (T-14): the webhook caller, the panel and
    automation all hold the same credential.
+6. The open-port Origin refusal compares hostnames only (T-15): a page on
+   the same hostname but another port, and any client that sends no `Origin`,
+   still reach an open port.
 
 ### Assumptions
 
@@ -95,4 +100,6 @@ Ordered by what to fix first. None is scheduled here; see
 Read, not run: `internal/apiauth/apiauth.go`, `internal/daemon/main.go`,
 `internal/daemon/webhook.go`, `internal/gostorm/web/server.go`,
 `internal/library/handler.go`, `internal/config/config.go`. The token
-behaviour is covered by `internal/apiauth/apiauth_test.go`.
+behaviour is covered by `internal/apiauth/apiauth_test.go`; the Origin refusal by
+`internal/apiauth/origin_test.go` and the engine's missing CORS headers by
+`internal/gostorm/web/server_test.go`.

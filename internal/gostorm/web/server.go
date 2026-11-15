@@ -17,7 +17,6 @@ import (
 	"flodni/internal/gostorm/web/blocker"
 	"flodni/internal/gostorm/web/sslcerts"
 
-	"github.com/gin-contrib/cors"
 	"github.com/gin-contrib/location/v2"
 	"github.com/gin-gonic/gin"
 	"github.com/wlynxg/anet"
@@ -44,6 +43,20 @@ func newServer(addr string, h http.Handler) *http.Server {
 	}
 }
 
+// newRoute builds the engine's router. It sets no CORS headers: the control
+// panel reaches the engine through its same-origin proxy and every other caller
+// is a script, so no page on another origin has a reason to read a response.
+func newRoute() *gin.Engine {
+	route := gin.New()
+	route.Use(log.WebLogger(), blocker.Blocker(), gin.Recovery(), location.Default())
+	auth.SetupAuth(route)
+
+	route.GET("/echo", echo)
+
+	api.SetupRoute(route)
+	return route
+}
+
 func Start() {
 	log.TLogln("Start GoStorm " + version.Version + " torrent " + version.GetTorrentVersion())
 	ips := GetLocalIps()
@@ -58,22 +71,7 @@ func Start() {
 
 	gin.SetMode(gin.ReleaseMode)
 
-	// corsCfg := cors.DefaultConfig()
-	// corsCfg.AllowAllOrigins = true
-	// corsCfg.AllowHeaders = []string{"*"}
-	// corsCfg.AllowMethods = []string{"*"}
-	corsCfg := cors.DefaultConfig()
-	corsCfg.AllowAllOrigins = true
-	corsCfg.AllowPrivateNetwork = true
-	corsCfg.AllowHeaders = []string{"Origin", "Content-Length", "Content-Type", "X-Requested-With", "Accept", "Authorization"}
-
-	route := gin.New()
-	route.Use(log.WebLogger(), blocker.Blocker(), gin.Recovery(), cors.New(corsCfg), location.Default())
-	auth.SetupAuth(route)
-
-	route.GET("/echo", echo)
-
-	api.SetupRoute(route)
+	route := newRoute()
 
 	// check if https enabled
 	if settings.Ssl {

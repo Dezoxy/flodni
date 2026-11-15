@@ -35,7 +35,13 @@ control, settings, `/stream`, shutdown): every route except `GET /echo`, the
 readiness probe, needs the `Authorization: Bearer` header, and there is no
 query-token form. External clients of 8090 must send it when it is set;
 flodni's own calls to the engine already do. With no token set, 8090 is open
-as before, so keep it off any network others can reach. GoStorm's server
+as before, so keep it off any network others can reach. On an open port
+both servers answer 403 to a request whose `Origin` header names a different
+hostname than its `Host` (scheme and port are ignored, because a TLS tunnel
+delivers plain http with the original `Host`; `Origin: null` is refused), so
+a page in a browser on the network cannot send a cross-site POST. Requests
+without `Origin` (scripts, Plex) pass, and a page on the same hostname but
+another port is not stopped. The engine sends no CORS headers. GoStorm's server
 bounds header reads (10 s) and idle connections (120 s); it sets no read or
 write timeout, because streams and uploads are long-lived.
 
