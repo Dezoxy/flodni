@@ -56,6 +56,36 @@ func ParseLink(link string) (*torrent.TorrentSpec, error) {
 	return nil, err
 }
 
+// LinkHash returns the info hash a link names, from its text alone: a magnet, a
+// torrs:// token or a bare hash. It never fetches or reads anything. An http(s) or
+// file: link has no hash until it is fetched, so ok is false for it.
+func LinkHash(link string) (string, bool) {
+	if strings.HasPrefix(link, "torrs://") || (len(link) > 45 && torrshash.IsBase62(link)) {
+		spec, _, err := ParseTorrsHash(link)
+		if err != nil {
+			return "", false
+		}
+		return spec.InfoHash.HexString(), true
+	}
+	u, err := url.Parse(link)
+	if err != nil {
+		return "", false
+	}
+	var spec *torrent.TorrentSpec
+	switch strings.ToLower(u.Scheme) {
+	case "magnet":
+		spec, err = fromMagnet(u.String())
+	case "":
+		spec, err = fromMagnet("magnet:?xt=urn:btih:" + u.Path)
+	default:
+		return "", false
+	}
+	if err != nil {
+		return "", false
+	}
+	return spec.InfoHash.HexString(), true
+}
+
 func fromMagnet(link string) (*torrent.TorrentSpec, error) {
 	mag, err := metainfo.ParseMagnetUri(link)
 	if err != nil {

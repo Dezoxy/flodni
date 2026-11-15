@@ -127,7 +127,14 @@ with a cross-site POST. Only hostnames are compared, not scheme or port,
 because a TLS-terminating tunnel hands Flodni plain http with the original
 `Host` while the browser's `Origin` says `https`. A request with no `Origin`
 (Plex, curl, scripts, and the GET navigations and `<img>` loads a browser
-sends without one) is unchanged; `Origin: null` is refused. The panel's own
+sends without one) is unchanged; `Origin: null` is refused. Because a page can
+still send those GETs, `GET`/`HEAD /stream` on an open port never adds a torrent:
+it plays or reports a hash the engine already stores or holds, and answers 403
+("adding by GET is disabled; use `POST /torrents`") for any other link, for an
+`http(s)` or `file:` link (refused before any fetch, so no server-side request
+and no local file read), and for `&save` or `&preload` (they change state).
+With a token set, `/stream` keeps adding. Add through `POST /torrents` or
+`POST /torrent/upload`. The panel's own
 save and restart calls are same-origin POSTs that do carry `Origin`, and pass
 because the hostnames match, so a reverse proxy in front of the control port
 must preserve the `Host` header (nginx: `proxy_set_header Host $host;`), or
@@ -1696,7 +1703,7 @@ Every path that starts a torrent for a hash, labelled:
 |---|---|---|
 | A read or an open through the mount, warm on add, catch-up | wake | `native.Wake` loads the stored record (`torr.LoadStored`); the magnet is used for its hash only, and a link that is not a magnet is refused without being fetched. Refuses an unstored hash. |
 | `/play/{hash}/{id}`, `/stream` with a stored hash, and the engine's own lookup of a stored torrent | wake | `torr.LoadStored`. `/play` answers 404 for an unstored hash. |
-| `POST /torrents` (`add`), upload, `/stream?link=` on a new link | explicit add | The caller's link or file starts the torrent, a stored record or not; the stored metainfo and trackers are merged in when there is one. |
+| `POST /torrents` (`add`), upload, and `/stream?link=` on a new link with a token set | explicit add | The caller's link or file starts the torrent, a stored record or not; the stored metainfo and trackers are merged in when there is one. |
 
 A load, a save and a removal of one torrent are serialised in the engine, so a
 torrent that was removed stays removed: a wake that was still adding it

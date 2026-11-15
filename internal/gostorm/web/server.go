@@ -54,6 +54,10 @@ func newRoute() *gin.Engine {
 	route := gin.New()
 	route.Use(log.WebLogger(), blocker.Blocker(), gin.Recovery(), location.Default())
 	auth.SetupAuth(route)
+	if APIToken != "" {
+		// Requests reaching a handler carried the token (apiauth.GoStorm gates them).
+		route.Use(func(c *gin.Context) { c.Set(api.TokenEnforcedKey, true) })
+	}
 
 	route.GET("/echo", echo)
 

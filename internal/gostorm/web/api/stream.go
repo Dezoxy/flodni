@@ -17,6 +17,46 @@ import (
 	"github.com/pkg/errors"
 )
 
+// TokenEnforcedKey is the gin context key the engine's router sets when an API
+// token is enforced. A request that reaches a handler then carried the token.
+const TokenEnforcedKey = "api_token_enforced"
+
+// Seams for the tests: the engine calls /stream may make.
+var (
+	peekTorrent = torr.PeekTorrent
+	streamAdd   = torr.AddTorrent
+	loadStored  = torr.LoadStored
+	parseLink   = utils.ParseLink
+)
+
+// refuseGetAdd reports whether a GET or HEAD /stream on an open port (no token) must be
+// refused, and answers 403. A page can send such a GET from an <img> tag with no Origin,
+// so the open-port Origin gate cannot stop it. The request is allowed only when its link
+// names a hash the engine already stores or holds, and it neither saves nor preloads.
+// The hash comes from the link text alone: an http(s) or file: link has none until it
+// is fetched, so it is refused before any fetch (SSRF, local file read).
+func refuseGetAdd(c *gin.Context, link string, save, preload bool) bool {
+	if c.GetBool(TokenEnforcedKey) {
+		return false
+	}
+	reason := ""
+	switch {
+	case save || preload:
+		reason = "save and preload by GET are disabled; use POST /torrents"
+	default:
+		hash, ok := utils.LinkHash(link)
+		if !ok || peekTorrent(hash) == nil {
+			reason = "adding by GET is disabled; use POST /torrents"
+		}
+	}
+	if reason == "" {
+		return false
+	}
+	c.String(http.StatusForbidden, reason)
+	c.Abort()
+	return true
+}
+
 func stream(c *gin.Context) {
 	link := c.Query("link")
 	indexStr := c.Query("index")
@@ -52,6 +92,10 @@ func stream(c *gin.Context) {
 	poster, _ = url.QueryUnescape(poster)
 	category, _ = url.QueryUnescape(category)
 
+	if refuseGetAdd(c, link, save, preload) {
+		return
+	}
+
 	var spec *torrent.TorrentSpec
 	var torrsHash *torrshash.TorrsHash
 	var err error
@@ -73,7 +117,7 @@ func stream(c *gin.Context) {
 			category = torrsHash.Category()
 		}
 	} else {
-		spec, err = utils.ParseLink(link)
+		spec, err = parseLink(link)
 		if err != nil {
 			c.AbortWithError(http.StatusInternalServerError, err)
 			return
@@ -81,7 +125,7 @@ func stream(c *gin.Context) {
 	}
 
 	// V301: Use PeekTorrent for metadata checks to avoid keeping torrents in RAM during probes
-	tor := torr.PeekTorrent(spec.InfoHash.HexString())
+	tor := peekTorrent(spec.InfoHash.HexString())
 	if tor != nil {
 		title = tor.Title
 		poster = tor.Poster
@@ -89,8 +133,18 @@ func stream(c *gin.Context) {
 		category = tor.Category
 	}
 	// The explicit add: this link starts the torrent, a stored record or not.
+	// Without a token (refuseGetAdd let it through) the torrent is already stored, so a
+	// closed one wakes from its record only, as in streamNoAuth, never from the link.
 	if tor == nil || tor.Stat == state.TorrentInDB {
-		tor, err = torr.AddTorrent(spec, title, poster, data, category)
+		if c.GetBool(TokenEnforcedKey) {
+			tor, err = streamAdd(spec, title, poster, data, category)
+		} else {
+			tor, err = loadStored(spec.InfoHash.HexString())
+			if errors.Is(err, torr.ErrNotStored) {
+				c.AbortWithError(http.StatusNotFound, err)
+				return
+			}
+		}
 		if err != nil {
 			if errors.Is(err, torr.ErrEngineNotReady) {
 				c.AbortWithError(http.StatusServiceUnavailable, err)
@@ -187,6 +241,13 @@ func streamNoAuth(c *gin.Context) {
 			category = torrsHash.Category()
 		}
 	} else {
+		// An unauthenticated caller never makes the engine fetch: an http(s) or file: link
+		// has no hash before the fetch, so it is refused as unauthorized.
+		if _, ok := utils.LinkHash(link); !ok {
+			c.Header("WWW-Authenticate", "Basic realm=Authorization Required")
+			c.AbortWithStatus(http.StatusUnauthorized)
+			return
+		}
 		spec, err = utils.ParseLink(link)
 		if err != nil {
 			c.AbortWithError(http.StatusInternalServerError, err)
