@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"strings"
 	"testing"
 
 	"github.com/anacrolix/torrent"
@@ -126,5 +127,64 @@ func TestStreamGetStoredHashWithTokenWakesFromRecord(t *testing.T) {
 	doStream(r, http.MethodGet, "magnet:?xt=urn:btih:"+storedHash+"&tr=http://evil.invalid/a", "&index=1&play")
 	if calls.load != 1 || calls.add != 0 {
 		t.Errorf("calls %+v, want one LoadStored and no AddTorrent", *calls)
+	}
+}
+
+// The hash is held when the gate looks and gone when the handler looks again: with no
+// token nothing is added from the link.
+func TestStreamGetHashGoneBetweenPeeksIsNotAdded(t *testing.T) {
+	r, calls := streamRig(t, false)
+	n := 0
+	peekTorrent = func(string) *torr.Torrent {
+		n++
+		if n == 1 {
+			return &torr.Torrent{Stat: state.TorrentInDB}
+		}
+		return nil
+	}
+	rec := doStream(r, http.MethodGet, "magnet:?xt=urn:btih:"+storedHash+"&tr=http://evil.invalid/a", "&index=1&play")
+	if rec.Code != http.StatusNotFound || calls.add != 0 {
+		t.Errorf("status %d, calls %+v, want 404 and no add", rec.Code, *calls)
+	}
+}
+
+// A record without metainfo is never added from the link, token or not.
+func TestStreamGetStoredWithoutMetainfoIs404(t *testing.T) {
+	for _, token := range []bool{false, true} {
+		r, calls := streamRig(t, token) // the rig's loadStored answers ErrNotStored
+		rec := doStream(r, http.MethodGet, "magnet:?xt=urn:btih:"+storedHash, "&index=1&play")
+		if rec.Code != http.StatusNotFound || calls.add != 0 || calls.load != 1 {
+			t.Errorf("token=%v: status %d, calls %+v, want 404, one load, no add", token, rec.Code, *calls)
+		}
+	}
+}
+
+// A torrent the engine holds in RAM (not a stored record) passes the gate and is
+// neither added nor woken.
+func TestStreamGetHeldInRAMPassesGate(t *testing.T) {
+	r, calls := streamRig(t, false)
+	peekTorrent = func(string) *torr.Torrent { return &torr.Torrent{Stat: state.TorrentWorking} }
+	r.Use(gin.Recovery()) // a bare wrapper has no engine torrent to stream; only the gate matters
+	rec := doStream(r, http.MethodGet, "magnet:?xt=urn:btih:"+storedHash, "&stat")
+	if rec.Code == http.StatusForbidden || calls.add != 0 || calls.load != 0 {
+		t.Errorf("status %d, calls %+v: want past the gate, no add, no load", rec.Code, *calls)
+	}
+}
+
+// Padded base32 panics the vendored magnet parser; it is refused before it, and an
+// oversized torrs token is refused before it is decoded.
+func TestStreamGetMalformedLinksAreRefusedNotPanics(t *testing.T) {
+	for _, link := range []string{
+		"magnet:?xt=urn:btih:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
+		"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
+		"torrs://" + strings.Repeat("A", 9000),
+	} {
+		for _, token := range []bool{false, true} {
+			r, calls := streamRig(t, token)
+			rec := doStream(r, http.MethodGet, link, "&stat")
+			if rec.Code < 400 || rec.Code >= 500 && rec.Code != http.StatusInternalServerError || *calls != (streamCalls{}) {
+				t.Errorf("token=%v %.30q: status %d, calls %+v", token, link, rec.Code, *calls)
+			}
+		}
 	}
 }

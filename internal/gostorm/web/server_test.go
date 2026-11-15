@@ -2,6 +2,9 @@ package web
 
 import (
 	"bytes"
+	"flodni/internal/gostorm/web/api"
+	"fmt"
+	"github.com/gin-gonic/gin"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
@@ -52,5 +55,22 @@ func TestServerLogsCrossOriginRefusal(t *testing.T) {
 	}
 	if !strings.Contains(buf.String(), "403") || !strings.Contains(buf.String(), "/torrents") {
 		t.Errorf("refusal not logged: %q", buf.String())
+	}
+}
+
+// The router marks requests as token-enforced exactly when APIToken is set; the
+// handlers read the mark to allow an add by GET.
+func TestNewRouteSetsTokenEnforcedKey(t *testing.T) {
+	prev := APIToken
+	t.Cleanup(func() { APIToken = prev })
+	for _, tok := range []string{"", "secret"} {
+		APIToken = tok
+		route := newRoute()
+		route.GET("/probe", func(c *gin.Context) { c.String(200, "%v", c.GetBool(api.TokenEnforcedKey)) })
+		rec := httptest.NewRecorder()
+		route.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/probe", nil))
+		if want := tok != ""; rec.Body.String() != fmt.Sprint(want) {
+			t.Errorf("token %q: key = %s, want %v", tok, rec.Body.String(), want)
+		}
 	}
 }

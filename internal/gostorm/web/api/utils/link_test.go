@@ -1,6 +1,9 @@
 package utils
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 func TestLinkHashNeverFetches(t *testing.T) {
 	const h = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
@@ -13,5 +16,24 @@ func TestLinkHashNeverFetches(t *testing.T) {
 		if _, ok := LinkHash(l); ok {
 			t.Errorf("LinkHash(%q) ok, want no hash", l)
 		}
+	}
+}
+
+func TestLinkHashRefusesWhatPanicsTheParser(t *testing.T) {
+	for _, l := range []string{
+		"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
+		"magnet:?xt=urn:btih:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
+		"magnet:?xt=urn:btmh:1220aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+		"torrs://" + strings.Repeat("A", maxTorrsToken+1),
+	} {
+		if _, ok := LinkHash(l); ok {
+			t.Errorf("LinkHash(%.40q) ok", l)
+		}
+		if _, err := ParseLink(l); err == nil && !strings.HasPrefix(l, "torrs") {
+			t.Errorf("ParseLink(%.40q) no error", l)
+		}
+	}
+	if h, ok := StrictHash("AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"); !ok || h != strings.Repeat("00", 20) {
+		t.Errorf("StrictHash base32 = %q %v", h, ok)
 	}
 }

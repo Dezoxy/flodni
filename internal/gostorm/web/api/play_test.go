@@ -3,6 +3,7 @@ package api
 import (
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"testing"
 
 	"github.com/gin-gonic/gin"
@@ -36,9 +37,9 @@ func playRig(t *testing.T) (*gin.Engine, *streamCalls) {
 // :hash is a hash and nothing else: a URL or a path is refused before any fetch or
 // file read, and the engine is not asked.
 func TestPlayRefusesNonHash(t *testing.T) {
-	for _, v := range []string{"http:x.invalid", "https:x.invalid", "file:etc", "zz", "nothash"} {
+	for _, v := range []string{"http:x.invalid", "https:x.invalid", "file:etc", "zz", "nothash", "magnet:?xt=urn:btih:" + storedHash, "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=", "torrs:" + storedHash} {
 		r, calls := playRig(t)
-		req := httptest.NewRequest(http.MethodGet, "/play/"+v+"/1", nil)
+		req := httptest.NewRequest(http.MethodGet, "/play/"+url.PathEscape(v)+"/1", nil)
 		rec := httptest.NewRecorder()
 		r.ServeHTTP(rec, req)
 		if rec.Code != http.StatusBadRequest {
@@ -58,5 +59,26 @@ func TestPlayStoredHashStillPlays(t *testing.T) {
 	r.ServeHTTP(rec, req)
 	if rec.Code == http.StatusBadRequest || calls.load != 1 {
 		t.Errorf("status %d, load calls %d: want past the parser and one LoadStored", rec.Code, calls.load)
+	}
+}
+
+// 32-char base32 is accepted as a hash, and a stored one still wakes.
+func TestPlayAcceptsBase32Hash(t *testing.T) {
+	r, calls := playRig(t)
+	playGet = func(string) *torr.Torrent { return &torr.Torrent{Stat: state.TorrentInDB} }
+	req := httptest.NewRequest(http.MethodGet, "/play/AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA/1", nil)
+	rec := httptest.NewRecorder()
+	r.ServeHTTP(rec, req)
+	if rec.Code == http.StatusBadRequest || calls.load != 1 {
+		t.Errorf("status %d, load calls %d", rec.Code, calls.load)
+	}
+}
+
+func TestPlayUnknownHashIs404(t *testing.T) {
+	r, calls := playRig(t)
+	rec := httptest.NewRecorder()
+	r.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/play/"+unknownHash+"/1", nil))
+	if rec.Code != http.StatusNotFound || calls.load != 0 {
+		t.Errorf("status %d, load %d, want 404 and none", rec.Code, calls.load)
 	}
 }

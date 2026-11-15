@@ -138,16 +138,20 @@ func stream(c *gin.Context) {
 	// is never legitimate on a stored torrent, a private one above all. Only a hash the
 	// engine does not hold is added from the link, and only with a token (refuseGetAdd).
 	if tor == nil || tor.Stat == state.TorrentInDB {
-		if tor != nil {
+		switch {
+		case tor != nil:
 			tor, err = loadStored(spec.InfoHash.HexString())
-			if errors.Is(err, torr.ErrNotStored) && c.GetBool(TokenEnforcedKey) {
-				// A record with no metainfo (kept as a bare magnet): add as before.
-				tor, err = streamAdd(spec, title, poster, data, category)
-			} else if errors.Is(err, torr.ErrNotStored) {
+			if errors.Is(err, torr.ErrNotStored) {
+				// No record, or one without metainfo: never added from the link
+				// (lifecycle.go LoadStored refuses it for the same reason).
 				c.AbortWithError(http.StatusNotFound, err)
 				return
 			}
-		} else {
+		case !c.GetBool(TokenEnforcedKey):
+			// Held when the gate looked and gone since: never add without a token.
+			c.AbortWithError(http.StatusNotFound, errors.New("torrent is not held"))
+			return
+		default:
 			tor, err = streamAdd(spec, title, poster, data, category)
 		}
 		if err != nil {

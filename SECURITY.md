@@ -41,11 +41,14 @@ hostname than its `Host` (scheme and port are ignored, because a TLS tunnel
 delivers plain http with the original `Host`; `Origin: null` is refused), so
 a page in a browser on the network cannot send a cross-site POST. Requests
 without `Origin` (scripts, Plex, and the GET navigations and `<img>` loads a
-browser sends without one) pass, so `GET /play/:hash/:id` (wakes a stored torrent) stays open to a page,
-and so does DNS rebinding. `GET`/`HEAD /stream` on an open port never adds:
-a link whose hash the engine does not already hold, any `http(s)` or `file:`
-link, and `&save` or `&preload` get 403 before anything is fetched or added
-(with a token set it adds as before). A page on the same hostname but another port is not stopped. A
+browser sends without one) pass, so a page can still wake a stored
+torrent with `GET /play/:hash/:id` or `GET /stream`, and DNS rebinding passes.
+`GET`/`HEAD /stream` on an open port never adds: a link whose hash the engine
+does not already hold, any `http(s)` or `file:` link, and `&save` or
+`&preload` get 403 before anything is fetched or added; a stored hash wakes
+from its record only, and a record without metainfo gets 404. With a token set
+`/stream` still adds a hash the engine does not hold. A page on the same
+hostname but another port is not stopped. A
 reverse proxy in front of the control port must keep the `Host` header, or the
 panel's saves get 403. The engine sends no CORS headers; `/shutdown` and the
 Plex webhook take POST only. GoStorm's server

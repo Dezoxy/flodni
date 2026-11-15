@@ -38,9 +38,10 @@ func play(c *gin.Context) {
 		return
 	}
 
-	// A hash is the only input: the value is parsed from its text, never fetched or
-	// read as a path (this GET is open to any web page when no token is set).
-	infoHash, ok := utils.LinkHash(hash)
+	// A bare hash (40 hex or 32 base32) is the only input: never a magnet, a token, a
+	// URL or a path, and never fetched or read (this GET is open to any web page
+	// when no token is set).
+	infoHash, ok := utils.StrictHash(hash)
 	if !ok {
 		c.AbortWithError(http.StatusBadRequest, errors.New("not an info hash"))
 		return
@@ -54,7 +55,7 @@ func play(c *gin.Context) {
 	}
 
 	if tor == nil {
-		c.AbortWithError(http.StatusInternalServerError, errors.New("error get torrent"))
+		c.AbortWithError(http.StatusNotFound, errors.New("error get torrent"))
 		return
 	}
 
