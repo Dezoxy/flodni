@@ -33,7 +33,7 @@ func TestOpenPortRefusesCrossOrigin(t *testing.T) {
 		{"unparsable origin", "x.example", "http://[::1", false, 403},
 		{"origin without host", "x.example", "https://", false, 403},
 	}
-	handlers := map[string]func(string, *slog.Logger, http.Handler) http.Handler{"control": Middleware, "gostorm": GoStorm}
+	handlers := map[string]wrapper{"control": Middleware, "gostorm": GoStorm}
 	for hname, wrap := range handlers {
 		for _, tt := range tests {
 			t.Run(hname+"/"+tt.name, func(t *testing.T) {
@@ -67,7 +67,7 @@ func TestOpenPortRefusesCrossOrigin(t *testing.T) {
 // With a token set the Origin check is not applied: the token is the gate.
 func TestTokenModeIgnoresOrigin(t *testing.T) {
 	next := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(200) })
-	for name, wrap := range map[string]func(string, *slog.Logger, http.Handler) http.Handler{"control": Middleware, "gostorm": GoStorm} {
+	for name, wrap := range map[string]wrapper{"control": Middleware, "gostorm": GoStorm} {
 		for _, tc := range []struct {
 			auth string
 			want int
@@ -91,7 +91,7 @@ func TestTokenModeIgnoresOrigin(t *testing.T) {
 // refused like any other method (an XHR or fetch GET carries one).
 func TestOpenPortOriginEdgeCases(t *testing.T) {
 	next := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {})
-	for name, wrap := range map[string]func(string, *slog.Logger, http.Handler) http.Handler{"control": Middleware, "gostorm": GoStorm} {
+	for name, wrap := range map[string]wrapper{"control": Middleware, "gostorm": GoStorm} {
 		req := httptest.NewRequest("GET", "/api/config", nil)
 		req.Host = "x.example"
 		req.Header.Set("Origin", "https://evil.example")

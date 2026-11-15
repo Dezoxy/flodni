@@ -35,6 +35,10 @@ func handleConfig(w http.ResponseWriter, r *http.Request) {
 		// the next start enforces. Setting it needs the environment or the file, so a
 		// posted token is refused whatever its value (comparing it with a pending one
 		// would answer guesses about that one).
+		if err := config.ValidateAllowedHosts(newCfg.AllowedHosts); err != nil {
+			http.Error(w, err.Error(), 400)
+			return
+		}
 		if app.controlToken == "" && newCfg.APIToken != "" {
 			refuseOpenPort(w, r, http.StatusForbidden,
 				"api_token cannot be set or changed through the API while no token is enforced"+setTokenHint)
@@ -57,6 +61,15 @@ func handleConfig(w http.ResponseWriter, r *http.Request) {
 					"config.json does not parse; fix it before saving through the API")
 				return
 			}
+			// allowed_hosts is the same kind of setting, and gostorm_url feeds the engine's
+			// list, so the derived list is gated, not each field: a client could clear or
+			// widen what the next start enforces. A post that leaves it as it is saves as before.
+			if onDisk.HostsSaveChanged(&newCfg, gc()) {
+				refuseOpenPort(w, r, http.StatusForbidden,
+					"allowed_hosts and the gostorm_url host cannot be changed through the API while no token is enforced: "+
+						"set them through MKV_PROXY_ALLOWED_HOSTS or by editing config.json, then restart flodni")
+				return
+			}
 			// Keep the token the file holds now, not the one read at start: the owner may
 			// have added one by hand and not restarted yet.
 			newCfg.APIToken = onDisk.ResolveAPIToken("")
@@ -68,6 +81,11 @@ func handleConfig(w http.ResponseWriter, r *http.Request) {
 		} else {
 			// The panel never sees the token; an empty post keeps the one in the file.
 			newCfg.APIToken = gc().ResolveAPIToken(newCfg.APIToken)
+		}
+		// A panel save keeps the list as the file holds it, never the environment's. On the
+		// open path HostsSaveChanged has already done this; here it covers the token path.
+		if app.controlToken != "" {
+			onDisk.HostsSaveChanged(&newCfg, gc())
 		}
 		// The stored token goes wherever plex.url points, and the panel cannot read it
 		// back, so a changed URL without a typed token would let a caller aim the token

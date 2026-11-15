@@ -16,6 +16,7 @@
   "warm_start_idle_seconds": 6,
   "gostorm_url": "http://127.0.0.1:8090",
   "metrics_port": 9080,
+  "allowed_hosts": [],
   "physical_source_path": "/mnt/flodni-real",
   "fuse_mount_path": "/mnt/flodni-virtual",
   "disk_warmup_quota_gb": 15,

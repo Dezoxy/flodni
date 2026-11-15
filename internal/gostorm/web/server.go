@@ -31,6 +31,10 @@ var (
 	// route except GET /echo. Empty: no auth.
 	APIToken string
 
+	// AllowedHosts, when non-empty and set before Start, refuses a request whose
+	// Host hostname is not listed (DNS rebinding defence), token or not.
+	AllowedHosts []string
+
 	// Logger receives the Origin refusals of the engine's gate. Nil logs nothing.
 	Logger *slog.Logger
 )
@@ -41,7 +45,7 @@ var (
 func newServer(addr string, h http.Handler) *http.Server {
 	return &http.Server{
 		Addr:              addr,
-		Handler:           apiauth.GoStorm(APIToken, Logger, h),
+		Handler:           apiauth.GoStorm(APIToken, Logger, h, apiauth.WithAllowedHosts(AllowedHosts)),
 		ReadHeaderTimeout: 10 * time.Second,
 		IdleTimeout:       120 * time.Second,
 	}
