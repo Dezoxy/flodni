@@ -114,3 +114,17 @@ func TestStreamGetWithTokenKeepsAdd(t *testing.T) {
 		t.Errorf("fetch calls %d, want 1 with a token", calls.fetch)
 	}
 }
+
+// A stored torrent never takes the link's trackers, token or not: it wakes from its record.
+func TestStreamGetStoredHashWithTokenWakesFromRecord(t *testing.T) {
+	r, calls := streamRig(t, true)
+	// A record the engine cannot load fails the request; it is not re-added from the link.
+	loadStored = func(string) (*torr.Torrent, error) {
+		calls.load++
+		return nil, errors.New("fake load failure")
+	}
+	doStream(r, http.MethodGet, "magnet:?xt=urn:btih:"+storedHash+"&tr=http://evil.invalid/a", "&index=1&play")
+	if calls.load != 1 || calls.add != 0 {
+		t.Errorf("calls %+v, want one LoadStored and no AddTorrent", *calls)
+	}
+}

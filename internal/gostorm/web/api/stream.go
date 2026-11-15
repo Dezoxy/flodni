@@ -133,17 +133,22 @@ func stream(c *gin.Context) {
 		category = tor.Category
 	}
 	// The explicit add: this link starts the torrent, a stored record or not.
-	// Without a token (refuseGetAdd let it through) the torrent is already stored, so a
-	// closed one wakes from its record only, as in streamNoAuth, never from the link.
+	// A stored torrent wakes from its record only, with or without a token: AddTorrent
+	// would merge the link's &tr= trackers into it (lifecycle.go addUnderLock), which
+	// is never legitimate on a stored torrent, a private one above all. Only a hash the
+	// engine does not hold is added from the link, and only with a token (refuseGetAdd).
 	if tor == nil || tor.Stat == state.TorrentInDB {
-		if c.GetBool(TokenEnforcedKey) {
-			tor, err = streamAdd(spec, title, poster, data, category)
-		} else {
+		if tor != nil {
 			tor, err = loadStored(spec.InfoHash.HexString())
-			if errors.Is(err, torr.ErrNotStored) {
+			if errors.Is(err, torr.ErrNotStored) && c.GetBool(TokenEnforcedKey) {
+				// A record with no metainfo (kept as a bare magnet): add as before.
+				tor, err = streamAdd(spec, title, poster, data, category)
+			} else if errors.Is(err, torr.ErrNotStored) {
 				c.AbortWithError(http.StatusNotFound, err)
 				return
 			}
+		} else {
+			tor, err = streamAdd(spec, title, poster, data, category)
 		}
 		if err != nil {
 			if errors.Is(err, torr.ErrEngineNotReady) {

@@ -12,6 +12,9 @@ import (
 	"flodni/internal/gostorm/web/api/utils"
 )
 
+// playGet is a seam for the tests.
+var playGet = torr.GetTorrent
+
 // play godoc
 //
 //	@Summary		Play given torrent by infohash
@@ -35,13 +38,15 @@ func play(c *gin.Context) {
 		return
 	}
 
-	spec, err := utils.ParseLink(hash)
-	if err != nil {
-		c.AbortWithError(http.StatusInternalServerError, err)
+	// A hash is the only input: the value is parsed from its text, never fetched or
+	// read as a path (this GET is open to any web page when no token is set).
+	infoHash, ok := utils.LinkHash(hash)
+	if !ok {
+		c.AbortWithError(http.StatusBadRequest, errors.New("not an info hash"))
 		return
 	}
 
-	tor := torr.GetTorrent(spec.InfoHash.HexString())
+	tor := playGet(infoHash)
 	if tor == nil && notAuth {
 		c.Header("WWW-Authenticate", "Basic realm=Authorization Required")
 		c.AbortWithStatus(http.StatusUnauthorized)
@@ -55,7 +60,8 @@ func play(c *gin.Context) {
 
 	if tor.Stat == state.TorrentInDB {
 		// A wake of a stored torrent: from its record only, never from the link.
-		tor, err = torr.LoadStored(spec.InfoHash.HexString())
+		var err error
+		tor, err = loadStored(infoHash)
 		if err != nil {
 			if errors.Is(err, torr.ErrNotStored) {
 				c.AbortWithError(http.StatusNotFound, err)

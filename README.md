@@ -1702,7 +1702,7 @@ Every path that starts a torrent for a hash, labelled:
 | Path | Kind | What it does |
 |---|---|---|
 | A read or an open through the mount, warm on add, catch-up | wake | `native.Wake` loads the stored record (`torr.LoadStored`); the magnet is used for its hash only, and a link that is not a magnet is refused without being fetched. Refuses an unstored hash. |
-| `/play/{hash}/{id}`, `/stream` with a stored hash, and the engine's own lookup of a stored torrent | wake | `torr.LoadStored`. `/play` answers 404 for an unstored hash. |
+| `/play/{hash}/{id}`, `/stream` with a stored hash, and the engine's own lookup of a stored torrent | wake | `torr.LoadStored`. `/play` answers 404 for an unstored hash and 400 for a value that is not a hash (an `http(s)` or `file:` value is never fetched or read), token or not; `/stream` wakes a stored hash from its record whether or not a token is set. |
 | `POST /torrents` (`add`), upload, and `/stream?link=` on a new link with a token set | explicit add | The caller's link or file starts the torrent, a stored record or not; the stored metainfo and trackers are merged in when there is one. |
 
 A load, a save and a removal of one torrent are serialised in the engine, so a
