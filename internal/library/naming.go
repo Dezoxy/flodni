@@ -5,6 +5,7 @@
 package library
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -305,6 +306,11 @@ func WriteStub(path, streamURL string, size int64, hash, imdbID string) error {
 	}
 	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
 		return err
+	}
+	// An identical stub is left alone: a rewrite makes a new inode and mtime, which a
+	// scan or a media server reads as a change that never happened.
+	if old, err := os.ReadFile(path); err == nil && bytes.Equal(old, data) {
+		return nil
 	}
 	return atomicfile.WriteFile(path, data, 0644)
 }
