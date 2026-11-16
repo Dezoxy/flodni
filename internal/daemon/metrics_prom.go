@@ -145,6 +145,7 @@ func collectProm(w *promtext.Writer) {
 	collectScrapeProm(w)
 	collectReadAheadProm(w)
 	collectStubIndexProm(w)
+	collectAuthRefusalsProm(w)
 
 	w.Counter("flodni_fuse_short_reads_total",
 		"Reads served with fewer bytes than requested away from EOF.",
@@ -418,4 +419,21 @@ func openFDs() (int, bool) {
 		return 0, false
 	}
 	return len(ents) - 1, true
+}
+
+// collectAuthRefusalsProm writes flodni_auth_refusals_total{route,scope,reason}. The
+// labels are bounded (apiauth.Refusals): a pattern from the route table, "unmatched"
+// or "pre_route"; the scope the route needs; a fixed reason. Series appear once seen.
+func collectAuthRefusalsProm(w *promtext.Writer) {
+	snap := authRefusals.Snapshot()
+	samples := make([]promtext.Sample, 0, len(snap))
+	for _, s := range snap {
+		samples = append(samples, promtext.Sample{
+			Labels: []promtext.Label{lbl("route", s.Route), lbl("scope", s.Scope), lbl("reason", s.Reason)},
+			Value:  float64(s.Count),
+		})
+	}
+	w.Counter("flodni_auth_refusals_total",
+		"Requests the auth gates refused, by route pattern, the scope the route needs and the reason. Counts the Host, Origin and cross-site refusals in every mode.",
+		samples...)
 }

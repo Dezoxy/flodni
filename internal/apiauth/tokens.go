@@ -21,7 +21,7 @@ import (
 )
 
 // This file is the token store of ADR 0004: the scopes, the tokens file and its
-// loader, and Lookup. It enforces nothing; the gate that consumes it is a later step.
+// loader, and Lookup. It enforces nothing itself: the gate in apiauth.go consumes it.
 
 // The scope names are declared in scopes.go with the route table. A token holds the
 // eight real scopes, never ScopeOpen.
@@ -275,6 +275,10 @@ func Load(o LoadOptions) (*Tokens, error) {
 	return &Tokens{mode: ModeScoped, entries: entries, jwt: o.JWTConfigured}, nil
 }
 
+// RequireLoopback is the check scoped mode makes of gostorm_url at start; a live
+// save makes it too, so a save cannot write a value the next start refuses.
+func RequireLoopback(gostormURL string) error { return requireLoopback(gostormURL) }
+
 // requireLoopback refuses a gostorm_url that is not provably this machine: the engine
 // is called without a credential, so in scoped mode it must not leave the host.
 func requireLoopback(raw string) error {
@@ -342,10 +346,16 @@ func readTokensFile(path string, logger *slog.Logger) ([]Entry, error) {
 	return validateEntries(file.Tokens)
 }
 
-// rejectDuplicateKeys refuses an object that repeats a key. encoding/json keeps the last
-// one and matches keys without regard to case, so {"scopes":["webhook"],"scopes":["admin"]}
-// would load as admin; the keys are compared folded to lower case for the same reason.
-// It scans the first JSON value only, and the data has already decoded cleanly.
+// fileKeys are the only keys the file may use, byte for byte.
+var fileKeys = map[string]bool{"tokens": true, "name": true, "scopes": true, "sha256": true}
+
+// rejectDuplicateKeys refuses an object that repeats a key or uses one that is not
+// byte-exact. encoding/json keeps the last duplicate and matches keys without regard
+// to case, and it folds U+017F (long s) onto s and U+212A (Kelvin sign) onto k, so
+// {"scopes":["webhook"],"\u017fcopes":["admin"]} would load as admin, and no
+// lower-casing comparison sees it. Only the four exact keys are accepted, and a
+// repeat of one (after escapes are decoded) is refused. It scans the first JSON
+// value only, and the data has already decoded cleanly.
 func rejectDuplicateKeys(data []byte) error {
 	type frame struct {
 		obj    bool
@@ -367,7 +377,9 @@ func rejectDuplicateKeys(data []byte) error {
 		d, isDelim := tok.(json.Delim)
 		if n := len(stack); n > 0 && stack[n-1].obj && stack[n-1].wantKy && !isDelim {
 			key, _ := tok.(string)
-			key = strings.ToLower(key)
+			if !fileKeys[key] {
+				return fmt.Errorf("parse: key %q is not one of tokens, name, scopes, sha256 (keys are exact and lower case)", key)
+			}
 			if stack[n-1].seen[key] {
 				return fmt.Errorf("parse: duplicate key %q", key)
 			}

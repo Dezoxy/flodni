@@ -109,37 +109,65 @@ entry; add it to the `tokens` array of the file:
 {"tokens": [{"name": "webhook", "scopes": ["webhook"], "sha256": "<64 hex characters>"}]}
 ```
 
-Then set `auth_tokens_file` in `config.json` (or `FLODNI_AUTH_TOKENS_FILE`, which
-wins) to the file's path and restart. A token is `fl_` plus 43 characters. A
-name matches `[a-z0-9][a-z0-9_-]{0,31}` (`internal` is reserved). Scopes are
-`admin`, `engine`, `library`, `metrics`, `read`, `scrape`, `upload` and
-`webhook`; `admin` implies all the others. To rotate, add the new entry, move the
-caller to the new token, remove the old entry and restart. Keep one `admin`
-token offline as a break-glass credential.
+Migrate in this order, because both settings together stop the start and the
+change is one restart:
+
+1. Make one token per caller with `flodni auth new-token` and put the entries in
+   the file. Keep one `admin` token offline as the break-glass credential.
+2. Move each caller to its own token: the media server's webhook URL to a
+   `webhook`-only token (the only kind `?token=` accepts), the scraper to a
+   `metrics` one, the bridge to `library` and `upload`, and so on. Do this
+   before the restart if the callers can hold both; a caller still sending the
+   old `api_token` is refused after it.
+3. Remove `api_token` from `config.json` and from `FLODNI_API_TOKEN`.
+4. Set `auth_tokens_file` in `config.json` (or `FLODNI_AUTH_TOKENS_FILE`, which
+   wins) and restart. Check `GET /api/startup`: `auth.mode` is `scoped`.
+
+To roll back, restore `api_token` and remove the file setting.
+
+A token is `fl_` plus 43 characters. A name matches `[a-z0-9][a-z0-9_-]{0,31}`
+(`internal` is reserved). Scopes are `admin`, `engine`, `library`, `metrics`,
+`read`, `scrape`, `upload` and `webhook`; `admin` implies all the others. To
+rotate, add the new entry, move the caller to the new token, remove the old
+entry and restart. The file's keys are exact and lower case (`tokens`, `name`,
+`scopes`, `sha256`); any other spelling stops the start.
+
+Both servers (the control port and the engine's 8090 and TLS port) enforce the
+scopes from one route table, and deny by default: a route, method or engine
+action the table does not list needs `admin`. The engine port reads the bearer
+header only. A token may ride in `?token=` only on the two webhook routes and
+only if its scopes are exactly `webhook`; anywhere else the parameter is refused
+(`query_not_allowed`) without a lookup. A verified `auth_jwt` assertion is
+`admin` on the control port, and its non-GET requests need an `Origin` of the
+same host and port, `Sec-Fetch-Site: same-origin` when present, and
+`Content-Type: application/json`. `auth_panel_https` (startup-only, default
+false) says the panel is served over https, so that `Origin` must be https.
+`flodni_auth_refusals_total{route,scope,reason}` counts the refusals.
 
 Flodni refuses to start, and never falls back to an open port, when: the file
-cannot be read or parsed, has an unknown field or trailing data, is over 64 KiB,
-or repeats a JSON key, or is not a regular file, or holds no token, more than
-64, an unknown scope, an entry without scopes, a repeated name or hash, a hash
-that is not 64 lower-case hex characters or is the hash of the empty string, or
-a bad or reserved name; when `api_token` is also set (remove it: there is no
-alias); when `auth_jwt` is set without a tokens file; and when `gostorm_url` is
-not a loopback address. A `config.json` that cannot be read or parsed also stops
-the start in every mode, because the pointer to the tokens file lives there. A
-file writable by group or others only logs a warning. `GET /api/startup` and the
-`[Startup] report` line gain an `auth` section (`mode` of `open`, `legacy_token`
-or `scoped`, the token count, the scopes in use, and `jwt`) with no name, hash
-or path. With only `api_token` set, behaviour is as before.
+cannot be read or parsed, has an unknown field or key, trailing data, is over
+64 KiB, or repeats a JSON key, or is not a regular file, or holds no token, more
+than 64, an unknown scope, an entry without scopes, a repeated name or hash, a
+hash that is not 64 lower-case hex characters or is the hash of the empty
+string, or a bad or reserved name; when `api_token` is also set (remove it:
+there is no alias); when `auth_jwt` is set without a tokens file or is invalid;
+and when `gostorm_url` is not a loopback address. A `config.json` that cannot be
+read or parsed also stops the start in every mode, because the pointer to the
+tokens file lives there, and so does one with an unknown key that mentions
+`auth` (`auth_token_file`, `auth-tokens-file`), a repeated or re-cased `api_token`
+or `auth_*` key, a null `api_token` or `auth_tokens_file`, or an `auth_jwt` block
+that repeats or re-cases a key. Any other
+unknown top-level key only logs one warning that lists the names. A file
+writable by group or others only logs a warning. `GET /api/startup` and the
+`[Startup] report` line carry an `auth` section (`mode` of `open`,
+`legacy_token` or `scoped`, the token count, the scopes in use, and `jwt`) with
+no name, hash or path. With only `api_token` set, behaviour is as before.
 
-`auth_tokens_file` is startup-only: `POST /api/config` answers 403 (and writes
-nothing) to a different path in every mode, and a save always writes back the
-path `config.json` holds, never the environment's.
-
-**Status:** this release loads, validates and reports the file. The gate that
-enforces the scopes on both ports is a following step of the same release, so
-until it lands a start with `auth_tokens_file` logs a warning and raises the
-`auth_not_enforced` alarm in the startup report. Do not remove `api_token` on a
-build that raises it.
+In scoped mode `api_token`, `auth_tokens_file`, `auth_jwt` and
+`auth_panel_https` are startup-only: `POST /api/config` answers 403 (and writes
+nothing) to a change, as it does to a non-loopback `gostorm_url`, and a save
+writes back the values read at start. Flodni's own calls to its engine go
+in-process, with no credential and no URL.
 
 The command-line paths (the entrypoint's `FLODNI_SOURCE_PATH` and
 `FLODNI_MOUNT_PATH`) win over `physical_source_path` and `fuse_mount_path` in
@@ -424,16 +452,14 @@ Alarm ids: `config_parse_failed`, `config_paths_differ`, `settings_migrated`,
 over), `head_density_check` (the one-shot head check ran; see Cache disk),
 `corrupt_cache`, `statedb_migrated`, `statedb_open_failed`,
 `statedb_migration_failed`, `prune_skipped`, `ghost_inodes_pruned` and
-`state_not_on_mounted_volume` (the container entrypoint's warning) and
-`auth_not_enforced` (a tokens file is loaded but this build does not enforce it yet). The report
+and `state_not_on_mounted_volume` (the container entrypoint's warning). The report
 is taken once, so a `corrupt_cache` removal after it is not in it.
 
 ## Proxy-signed identity (IdP mode)
 
 `internal/apiauth/jwt` verifies an identity assertion that an identity-aware
-proxy puts in a request header (ADR 0004). It is the library half only: the
-control gate does not call it yet, so setting `auth_jwt` verifies nothing until
-the scoped-token gate lands; it already needs `auth_tokens_file` (without one
+proxy puts in a request header (ADR 0004). The
+control gate calls it, and `auth_jwt` needs `auth_tokens_file` (without one
 the daemon refuses to start). The block, when you add it to
 `config.json`:
 
@@ -454,8 +480,7 @@ such as oauth2-proxy. The mode is off when the block is absent, and
 token with `email_verified` false is refused when it is set) is off while
 empty. `issuer`, `audience`, `jwks_url` and `header` are required; `header`
 may not be `Authorization`, and `jwks_url` must be `https`. Those refusals
-(and an incomplete block) are enforced at start once the gate lands (ADR 0004
-step 3); until then only the verifier's constructor applies them. `auth_jwt`
+(and an incomplete block) stop the start. `auth_jwt`
 is startup-only: `POST /api/config` never writes it, and a post that carries a
 block that equals neither the file's nor the running one is refused with 403
 (a post without one keeps the file's). The audience must be this application's

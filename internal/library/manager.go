@@ -643,6 +643,11 @@ func (m *Manager) validate(req *AddRequest) (string, string, error) {
 	}
 
 	hash := strings.ToLower(strings.TrimSpace(req.Hash))
+	// Before anything can reach the engine, and on the text as sent: a magnet with a
+	// leading space is not a magnet link.
+	if err := CheckMagnet(req.Magnet); err != nil {
+		return "", "", err
+	}
 	if req.Magnet != "" {
 		if h := HashFromMagnet(req.Magnet); h != "" {
 			hash = h

@@ -1,7 +1,6 @@
 package daemon
 
 import (
-	"bytes"
 	"context"
 	_ "embed"
 	"errors"
@@ -31,7 +30,6 @@ import (
 	"flodni/internal/warmup"
 	"fmt"
 	"golang.org/x/sys/cpu"
-	"io"
 	"net/http"
 	"os"
 	"os/signal"
@@ -301,10 +299,21 @@ func Run() {
 	}
 	app.auth = auth
 	app.startup.noteAuth(auth)
+	jwtVerifier, jwtErr := startJWT(gc())
+	if jwtErr != nil {
+		logger.Error("[Auth] refusing to start: " + jwtErr.Error())
+		fmt.Fprintln(os.Stderr, "refusing to start: "+jwtErr.Error())
+		os.Exit(1)
+	}
+	app.jwt = jwtVerifier
+	if u := gc().UnknownKeys(); len(u) > 0 {
+		// Names only: an old config with a removed key must still start.
+		logger.Warn(fmt.Sprintf("[Config] config.json holds keys no setting reads: %s", strings.Join(u, ", ")), "keys", u)
+	}
 
 	// Before the engine starts serving streams (Dezoxy fork, see torrstor.BoundedReadahead).
 	torrstor.BoundedReadahead = !gc().PumpOnOpen
-	server.SetAPIToken(gc().APIToken, logger)
+	configureEngineAuth(auth, gc(), logger)
 	server.SetAllowedHosts(gc().EngineAllowedHosts())
 	// Keep-alive counters (Reliability step 8, phase a): count the engine's idle
 	// closes. Set before the engine and its ticker start. The hook only counts; it
@@ -638,41 +647,7 @@ func Run() {
 	// build an absolute URL of its own: behind a reverse proxy the GoStorm port is
 	// not exposed, and an http:// call from an https:// page is blocked as mixed
 	// content, which left the whole GoStorm section empty and unsaveable.
-	ctl.GostormSettings = func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != "POST" {
-			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-			return
-		}
-		base := gc().GoStormBaseURL
-		if base == "" {
-			http.Error(w, "gostorm_url not configured", http.StatusServiceUnavailable)
-			return
-		}
-		body, err := io.ReadAll(io.LimitReader(r.Body, 1<<20))
-		if err != nil {
-			http.Error(w, "read body: "+err.Error(), http.StatusBadRequest)
-			return
-		}
-		req, err := http.NewRequestWithContext(r.Context(), "POST",
-			strings.TrimRight(base, "/")+"/settings", bytes.NewReader(body))
-		if err != nil {
-			http.Error(w, "build request: "+err.Error(), http.StatusInternalServerError)
-			return
-		}
-		req.Header.Set("Content-Type", "application/json")
-		if t := gc().APIToken; t != "" {
-			req.Header.Set("Authorization", "Bearer "+t)
-		}
-		resp, err := (&http.Client{Timeout: 15 * time.Second}).Do(req)
-		if err != nil {
-			http.Error(w, "gostorm unreachable: "+err.Error(), http.StatusBadGateway)
-			return
-		}
-		defer resp.Body.Close()
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(resp.StatusCode)
-		_, _ = io.Copy(w, resp.Body)
-	}
+	ctl.GostormSettings = gostormSettingsProxy
 
 	ctl.Restart = handleRestart
 
@@ -693,7 +668,7 @@ func Run() {
 			MoviesDir:      filepath.Join(gc().PhysicalSourcePath, "movies"),
 			TVDir:          filepath.Join(gc().PhysicalSourcePath, "tv"),
 			GoStormURL:     gc().GoStormBaseURL,
-			GoStorm:        library.NewGoStormClient(gc().GoStormBaseURL, gc().APIToken),
+			GoStorm:        newLibraryEngineClient(),
 			Registry:       registry,
 			StoredFiles:    func(hash string) []library.TorrentFile { return storedFileList(hash) },
 			StoredRecords:  storedRecordList,
@@ -788,7 +763,7 @@ func Run() {
 	registerControlRoutes(routes, ctl)
 	controlSrv := &http.Server{
 		Addr:              fmt.Sprintf(":%d", gc().MetricsPort),
-		Handler:           apiauth.Middleware(app.controlToken, logger, routes, apiauth.WithAllowedHosts(gc().EffectiveAllowedHosts())),
+		Handler:           newControlGate(routes, app.auth, app.jwt, gc()),
 		ErrorLog:          redact.ErrorLog(),
 		ReadHeaderTimeout: 10 * time.Second,
 		ReadTimeout:       60 * time.Second,

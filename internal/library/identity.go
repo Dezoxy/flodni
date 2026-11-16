@@ -33,6 +33,9 @@ func canonicalHashKey(hash string) string {
 func resolveIdentity(reqHash, reqMagnet string) (hash, magnet string, err error) {
 	hash = strings.ToLower(strings.TrimSpace(reqHash))
 	magnet = strings.TrimSpace(reqMagnet)
+	if err := CheckMagnet(magnet); err != nil {
+		return "", "", err
+	}
 	fromMagnet := ""
 	if magnet != "" {
 		fromMagnet = HashFromMagnet(magnet)

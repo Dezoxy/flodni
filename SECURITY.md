@@ -45,13 +45,16 @@ hash of the empty string) stops the start; it never degrades to an open port.
 non-loopback `gostorm_url`, because the engine is called without a credential. A
 file writable by group or others logs a warning. The startup report's `auth`
 section shows the mode, the token count and the scopes in use, never a name, hash
-or path. Enforcement of the scopes on the two ports is the next step of the same
-release; until then a start with a tokens file logs a warning and the ports are
-not closed by it. `POST /api/config` cannot change `auth_tokens_file` in any mode (403), so a
-caller of the API cannot swap the credential store that survives a restart. The CI secret scan has a rule for the token shape
+or path. Both ports enforce the scopes from one route table and deny by default
+(an unlisted route, method or engine action needs `admin`); the engine port reads
+the bearer header only. `POST /api/config` cannot change `auth_tokens_file` in any
+mode (403), and in scoped mode neither `api_token`, `auth_jwt` nor
+`auth_panel_https`, so a caller of the API cannot swap the credential store that
+survives a restart. A `config.json` with an unknown or repeated `auth_*` key, or
+a null `auth_tokens_file`, stops the start too. The CI secret scan has a rule for the token shape
 (`fl_[A-Za-z0-9_-]{43}`).
 
-The same token also covers GoStorm's own server on port 8090 (torrent
+With `api_token` alone, the same token also covers GoStorm's own server on port 8090 (torrent
 control, settings, `/stream`, shutdown): every route except `GET /echo`, the
 readiness probe, needs the `Authorization: Bearer` header, and there is no
 query-token form. External clients of 8090 must send it when it is set;
@@ -185,8 +188,9 @@ holding a control character, so a path cannot forge a line. The engine's request
 log line (`WebLogger`, which writes nothing unless a web log is configured) goes
 through the redactor too.
 
-Not covered: `%74oken=` (an encoded key; it needs the gate to strip the token
-after authenticating, ADR 0004 step 3), a JSON `"token":"..."` value, a bare token
+Not covered: `%74oken=` (an encoded key; the gate removes the `token`
+parameter itself after authenticating on the webhook routes, but a line built
+elsewhere from a raw URL is not masked), a JSON `"token":"..."` value, a bare token
 with no `token=` or `Authorization` around it, and the proxy JWT header. What a
 reverse proxy in front logs is outside Flodni.
 
