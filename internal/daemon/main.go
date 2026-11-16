@@ -23,6 +23,7 @@ import (
 	"flodni/internal/opentracker"
 	"flodni/internal/ratelimit"
 	"flodni/internal/readahead"
+	"flodni/internal/redact"
 	"flodni/internal/registry"
 	"flodni/internal/tuner"
 	"flodni/internal/vfs"
@@ -772,6 +773,7 @@ func Run() {
 	controlSrv := &http.Server{
 		Addr:              fmt.Sprintf(":%d", gc().MetricsPort),
 		Handler:           apiauth.Middleware(app.controlToken, logger, routes, apiauth.WithAllowedHosts(gc().EffectiveAllowedHosts())),
+		ErrorLog:          redact.ErrorLog(),
 		ReadHeaderTimeout: 10 * time.Second,
 		ReadTimeout:       60 * time.Second,
 		WriteTimeout:      600 * time.Second,

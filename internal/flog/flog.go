@@ -24,6 +24,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+	"unicode"
 )
 
 // Level is the process-wide threshold. The default is Info.
@@ -207,7 +208,7 @@ func (h *handler) Handle(ctx context.Context, r slog.Record) error {
 			return
 		}
 		b.WriteString(" " + h.group + a.Key + "=")
-		if v == "" || strings.ContainsAny(v, " \t\n\"=") {
+		if v == "" || strings.ContainsFunc(v, func(r rune) bool { return r == ' ' || r == '"' || r == '=' || !unicode.IsPrint(r) }) {
 			v = strconv.Quote(v)
 		}
 		b.WriteString(v)

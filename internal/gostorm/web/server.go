@@ -17,6 +17,7 @@ import (
 	"flodni/internal/gostorm/web/auth"
 	"flodni/internal/gostorm/web/blocker"
 	"flodni/internal/gostorm/web/sslcerts"
+	"flodni/internal/redact"
 
 	"github.com/gin-contrib/location/v2"
 	"github.com/gin-gonic/gin"
@@ -46,6 +47,7 @@ func newServer(addr string, h http.Handler) *http.Server {
 	return &http.Server{
 		Addr:              addr,
 		Handler:           apiauth.GoStorm(APIToken, Logger, h, apiauth.WithAllowedHosts(AllowedHosts)),
+		ErrorLog:          redact.ErrorLog(),
 		ReadHeaderTimeout: 10 * time.Second,
 		IdleTimeout:       120 * time.Second,
 	}
@@ -56,7 +58,7 @@ func newServer(addr string, h http.Handler) *http.Server {
 // is a script, so no page on another origin has a reason to read a response.
 func newRoute() *gin.Engine {
 	route := gin.New()
-	route.Use(log.WebLogger(), blocker.Blocker(), gin.Recovery(), location.Default())
+	route.Use(log.WebLogger(), blocker.Blocker(), log.Recovery(), location.Default())
 	auth.SetupAuth(route)
 	if APIToken != "" {
 		// Requests reaching a handler carried the token (apiauth.GoStorm gates them).

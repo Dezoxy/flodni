@@ -123,7 +123,7 @@ func gate(name, token string, logger *slog.Logger, next http.Handler, open, quer
 
 func refuse(w http.ResponseWriter, r *http.Request, name string, logger *slog.Logger, what, body string) {
 	if logger != nil {
-		logger.Info(fmt.Sprintf("[%s] 403 %s %s %s from %s (Host %q)", name, what, r.Method, r.URL.Path, r.RemoteAddr, r.Host), "name", name, "method", r.Method, "path", r.URL.Path, "remote_addr", r.RemoteAddr, "host", r.Host)
+		logger.Info(fmt.Sprintf("[%s] 403 %s %s %q from %s (Host %q)", name, what, r.Method, r.URL.Path, r.RemoteAddr, r.Host), "name", name, "method", r.Method, "path", r.URL.Path, "remote_addr", r.RemoteAddr, "host", r.Host)
 	}
 	http.Error(w, body, http.StatusForbidden)
 }
@@ -149,7 +149,7 @@ func gateToken(name, token string, logger *slog.Logger, next http.Handler, open,
 			return
 		}
 		if logger != nil {
-			logger.Info(fmt.Sprintf("[%s] 401 %s %s from %s", name, r.Method, r.URL.Path, r.RemoteAddr), "name", name, "method", r.Method, "path", r.URL.Path, "remote_addr", r.RemoteAddr)
+			logger.Info(fmt.Sprintf("[%s] 401 %s %q from %s", name, r.Method, r.URL.Path, r.RemoteAddr), "name", name, "method", r.Method, "path", r.URL.Path, "remote_addr", r.RemoteAddr)
 		}
 		w.Header().Set("WWW-Authenticate", "Bearer")
 		http.Error(w, "unauthorized", http.StatusUnauthorized)
