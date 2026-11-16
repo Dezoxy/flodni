@@ -72,7 +72,7 @@ func newRoute() *gin.Engine {
 	// it is registered, so a route registered earlier would skip the middleware. The
 	// mode is fixed here; a router built for an enforced mode refuses a request with
 	// no identity, never reads it as open.
-	if authTokens().Mode() != apiauth.ModeOpen {
+	if t := authTokens(); t == nil || t.Mode() != apiauth.ModeOpen { // nil: fail closed
 		route.Use(scopeMiddleware())
 	}
 	route.Use(location.Default())
@@ -124,7 +124,7 @@ func Start() {
 		}()
 	}
 
-	switch authTokens().Mode() {
+	switch authTokens().Mode() { // a nil store reads as open here, and is closed by the gate
 	case apiauth.ModeScoped:
 		log.TLogln("Scoped-token auth enabled (all routes except GET /echo)")
 	case apiauth.ModeLegacyToken:

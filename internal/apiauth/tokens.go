@@ -21,7 +21,7 @@ import (
 )
 
 // This file is the token store of ADR 0004: the scopes, the tokens file and its
-// loader, and Lookup. It enforces nothing; the gate that consumes it is a later step.
+// loader, and Lookup. It enforces nothing itself: the gate in apiauth.go consumes it.
 
 // The scope names are declared in scopes.go with the route table. A token holds the
 // eight real scopes, never ScopeOpen.

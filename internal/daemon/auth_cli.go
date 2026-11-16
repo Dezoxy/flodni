@@ -194,3 +194,11 @@ func gostormSettingsProxy(w http.ResponseWriter, r *http.Request) {
 func refusedByHandler(route, reason string) {
 	authRefusals.Observe(route, apiauth.ScopeFor(apiauth.Control, http.MethodPost, route, ""), reason)
 }
+
+// configureEngineAuth hands the engine the credential store the start decided, before
+// the engine listens. A nil store closes the engine (it answers nothing): it is never
+// read as "no credential configured". Run calls it; a test drives it.
+func configureEngineAuth(auth *apiauth.Tokens, cfg *config.Config, log *slog.Logger) {
+	server.SetAPIToken(cfg.APIToken, log)
+	server.SetAuth(auth, authRefusals.Observe)
+}

@@ -134,3 +134,71 @@ func TestAConfigAsSavedHasNoUnknownKeys(t *testing.T) {
 		t.Errorf("a saved config lists unknown keys: %v", cfg.UnknownKeys())
 	}
 }
+
+// Any unknown key that contains "auth" once folded is refused, not only one that starts
+// with auth_: a mistyped auth key must never leave the daemon open with a warning.
+func TestLoadConfigRefusesAnyUnknownKeyContainingAuth(t *testing.T) {
+	for _, key := range []string{"auth-tokens-file", "authTokensFile", "AuthTokensFile", "tokens_auth_file", "x_AUTH_y", "oauth_file"} {
+		writeFile(t, `{"`+key+`": "/p"}`)
+		if _, err := LoadConfig(); err == nil || !strings.Contains(err.Error(), "auth") {
+			t.Errorf("%s: err = %v, want a refusal", key, err)
+		}
+	}
+	writeFile(t, `{"author_note": "x"}`) // a word that merely contains "auth" is still refused: the rule is blunt on purpose
+	if _, err := LoadConfig(); err == nil {
+		t.Error("author_note loaded")
+	}
+}
+
+// api_token gets the duplicate, fold and null refusals: the last duplicate wins in
+// encoding/json, so {"api_token":"x","Api_Token":""} would start with no token.
+func TestLoadConfigProtectsAPIToken(t *testing.T) {
+	for name, body := range map[string]string{
+		"duplicate":      `{"api_token":"x","api_token":""}`,
+		"case variant":   `{"api_token":"x","Api_Token":""}`,
+		"upper":          `{"API_TOKEN":"x"}`,
+		"null":           `{"api_token":null}`,
+		"escaped repeat": `{"api_token":"x","api_token":""}`,
+		"kelvin variant": `{"api_toKen":"x"}`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			writeFile(t, body)
+			if _, err := LoadConfig(); err == nil {
+				t.Fatal("loaded")
+			}
+		})
+	}
+	writeFile(t, `{"api_token":""}`)
+	if _, err := LoadConfig(); err != nil {
+		t.Errorf("an empty api_token is fine: %v", err)
+	}
+	writeFile(t, `{"api_token":"x"}`)
+	if cfg, err := LoadConfig(); err != nil || cfg.APIToken != "x" {
+		t.Errorf("api_token: %v %q", err, cfg.APIToken)
+	}
+}
+
+// auth_jwt is decoded strictly: a repeated or re-cased key inside it refuses (a case
+// variant of allowed_emails would otherwise empty the allow-list silently).
+func TestLoadConfigDecodesAuthJWTStrictly(t *testing.T) {
+	base := `"issuer":"https://i.example","audience":"a","jwks_url":"https://i.example/k","header":"H"`
+	for name, blk := range map[string]string{
+		"duplicate key":     `{` + base + `,"audience":"b"}`,
+		"case variant":      `{` + base + `,"Audience":"b"}`,
+		"emails then empty": `{` + base + `,"allowed_emails":["a@x.example"],"Allowed_Emails":[]}`,
+		"unknown key":       `{` + base + `,"extra":1}`,
+		"escaped repeat":    `{` + base + `,"audience":"b"}`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			writeFile(t, `{"auth_jwt":`+blk+`}`)
+			if _, err := LoadConfig(); err == nil || !strings.Contains(err.Error(), "auth_jwt") {
+				t.Fatalf("err = %v, want an auth_jwt refusal", err)
+			}
+		})
+	}
+	writeFile(t, `{"auth_jwt":{`+base+`,"allowed_emails":["a@x.example"]}}`)
+	cfg, err := LoadConfig()
+	if err != nil || cfg.AuthJWT == nil || len(cfg.AuthJWT.AllowedEmails) != 1 {
+		t.Errorf("a strict block: %v %+v", err, cfg.AuthJWT)
+	}
+}

@@ -2,7 +2,9 @@ package apiauth_test
 
 import (
 	"bytes"
+	"crypto/tls"
 	"errors"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -259,7 +261,7 @@ func TestQueryTokens(t *testing.T) {
 		if got.ID.Name != "webhook" {
 			t.Errorf("%s: identity %q, want webhook", route, got.ID.Name)
 		}
-		for _, wide := range []string{"admin", "readlib", "engine", "library"} {
+		for _, wide := range []string{"admin", "readlib", "engine", "library", "webhookread"} {
 			c := newControl(t, fx)
 			rec, reached := c.do("POST", route+"?token="+fx.Token[wide], "")
 			if reached || rec.Code != http.StatusUnauthorized {
@@ -799,5 +801,227 @@ func TestCheckAmbient(t *testing.T) {
 	}
 	if err := apiauth.CheckAmbient(mk("GET", "p.example"), false); err != nil {
 		t.Errorf("plain GET refused: %v", err)
+	}
+}
+
+// Legacy api_token keeps the v0.2.6 fall-through (a wrong bearer plus the right query
+// token on a webhook passes); scoped mode refuses a present-but-wrong credential.
+func TestLegacyFallsThroughToTheQueryTokenScopedDoesNot(t *testing.T) {
+	const secret = "legacy-secret"
+	reached := 0
+	h := apiauth.Middleware(secret, nil, http.HandlerFunc(func(http.ResponseWriter, *http.Request) { reached++ }))
+	do := func(h http.Handler, target, bearer string) int {
+		req := httptest.NewRequest("POST", target, nil)
+		if bearer != "" {
+			req.Header.Set("Authorization", "Bearer "+bearer)
+		}
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+		return rec.Code
+	}
+	if code := do(h, "/webhook?token="+secret, "wrong"); code != 200 || reached != 1 {
+		t.Errorf("legacy wrong bearer + right query: %d reached=%d, want the v0.2.6 pass", code, reached)
+	}
+	if code := do(h, "/webhook?token=bad", "wrong"); code != 401 {
+		t.Errorf("legacy wrong bearer + wrong query: %d", code)
+	}
+	if code := do(h, "/api/sessions?token="+secret, "wrong"); code != 401 {
+		t.Errorf("legacy off the webhooks: %d", code)
+	}
+	fx := authtest.New(t)
+	c := newControl(t, fx)
+	rec, got := c.do("POST", "/webhook?token="+fx.Token["webhook"], fx.Unknown())
+	if got || rec.Code != 401 {
+		t.Errorf("scoped wrong bearer + right query: %d reached=%v, want refused", rec.Code, got)
+	}
+}
+
+// A nil store handed to the gate is a wiring mistake: it fails closed, never open.
+func TestWithTokensNilFailsClosed(t *testing.T) {
+	called := false
+	next := http.HandlerFunc(func(http.ResponseWriter, *http.Request) { called = true })
+	for name, h := range map[string]http.Handler{
+		"control": apiauth.Middleware("", nil, next, apiauth.WithTokens(nil)),
+		"engine":  apiauth.GoStorm("", nil, next, apiauth.WithTokens(nil)),
+	} {
+		for _, target := range []string{"/api/sessions", "/echo", "/api/health", "/control"} {
+			rec := httptest.NewRecorder()
+			h.ServeHTTP(rec, httptest.NewRequest("GET", target, nil))
+			if called || rec.Code != http.StatusServiceUnavailable {
+				t.Errorf("%s %s: %d called=%v, want 503", name, target, rec.Code, called)
+			}
+		}
+	}
+}
+
+// Credentials are not evaluated on an open route: junk beside it changes nothing, and
+// neither the cookie hook nor the verifier is called.
+func TestOpenRoutesIgnoreEveryCredential(t *testing.T) {
+	fx := authtest.New(t)
+	cookieCalls := 0
+	ck := func(*http.Request) (string, bool, error) { cookieCalls++; return "", true, errors.New("stale") }
+	v := &fakeJWT{err: jwtErr(jwt.ReasonExpired)}
+	for _, target := range []string{"/control", "/api/live", "/api/health"} {
+		c := newControl(t, fx, apiauth.WithCookie(ck), apiauth.WithJWT(v))
+		rec, reached := c.do("GET", target, "junk", "Cookie", "flodni_session=stale", "X-Jwt", "a.b.c")
+		if !reached || rec.Code != 204 {
+			t.Errorf("%s: %d reached=%v, want served", target, rec.Code, reached)
+		}
+	}
+	if cookieCalls != 0 || v.calls != 0 {
+		t.Errorf("the cookie hook ran %d times and the verifier %d on open routes", cookieCalls, v.calls)
+	}
+}
+
+// Flodni-Auth names the panel's sign-in, so it rides every control 401 in scoped mode
+// (a refused cookie included) and never the engine's.
+func TestLoginHeaderOnEveryControl401NeverOnTheEngine(t *testing.T) {
+	fx := authtest.New(t)
+	bad := func(*http.Request) (string, bool, error) { return "", true, errors.New("expired") }
+	for name, opts := range map[string][]apiauth.Option{
+		"no credential": nil, "refused cookie": {apiauth.WithCookie(bad)}, "failed assertion": {apiauth.WithJWT(&fakeJWT{err: jwtErr(jwt.ReasonSignature)})},
+	} {
+		c := newControl(t, fx, opts...)
+		rec, _ := c.do("GET", "/api/config", "", "Cookie", "flodni_session=x", "X-Jwt", "a.b.c")
+		if rec.Code != 401 || rec.Header().Get("Flodni-Auth") != "login" {
+			t.Errorf("%s: %d Flodni-Auth %q", name, rec.Code, rec.Header().Get("Flodni-Auth"))
+		}
+	}
+	h, _, _ := goStorm(t, fx)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest("POST", "/torrents", nil))
+	if rec.Code != 401 || rec.Header().Get("Flodni-Auth") != "" {
+		t.Errorf("engine: %d Flodni-Auth %q, want none", rec.Code, rec.Header().Get("Flodni-Auth"))
+	}
+}
+
+// Names are logged only for a mutating success, on the control port and the engine's.
+func TestNamesAreNotLoggedForReadsOrFailures(t *testing.T) {
+	fx := authtest.New(t)
+	c := newControl(t, fx)
+	c.do("GET", "/api/library/list", fx.Token["read"])
+	c.do("GET", "/api/config", fx.Token["admin"])
+	c.do("POST", "/api/library/add", fx.Token["read"]) // 403
+	c.do("POST", "/api/library/add", fx.Unknown())     // 401
+	c.do("POST", "/api/library/add?token=x", "")       // 401
+	if out := c.logs.String(); strings.Contains(out, "token \"") {
+		t.Errorf("a name was logged for a read or a failure: %q", out)
+	}
+	var logs bytes.Buffer
+	reg := apiauth.NewRegistrar()
+	reg.Handle("/api/library/add", func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusInternalServerError) })
+	h := apiauth.Middleware("", flog.NewText(&logs), reg, apiauth.WithTokens(fx.Tokens), apiauth.WithPattern(reg.Pattern))
+	req := httptest.NewRequest("POST", "/api/library/add", nil)
+	req.Header.Set("Authorization", "Bearer "+fx.Token["library"])
+	h.ServeHTTP(httptest.NewRecorder(), req)
+	if strings.Contains(logs.String(), "token \"") {
+		t.Errorf("a failed write logged a name: %q", logs.String())
+	}
+}
+
+// The gate under concurrent requests (go test -race): shared tokens, observer and logger.
+func TestGateUnderConcurrentRequests(t *testing.T) {
+	fx := authtest.New(t)
+	var o obs
+	var logs bytes.Buffer
+	var mu sync.Mutex
+	reg := apiauth.NewRegistrar()
+	reg.Handle("/api/library/add", func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(204) })
+	reg.Handle("/api/sessions", func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(204) })
+	ctl := apiauth.Middleware("", flog.NewText(&syncWriter{&mu, &logs}), reg, apiauth.WithTokens(fx.Tokens), apiauth.WithPattern(reg.Pattern),
+		apiauth.WithObserver(o.observe), apiauth.WithJWT(&fakeJWT{}))
+	eng := apiauth.GoStorm("", nil, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(204) }),
+		apiauth.WithTokens(fx.Tokens), apiauth.WithObserver(o.observe))
+	var wg sync.WaitGroup
+	for i := 0; i < 32; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			for j := 0; j < 50; j++ {
+				for _, tc := range []struct {
+					h      http.Handler
+					method string
+					target string
+					bearer string
+					want   int
+				}{
+					{ctl, "POST", "/api/library/add", fx.Token["library"], 204},
+					{ctl, "POST", "/api/library/add", fx.Token["read"], 403},
+					{ctl, "GET", "/api/sessions", fx.Unknown(), 401},
+					{ctl, "GET", "/api/sessions?token=x", "", 401},
+					{eng, "POST", "/torrents", fx.Token["engine"], 204},
+					{eng, "POST", "/torrents", "", 401},
+				} {
+					req := httptest.NewRequest(tc.method, tc.target, nil)
+					if tc.bearer != "" {
+						req.Header.Set("Authorization", "Bearer "+tc.bearer)
+					}
+					rec := httptest.NewRecorder()
+					tc.h.ServeHTTP(rec, req)
+					if rec.Code != tc.want {
+						t.Errorf("%s %s: %d, want %d", tc.method, tc.target, rec.Code, tc.want)
+						return
+					}
+				}
+			}
+		}(i)
+	}
+	wg.Wait()
+}
+
+type syncWriter struct {
+	mu *sync.Mutex
+	w  io.Writer
+}
+
+func (s *syncWriter) Write(b []byte) (int, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.w.Write(b)
+}
+
+// The CSRF rules the first pass left unpinned.
+func TestCheckAmbientDetails(t *testing.T) {
+	mk := func(hdr ...[2]string) *http.Request {
+		r := httptest.NewRequest("POST", "/x", nil)
+		r.Host = "p.example"
+		r.Header.Set("Content-Type", "application/json")
+		for _, h := range hdr {
+			r.Header.Add(h[0], h[1])
+		}
+		return r
+	}
+	ok := [2]string{"Origin", "https://p.example"}
+	if err := apiauth.CheckAmbient(mk(ok), false); err != nil {
+		t.Fatalf("baseline refused: %v", err)
+	}
+	for name, r := range map[string]*http.Request{
+		"repeated Origin":                 mk(ok, ok),
+		"repeated Sec-Fetch-Site":         mk(ok, [2]string{"Sec-Fetch-Site", "same-origin"}, [2]string{"Sec-Fetch-Site", "same-origin"}),
+		"forwarded proto list, https":     mk([2]string{"Origin", "http://p.example"}, [2]string{"X-Forwarded-Proto", "https, http"}),
+		"origin trailing dot, other host": mk([2]string{"Origin", "https://q.example."}),
+	} {
+		if apiauth.CheckAmbient(r, false) == nil {
+			t.Errorf("%s: accepted", name)
+		}
+	}
+	// A request that arrived over TLS needs an https Origin.
+	r := mk([2]string{"Origin", "http://p.example"})
+	r.TLS = &tls.ConnectionState{}
+	if apiauth.CheckAmbient(r, false) == nil {
+		t.Error("an http Origin on a TLS arrival was accepted")
+	}
+	r = mk(ok)
+	r.TLS = &tls.ConnectionState{}
+	if err := apiauth.CheckAmbient(r, false); err != nil {
+		t.Errorf("an https Origin on a TLS arrival refused: %v", err)
+	}
+	// A trailing dot on the Origin is the same host as without.
+	if err := apiauth.CheckAmbient(mk([2]string{"Origin", "https://p.example."}), false); err != nil {
+		t.Errorf("origin with a trailing dot refused: %v", err)
+	}
+	r = mk([2]string{"Origin", "http://p.example"}, [2]string{"X-Forwarded-Proto", "http, https"})
+	if err := apiauth.CheckAmbient(r, false); err != nil {
+		t.Errorf("the first X-Forwarded-Proto element is http: %v", err)
 	}
 }

@@ -29,6 +29,10 @@ var (
 	// engine's own APIToken decides (open, or legacy).
 	Auth *apiauth.Tokens
 
+	// AuthClosed says the daemon handed over no store (SetAuth(nil)): the engine then
+	// answers nothing instead of falling back to APIToken or to open.
+	AuthClosed bool
+
 	// AuthObserver is told of every refusal of the router's half (and of the outer
 	// gate's). Nil counts nothing.
 	AuthObserver apiauth.Observer
@@ -49,6 +53,9 @@ const peekCap = 64 << 10
 func authTokens() *apiauth.Tokens {
 	if Auth != nil {
 		return Auth
+	}
+	if AuthClosed {
+		return nil // fail closed
 	}
 	t, _ := apiauth.Load(apiauth.LoadOptions{APIToken: APIToken}) // api_token alone cannot fail
 	return t
@@ -100,17 +107,20 @@ func scopeMiddleware() gin.HandlerFunc {
 			return
 		}
 		c.Next()
-		if !id.Internal && mutating(method, need) && c.Writer.Status() < http.StatusBadRequest {
+		if !id.Internal && c.Writer.Status() < http.StatusBadRequest && loggedWrite(method, pattern, c.GetString(api.BoundActionKey)) {
 			log.TLogln(fmt.Sprintf("[Auth] token %q %s %q", id.Name, method, label))
 		}
 	}
 }
 
-// mutating: a write the log names the token for, as on the control port.
-func mutating(method string, need apiauth.Scope) bool {
+// loggedWrite: a success the log names the token for, as on the control port. The
+// action is the one the handler bound, not one the gate guessed (an admin caller is
+// never peeked), so a list or a get is not logged as a write.
+func loggedWrite(method, pattern, bound string) bool {
 	if method == http.MethodGet || method == http.MethodHead || method == http.MethodOptions {
 		return false
 	}
+	need := apiauth.ScopeFor(apiauth.Engine, method, pattern, bound)
 	return need == apiauth.ScopeAdmin || need == apiauth.ScopeUpload
 }
 
@@ -182,6 +192,10 @@ func peekAction(c *gin.Context) (action string, status int, why string) {
 	return action, 0, ""
 }
 
+// Handler is the engine's full handler as the listeners serve it: the outer gate around
+// the router. The wiring tests drive it; Start serves the same pair.
+func Handler() http.Handler { return newServer("", newRoute()).Handler }
+
 // ---- Flodni's own calls to its engine ----
 
 // handlerBox lets the in-process transport hold the router once Start has built it.
@@ -234,7 +248,10 @@ func (inprocTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 	select {
 	case <-rw.headerSent:
 	case <-req.Context().Done():
+		// The caller left before the headers: end the handler's writes, or its first
+		// Write blocks for good and the goroutine leaks.
 		cancel()
+		_ = rw.pr.CloseWithError(req.Context().Err())
 		return nil, req.Context().Err()
 	}
 	resp := rw.response(req)

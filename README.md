@@ -153,8 +153,10 @@ string, or a bad or reserved name; when `api_token` is also set (remove it:
 there is no alias); when `auth_jwt` is set without a tokens file or is invalid;
 and when `gostorm_url` is not a loopback address. A `config.json` that cannot be
 read or parsed also stops the start in every mode, because the pointer to the
-tokens file lives there, and so does one with an unknown or repeated `auth_*`
-key (a typo such as `auth_token_file`), or `"auth_tokens_file": null`. Any other
+tokens file lives there, and so does one with an unknown key that mentions
+`auth` (`auth_token_file`, `auth-tokens-file`), a repeated or re-cased `api_token`
+or `auth_*` key, a null `api_token` or `auth_tokens_file`, or an `auth_jwt` block
+that repeats or re-cases a key. Any other
 unknown top-level key only logs one warning that lists the names. A file
 writable by group or others only logs a warning. `GET /api/startup` and the
 `[Startup] report` line carry an `auth` section (`mode` of `open`,

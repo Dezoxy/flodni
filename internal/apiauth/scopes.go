@@ -1,8 +1,7 @@
 package apiauth
 
 // The route-to-scope table of ADR 0004: the one place that says what each route
-// on the two servers needs. Nothing enforces it yet (the gate still takes one
-// token); later steps read it on both ports and for the refusal metric.
+// on the two servers needs. Both gates read it, and so does the refusal metric.
 //
 // Unknown means admin: a route, a method or an engine action absent from the
 // table is authorized as admin, so a forgotten row costs the caller a refusal,

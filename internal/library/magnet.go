@@ -78,7 +78,7 @@ func CheckMagnet(magnet string) error {
 // btihOf returns the hash of the first xt of a magnet link.
 func btihOf(magnet string) (string, error) {
 	u, err := url.Parse(magnet)
-	if err != nil || !strings.EqualFold(u.Scheme, "magnet") || u.Opaque != "" || u.Host != "" {
+	if err != nil || !strings.EqualFold(u.Scheme, "magnet") || u.Opaque != "" || u.Host != "" || u.Path != "" {
 		return "", errf(http.StatusBadRequest, "only a magnet: link is accepted, not a URL or a path")
 	}
 	xts := u.Query()["xt"]

@@ -27,8 +27,13 @@ func SetAPIToken(token string, logger *slog.Logger) {
 // every refusal. Call it before Start.
 func SetAuth(tokens *apiauth.Tokens, observe apiauth.Observer) {
 	web.Auth = tokens
+	web.AuthClosed = tokens == nil // no store: the engine answers nothing
 	web.AuthObserver = observe
 }
+
+// Handler is the engine's whole handler as its listeners serve it (outer gate and
+// router), for the wiring tests.
+func Handler() http.Handler { return web.Handler() }
 
 // InProcess is the transport for Flodni's own calls to its engine in scoped mode:
 // the request goes straight to the engine's router in this process, with no

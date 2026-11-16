@@ -313,8 +313,7 @@ func Run() {
 
 	// Before the engine starts serving streams (Dezoxy fork, see torrstor.BoundedReadahead).
 	torrstor.BoundedReadahead = !gc().PumpOnOpen
-	server.SetAPIToken(gc().APIToken, logger)
-	server.SetAuth(auth, authRefusals.Observe)
+	configureEngineAuth(auth, gc(), logger)
 	server.SetAllowedHosts(gc().EngineAllowedHosts())
 	// Keep-alive counters (Reliability step 8, phase a): count the engine's idle
 	// closes. Set before the engine and its ticker start. The hook only counts; it

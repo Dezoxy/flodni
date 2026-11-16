@@ -196,6 +196,11 @@ func refuseScopedSave(w http.ResponseWriter, r *http.Request, newCfg *config.Con
 		refuseOpenPort(w, r, http.StatusForbidden, "auth_panel_https is startup-only; edit config.json, then restart flodni")
 		return true
 	}
+	if newCfg.GoStormBaseURL == "" {
+		// A partial post leaves it out: keep the running value (loopback, or the start
+		// refused), never write an empty one the next start would refuse.
+		newCfg.GoStormBaseURL = run.GoStormBaseURL
+	}
 	if u := newCfg.GoStormBaseURL; u != "" {
 		if err := apiauth.RequireLoopback(u); err != nil {
 			refuseOpenPort(w, r, http.StatusForbidden, "gostorm_url must stay a loopback address in scoped mode: the engine is called without a credential")

@@ -36,9 +36,14 @@ func PeekAction(body []byte) (string, error) {
 // (open mode, or a caller who holds admin) and the check does nothing.
 const PeekedActionKey = "peeked_action"
 
-// refuseActionMismatch answers 400 when the gate peeked an action and the handler
+// BoundActionKey is the gin context key the handlers set to the action they bound from
+// the body. The engine's log decides from it whether a success was a write.
+const BoundActionKey = "bound_action"
+
+// refuseActionMismatch records the bound action (BoundActionKey) and answers 400 when the gate peeked an action and the handler
 // bound another. It reports whether it refused.
 func refuseActionMismatch(c *gin.Context, bound string) bool {
+	c.Set(BoundActionKey, bound)
 	if peeked, ok := c.Get(PeekedActionKey); ok && peeked != bound {
 		c.AbortWithStatus(http.StatusBadRequest)
 		return true

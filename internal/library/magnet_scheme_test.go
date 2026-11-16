@@ -43,6 +43,10 @@ var badMagnets = []string{
 	"magnet://host/?xt=urn:btih:" + hex40,
 	"magnet:\n?xt=urn:btih:" + hex40,
 	"torrs://" + hex40,
+	"magnet:/etc/passwd?xt=urn:btih:" + hex40, // a path is not a magnet
+	// The engine rewrites &amp; to &, which makes the percent-encoded xt (H2) the first
+	// one it reads, where the library read H1: only the re-check refuses it.
+	"magnet:?a=1&amp;xt=urn%3Abtih%3A" + strings.Repeat("b", 40) + "&xt=urn:btih:" + hex40,
 	hex40, // a bare hash is the hash field, not a magnet
 }
 

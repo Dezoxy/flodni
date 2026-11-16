@@ -18,7 +18,7 @@ import (
 type Fixture struct {
 	Tokens *apiauth.Tokens
 	// Token maps a fixture token name to its secret. The names are the eight scopes
-	// (each token holds that scope alone) and "readlib", which holds read and library.
+	// (each token holds that scope alone), "readlib" (read and library) and "webhookread" (webhook and read).
 	Token map[string]string
 	// Scopes maps a fixture token name to the scopes it holds as written.
 	Scopes map[string][]string
@@ -48,6 +48,7 @@ func New(t testing.TB) *Fixture {
 		add(string(s), string(s))
 	}
 	add("readlib", "read", "library")
+	add("webhookread", "webhook", "read") // holds webhook, but not exactly [webhook]
 	f.Path = filepath.Join(t.TempDir(), "tokens.json")
 	if err := os.WriteFile(f.Path, []byte(`{"tokens":[`+strings.Join(entries, ",")+`]}`), 0o600); err != nil {
 		t.Fatal(err)

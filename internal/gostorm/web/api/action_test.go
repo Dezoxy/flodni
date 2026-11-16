@@ -88,3 +88,19 @@ func TestHandlersWithNoPeekedActionAreUnchanged(t *testing.T) {
 		t.Error("refused with no error: the mismatch check ran with nothing peeked")
 	}
 }
+
+// The handlers record the action they bound, which the engine's log decides from.
+func TestHandlersRecordTheBoundAction(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		handle gin.HandlerFunc
+	}{{"torrents", torrents}, {"settings", settings}} {
+		rec := httptest.NewRecorder()
+		c, _ := gin.CreateTestContext(rec)
+		c.Request = httptest.NewRequest("POST", "/"+tc.name, strings.NewReader(`{"action":"zzz"}`))
+		tc.handle(c)
+		if got := c.GetString(BoundActionKey); got != "zzz" {
+			t.Errorf("%s: bound action %q, want zzz", tc.name, got)
+		}
+	}
+}

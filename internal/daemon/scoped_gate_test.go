@@ -3,10 +3,8 @@ package daemon
 import (
 	"bytes"
 	"encoding/json"
-	"io"
 	"net/http"
 	"net/http/httptest"
-	"net/url"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -15,7 +13,10 @@ import (
 
 	"flodni/internal/apiauth"
 	"flodni/internal/apiauth/authtest"
+	"flodni/internal/config"
 	"flodni/internal/flog"
+	server "flodni/internal/gostorm"
+	"flodni/internal/gostorm/web"
 	"flodni/internal/promtext"
 )
 
@@ -311,7 +312,79 @@ func TestEngineClientIsInProcessOnlyInScopedMode(t *testing.T) {
 			t.Errorf("%s must keep the default transport: a remote engine still works there", m)
 		}
 	}
-	u, _ := url.Parse("http://x")
-	_ = u
-	_ = io.Discard
+}
+
+// An admin who posts only the setting they change must not leave gostorm_url empty in
+// the file: the next start would refuse it. Empty means "keep the running value".
+func TestScopedSavePartialBodyKeepsTheEngineURL(t *testing.T) {
+	s := newScopedFixture(t, "")
+	if code, resp := s.do("POST", "/api/config", s.fx.Token["admin"], `{"log_level":"debug"}`); code != http.StatusOK {
+		t.Fatalf("save: %d %s", code, resp)
+	}
+	var saved map[string]any
+	if err := json.Unmarshal([]byte(readCfgFile(t, s.cfgPath)), &saved); err != nil {
+		t.Fatal(err)
+	}
+	if saved["gostorm_url"] != "http://127.0.0.1:8090" {
+		t.Errorf("gostorm_url = %v, want the running value kept", saved["gostorm_url"])
+	}
+	cfg, err := config.LoadConfig()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := apiauth.RequireLoopback(cfg.GoStormBaseURL); err != nil {
+		t.Errorf("the saved file would not start: %v", err)
+	}
+}
+
+// 8090 enforces the same tokens as 9080 through the wiring Run uses (configureEngineAuth),
+// and a missing store closes the engine instead of opening it.
+func TestEngineAuthWiringEnforcesTheSameTokensAsTheControlPort(t *testing.T) {
+	s := newScopedFixture(t, "")
+	prevAuth, prevClosed, prevTok := web.Auth, web.AuthClosed, web.APIToken
+	t.Cleanup(func() { web.Auth, web.AuthClosed, web.APIToken = prevAuth, prevClosed, prevTok })
+	configureEngineAuth(app.auth, gc(), logger)
+	eng := server.Handler()
+	engineCode := func(method, target, bearer, body string) int {
+		req := httptest.NewRequest(method, target, strings.NewReader(body))
+		if bearer != "" {
+			req.Header.Set("Authorization", "Bearer "+bearer)
+		}
+		rec := httptest.NewRecorder()
+		eng.ServeHTTP(rec, req)
+		return rec.Code
+	}
+	for _, cred := range []string{"", "wrong", "webhook", "metrics", "read", "library", "scrape"} {
+		bearer := s.fx.Token[cred]
+		if cred == "wrong" {
+			bearer = s.fx.Unknown()
+		}
+		want := 403
+		if cred == "" || cred == "wrong" {
+			want = 401
+		}
+		if got := engineCode("POST", "/torrents", bearer, `{"action":"list"}`); got != want {
+			t.Errorf("engine /torrents as %q: %d, want %d", cred, got, want)
+		}
+		if got := engineCode("POST", "/shutdown", bearer, ""); got != want {
+			t.Errorf("engine /shutdown as %q: %d, want %d", cred, got, want)
+		}
+		// The control port refuses the same credential on a route of the same class.
+		if code, _ := s.do("POST", "/api/restart", bearer, ""); code != want {
+			t.Errorf("control /api/restart as %q: %d, want %d", cred, code, want)
+		}
+	}
+	// An engine token passes the gate (400: the cache route wants a hash), and /echo is open.
+	if got := engineCode("POST", "/cache", s.fx.Token["engine"], `{"action":"get"}`); got != http.StatusBadRequest {
+		t.Errorf("engine token on /cache: %d, want it past the gate", got)
+	}
+	if got := engineCode("GET", "/echo", "", ""); got != http.StatusOK {
+		t.Errorf("/echo: %d", got)
+	}
+	// No store: nothing is answered.
+	configureEngineAuth(nil, gc(), logger)
+	eng = server.Handler()
+	if got := engineCode("GET", "/echo", "", ""); got != http.StatusServiceUnavailable {
+		t.Errorf("no store, /echo: %d, want 503", got)
+	}
 }

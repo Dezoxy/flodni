@@ -70,10 +70,11 @@ func originMatchesHost(r *http.Request, panelHTTPS bool) bool {
 	if scheme != "http" && scheme != "https" {
 		return false
 	}
-	if scheme != "https" && (panelHTTPS || r.TLS != nil || strings.EqualFold(strings.TrimSpace(r.Header.Get("X-Forwarded-Proto")), "https")) {
+	fwd, _, _ := strings.Cut(r.Header.Get("X-Forwarded-Proto"), ",") // the first hop's word
+	if scheme != "https" && (panelHTTPS || r.TLS != nil || strings.EqualFold(strings.TrimSpace(fwd), "https")) {
 		return false
 	}
-	oHost, oPort := strings.ToLower(u.Hostname()), u.Port()
+	oHost, oPort := strings.TrimSuffix(strings.ToLower(u.Hostname()), "."), u.Port()
 	if oPort == "" {
 		oPort = defaultPort(scheme)
 	}

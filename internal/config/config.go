@@ -521,20 +521,52 @@ var knownKeys = func() map[string]bool {
 	return set
 }()
 
-// hasAuthPrefix reports whether key folds to "auth_" the way encoding/json folds
-// keys (case, U+017F onto s, U+212A onto k), so a key it would route to an auth
-// setting cannot slip past a byte comparison.
-func hasAuthPrefix(key string) bool {
-	r := []rune(key)
-	return len(r) >= 5 && strings.EqualFold(string(r[:5]), "auth_")
+// mentionsAuth reports whether a key, folded the way encoding/json folds keys, contains
+// "auth": a key like auth-tokens-file or authTokensFile is a mistyped auth setting, and
+// would otherwise only warn and leave the daemon open. (Neither letter of "auth" has a
+// special fold partner, so a lower-casing is the fold.)
+func mentionsAuth(key string) bool { return strings.Contains(strings.ToLower(key), "auth") }
+
+// jwtKeys are the exact keys of the auth_jwt block.
+var jwtKeys = map[string]bool{"issuer": true, "audience": true, "jwks_url": true, "header": true, "allowed_emails": true}
+
+// checkExactKeys refuses an object that repeats a key or uses one that is not one of
+// allowed, byte for byte: encoding/json keeps the last duplicate and matches keys
+// without regard to case, so a repeated key could swap a setting silently.
+func checkExactKeys(raw json.RawMessage, allowed map[string]bool) error {
+	dec := json.NewDecoder(bytes.NewReader(raw))
+	if tok, err := dec.Token(); err != nil || tok != json.Delim('{') {
+		return nil // not an object: the typed decode has already refused or accepted it
+	}
+	seen := map[string]bool{}
+	for dec.More() {
+		tok, err := dec.Token()
+		if err != nil {
+			return nil
+		}
+		key, _ := tok.(string)
+		if !allowed[key] {
+			return fmt.Errorf("the key %q is not one of the block's exact keys", key)
+		}
+		if seen[key] {
+			return fmt.Errorf("the key %q is given twice", key)
+		}
+		seen[key] = true
+		var skip json.RawMessage
+		if err := dec.Decode(&skip); err != nil {
+			return nil
+		}
+	}
+	return nil
 }
 
 // checkTopLevelKeys reads the keys of the top-level object byte for byte. It refuses a
-// key that folds to auth_ but is not one of the exact auth keys, an auth key given
-// twice, and a null auth_tokens_file (null decodes as the empty string, which reads
-// as "no tokens file"). Any other key no setting names is returned for one warning.
-// The data has already decoded, so the syntax is valid; it is read without regard
-// to case or folding, which is the point.
+// key that mentions auth (or is api_token in another spelling) but is not the exact
+// setting, an auth key or api_token given twice, a null auth_tokens_file or api_token
+// (null decodes as the empty string, which reads as "no credential"), and an auth_jwt
+// block with a repeated or re-cased key. Any other key no setting names is returned
+// for one warning. The data has already decoded, so the syntax is valid; it is read
+// without regard to case or folding, which is the point.
 func checkTopLevelKeys(data []byte) ([]string, error) {
 	dec := json.NewDecoder(bytes.NewReader(data))
 	if tok, err := dec.Token(); err != nil || tok != json.Delim('{') {
@@ -552,17 +584,25 @@ func checkTopLevelKeys(data []byte) ([]string, error) {
 		if err := dec.Decode(&raw); err != nil {
 			return nil, nil
 		}
+		isNull := string(bytes.TrimSpace(raw)) == "null"
 		switch {
-		case authKeys[key]:
+		case authKeys[key] || key == "api_token":
 			if seen[key] {
-				return nil, fmt.Errorf("the auth key %q is given twice", key)
+				return nil, fmt.Errorf("the credential key %q is given twice", key)
 			}
 			seen[key] = true
-			if key == "auth_tokens_file" && string(bytes.TrimSpace(raw)) == "null" {
-				return nil, errors.New("auth_tokens_file is null: write a path, or remove the key")
+			if isNull && (key == "auth_tokens_file" || key == "api_token") {
+				return nil, fmt.Errorf("%s is null: write a value, or remove the key", key)
 			}
-		case hasAuthPrefix(key):
+			if key == "auth_jwt" && !isNull {
+				if err := checkExactKeys(raw, jwtKeys); err != nil {
+					return nil, fmt.Errorf("auth_jwt: %w", err)
+				}
+			}
+		case mentionsAuth(key):
 			return nil, fmt.Errorf("the key %q looks like an auth setting but is not one (known: auth_tokens_file, auth_jwt, auth_panel_https)", key)
+		case strings.EqualFold(key, "api_token"):
+			return nil, fmt.Errorf("the key %q is api_token in another spelling: use the exact key", key)
 		case !knownKeys[key]:
 			unknown = append(unknown, key)
 		}

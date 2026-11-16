@@ -84,6 +84,9 @@ type options struct {
 	cookie     CookieCredential
 	observer   Observer
 	panelHTTPS bool
+	// tokensSet: WithTokens was given, even with nil. A nil store is a wiring mistake and
+	// fails closed; it is never read as "no credential configured".
+	tokensSet bool
 }
 
 // JWTVerifier checks the proxy's assertion (internal/apiauth/jwt.Verifier).
@@ -98,7 +101,9 @@ type CookieCredential func(r *http.Request) (name string, present bool, err erro
 
 // WithTokens sets the credential store, replacing the token argument. A nil or open
 // store leaves the port open.
-func WithTokens(t *Tokens) Option { return func(o *options) { o.tokens = t } }
+func WithTokens(t *Tokens) Option {
+	return func(o *options) { o.tokens, o.tokensSet = t, true }
+}
 
 // WithPattern gives the control gate the router's own pattern for a request (the
 // registrar's Pattern), the one the scope table is keyed by. A scoped control gate
@@ -176,6 +181,12 @@ func gate(p profile, token string, logger *slog.Logger, next http.Handler, opts 
 		opt(&o)
 	}
 	tokens := o.tokens
+	if tokens == nil && o.tokensSet {
+		// Fail closed: answer nothing at all, open routes included.
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			http.Error(w, "authentication is not configured", http.StatusServiceUnavailable)
+		})
+	}
 	if tokens == nil {
 		tokens, _ = Load(LoadOptions{APIToken: token}) // api_token alone cannot fail
 	}
@@ -306,8 +317,8 @@ func (g *gater) deny(w http.ResponseWriter, r *http.Request, d *denial) {
 	}
 	if d.status == http.StatusUnauthorized {
 		w.Header().Set("WWW-Authenticate", "Bearer")
-		if g.tokens.Mode() == ModeScoped {
-			w.Header().Set("Flodni-Auth", "login") // the panel shows its sign-in form on it
+		if g.tokens.Mode() == ModeScoped && g.p.server == Control {
+			w.Header().Set("Flodni-Auth", "login") // the panel shows its sign-in form on it; the engine has none
 		}
 	}
 	http.Error(w, d.body, d.status)
@@ -339,10 +350,14 @@ func (g *gater) authenticate(r *http.Request) (Identity, *http.Request, *denial)
 	}
 	if v, ok := bearerOf(r); ok {
 		name, scopes, found := g.tokens.Lookup(v)
-		if !found {
+		if found {
+			return pass(name, scopes)
+		}
+		// A scoped store refuses a present-but-wrong credential. api_token alone keeps
+		// v0.2.6, where a wrong bearer fell through to the query token on a webhook.
+		if g.tokens.Mode() != ModeLegacyToken || !onWebhook || q.Get("token") == "" {
 			return Identity{}, r, unauthorized(ReasonInvalid)
 		}
-		return pass(name, scopes)
 	}
 	if onWebhook && hasParam {
 		if v := q.Get("token"); v != "" {

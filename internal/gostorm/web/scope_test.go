@@ -6,6 +6,7 @@ import (
 	"compress/gzip"
 	"context"
 	"io"
+	stdlog "log"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -37,6 +38,8 @@ type reach struct {
 	Body                   string
 	Enforced               bool
 	ID                     apiauth.Identity
+	Peeked                 string
+	HasPeeked              bool
 }
 
 func newEngineRun(t *testing.T) *engineRun {
@@ -55,7 +58,9 @@ func newEngineRun(t *testing.T) *engineRun {
 		body, _ := io.ReadAll(c.Request.Body)
 		id, _ := apiauth.IdentityFrom(c.Request.Context())
 		e.mu.Lock()
-		e.reached = append(e.reached, reach{c.Request.Method, c.Request.URL.Path, c.FullPath(), string(body), c.GetBool(api.TokenEnforcedKey), id})
+		peeked, hasPeeked := c.Get(api.PeekedActionKey)
+		ps, _ := peeked.(string)
+		e.reached = append(e.reached, reach{c.Request.Method, c.Request.URL.Path, c.FullPath(), string(body), c.GetBool(api.TokenEnforcedKey), id, ps, hasPeeked})
 		e.mu.Unlock()
 		c.AbortWithStatus(http.StatusNoContent)
 	}
@@ -745,5 +750,153 @@ func TestTLSListenerEnforcesTheSameTokens(t *testing.T) {
 	}
 	if got := get(e.fx.Token["engine"]); got != 204 {
 		t.Errorf("engine token over TLS: %d", got)
+	}
+}
+
+// The middleware itself records the action it authorized (the handlers cross-check it),
+// for a caller it had to peek; an admin caller is not peeked and is not capped.
+func TestPeekedActionIsSetByTheMiddlewareAndAdminIsNotPeeked(t *testing.T) {
+	e := newEngineRun(t)
+	if _, reached := e.do("POST", "/torrents", e.fx.Token["engine"], `{"action":"list"}`); !reached {
+		t.Fatal("engine list refused")
+	}
+	if last := e.reached[len(e.reached)-1]; !last.HasPeeked || last.Peeked != "list" {
+		t.Errorf("engine caller: peeked %q (set=%v), want list", last.Peeked, last.HasPeeked)
+	}
+	big := `{"action":"rem","hash":"x","pad":"` + strings.Repeat("x", 100<<10) + `"}`
+	if rec, reached := e.do("POST", "/torrents", e.fx.Token["admin"], big); !reached || rec.Code != 204 {
+		t.Fatalf("admin with a 100 KiB body: %d reached=%v, want it uncapped", rec.Code, reached)
+	}
+	last := e.reached[len(e.reached)-1]
+	if last.HasPeeked || last.Body != big {
+		t.Errorf("admin was peeked (%v) or its body changed (%d bytes)", last.HasPeeked, len(last.Body))
+	}
+	if rec, _ := e.do("POST", "/torrents", e.fx.Token["engine"], big); rec.Code != http.StatusRequestEntityTooLarge {
+		t.Errorf("engine with the same body: %d, want 413", rec.Code)
+	}
+}
+
+// ---- names in the engine log, from the action the handler bound ----
+
+func captureStdLog(t *testing.T) *bytes.Buffer {
+	t.Helper()
+	var buf bytes.Buffer
+	prevOut, prevFlags := stdlog.Writer(), stdlog.Flags()
+	stdlog.SetOutput(&buf)
+	t.Cleanup(func() { stdlog.SetOutput(prevOut); stdlog.SetFlags(prevFlags) })
+	return &buf
+}
+
+func TestEngineLogsATokenNameOnlyForAMutatingSuccess(t *testing.T) {
+	e := newEngineRun(t)
+	onScopePass = nil // the real chain, with the real handlers
+	buf := captureStdLog(t)
+	// A read through the real settings handler: a 200 that is not a write.
+	if rec, _ := e.do("POST", "/settings", e.fx.Token["admin"], `{"action":"get"}`); rec.Code != 200 {
+		t.Fatalf("settings get: %d", rec.Code)
+	}
+	// A refused write, a failed write and a GET.
+	e.do("POST", "/torrents", e.fx.Token["engine"], `{"action":"rem","hash":"x"}`) // 403
+	e.do("POST", "/torrents", e.fx.Token["admin"], `{"action":"zzz"}`)             // 400
+	e.do("GET", "/echo", "", "")
+	if out := buf.String(); strings.Contains(out, "[Auth] token") {
+		t.Errorf("a name was logged for a read, a refusal or a failure: %q", out)
+	}
+	// A write that succeeds, through a route the test adds behind the same chain.
+	route := newRoute()
+	route.POST("/probe-write", func(c *gin.Context) { c.Status(200) })
+	route.GET("/probe-read", func(c *gin.Context) { c.Status(200) })
+	route.POST("/probe-fail", func(c *gin.Context) { c.Status(500) })
+	h := newServer("", route).Handler
+	for _, tc := range []struct {
+		method, path string
+		wantLog      bool
+	}{{"POST", "/probe-write", true}, {"GET", "/probe-read", false}, {"POST", "/probe-fail", false}} {
+		buf.Reset()
+		req := httptest.NewRequest(tc.method, tc.path, nil)
+		req.Header.Set("Authorization", "Bearer "+e.fx.Token["admin"])
+		h.ServeHTTP(httptest.NewRecorder(), req)
+		got := strings.Contains(buf.String(), `[Auth] token "admin" `+tc.method)
+		if got != tc.wantLog {
+			t.Errorf("%s %s: logged=%v, want %v: %q", tc.method, tc.path, got, tc.wantLog, buf.String())
+		}
+		if strings.Contains(buf.String(), e.fx.Token["admin"]) {
+			t.Error("the token itself was logged")
+		}
+	}
+}
+
+// The action logged is the one the handler bound, so an admin caller (never peeked) does
+// not turn every list or get into a logged write.
+func TestLoggedWriteFollowsTheBoundAction(t *testing.T) {
+	for _, tc := range []struct {
+		method, pattern, bound string
+		want                   bool
+	}{
+		{"POST", "/torrents", "list", false}, {"POST", "/torrents", "get", false}, {"POST", "/torrents", "active", false},
+		{"POST", "/torrents", "add", true}, {"POST", "/torrents", "rem", true}, {"POST", "/torrents", "drop", true},
+		{"POST", "/torrents", "set", true}, {"POST", "/torrents", "", true},
+		{"POST", "/settings", "get", false}, {"POST", "/settings", "set", true}, {"POST", "/settings", "def", true},
+		{"POST", "/cache", "get", false}, {"POST", "/torrent/upload", "", true}, {"POST", "/shutdown", "", true},
+		{"POST", "/storage/settings", "", true}, {"GET", "/storage/settings", "", false}, {"GET", "/stream", "", false},
+		{"HEAD", "/play/:hash/:id", "", false}, {"POST", "", "", true},
+	} {
+		if got := loggedWrite(tc.method, tc.pattern, tc.bound); got != tc.want {
+			t.Errorf("%s %s action %q: logged = %v, want %v", tc.method, tc.pattern, tc.bound, got, tc.want)
+		}
+	}
+}
+
+// A caller that gives up before the headers (a disconnect, the client timeout) ends the
+// handler: its first Write fails instead of blocking for good.
+func TestInProcessTransportEndsTheHandlerWhenTheCallerGivesUp(t *testing.T) {
+	prev := inproc.Load()
+	t.Cleanup(func() { inproc.Store(prev) })
+	release := make(chan struct{})
+	done := make(chan error, 1)
+	inproc.Store(&handlerBox{h: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		<-release
+		_, err := w.Write([]byte("late"))
+		done <- err
+	})})
+	ctx, cancel := context.WithCancel(context.Background())
+	req, _ := http.NewRequestWithContext(ctx, "GET", "http://x.invalid/slow", nil)
+	errc := make(chan error, 1)
+	go func() { _, err := (&http.Client{Transport: InProcess()}).Do(req); errc <- err }()
+	time.Sleep(50 * time.Millisecond)
+	cancel()
+	if err := <-errc; err == nil {
+		t.Fatal("a cancelled call returned a response")
+	}
+	close(release)
+	select {
+	case err := <-done:
+		if err == nil {
+			t.Error("the handler's write succeeded for a caller that left")
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("the handler is still blocked in Write: its goroutine leaked")
+	}
+}
+
+// When the daemon says auth is in force but hands over no store, the engine answers
+// nothing (it does not fall back to api_token or to open).
+func TestEngineFailsClosedWhenTheStoreIsMissing(t *testing.T) {
+	prevAuth, prevClosed, prevTok := Auth, AuthClosed, APIToken
+	t.Cleanup(func() { Auth, AuthClosed, APIToken = prevAuth, prevClosed, prevTok })
+	Auth, AuthClosed, APIToken = nil, true, ""
+	h := newServer("", newRoute()).Handler
+	for _, target := range []string{"/echo", "/torrents", "/stream?link=a"} {
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, httptest.NewRequest("POST", target, strings.NewReader(`{"action":"list"}`)))
+		if rec.Code != http.StatusServiceUnavailable {
+			t.Errorf("%s: %d, want 503", target, rec.Code)
+		}
+	}
+	// The router alone, with no identity, refuses a route that is not open.
+	rec := httptest.NewRecorder()
+	newRoute().ServeHTTP(rec, httptest.NewRequest("POST", "/torrents", strings.NewReader(`{"action":"list"}`)))
+	if rec.Code != http.StatusUnauthorized {
+		t.Errorf("router alone: %d, want 401", rec.Code)
 	}
 }
