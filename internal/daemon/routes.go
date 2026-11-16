@@ -19,6 +19,7 @@ type controlHandlers struct {
 	WarmupEvict, Config, GostormSettings, Restart                        func(http.ResponseWriter, *http.Request)
 	LibraryAdd, LibraryRemove, LibraryList, LibraryInspect, LibraryAudit func(http.ResponseWriter, *http.Request)
 	LibraryFile, LibraryConfirm                                          func(http.ResponseWriter, *http.Request)
+	Login, Logout                                                        func(http.ResponseWriter, *http.Request)
 }
 
 // registerControlRoutes is the only place routes reach the control mux. Every
@@ -39,6 +40,8 @@ func registerControlRoutes(r *apiauth.Registrar, h controlHandlers) {
 	r.Handle("/api/startup", h.Startup)
 	r.Handle("/api/warmup/evict", h.WarmupEvict)
 	r.Handle("/control", h.Panel)
+	r.Handle("/control/login", h.Login)
+	r.Handle("/control/logout", h.Logout)
 	r.Handle("/api/config", h.Config)
 	r.Handle("/api/gostorm/settings", h.GostormSettings)
 	r.Handle("/api/restart", h.Restart)

@@ -143,3 +143,20 @@ func TestRouteTableInvariants(t *testing.T) {
 		}
 	}
 }
+
+// POST /control/login is open in the gate (its credential is in the body, checked by
+// the handler, which answers 404 outside scoped mode); logout and every other method
+// of both still need a credential.
+func TestLoginRouteIsOpenForPostOnly(t *testing.T) {
+	if got := serve(tok, "POST", "/control/login", "").Code; got != 200 {
+		t.Errorf("POST /control/login with a token set and no header = %d, want 200", got)
+	}
+	for _, c := range []struct{ method, path string }{
+		{"GET", "/control/login"}, {"PUT", "/control/login"}, {"POST", "/control/login/"},
+		{"POST", "/control/logout"}, {"GET", "/control/logout"}, {"POST", "/control/Login"},
+	} {
+		if got := serve(tok, c.method, c.path, "").Code; got != 401 {
+			t.Errorf("%s %s = %d, want 401", c.method, c.path, got)
+		}
+	}
+}

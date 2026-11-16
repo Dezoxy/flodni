@@ -78,6 +78,11 @@ var routeTable = []Route{
 	{Control, "GET", "/api/health", ActionNone, ScopeOpen},
 	{Control, "GET", "/api/live", ActionNone, ScopeOpen},
 	{Control, "GET", "/control", ActionNone, ScopeOpen}, // static page, no data
+	// The panel session cookie (scoped mode only, 404 elsewhere). Login carries its
+	// credential in the body and checks it itself, so the gate lets it through; logout
+	// revokes every session, so it needs a credential.
+	{Control, "POST", "/control/login", ActionNone, ScopeOpen},
+	{Control, "POST", "/control/logout", ActionNone, ScopeAdmin},
 
 	// Engine server.
 	{Engine, "GET", "/echo", ActionNone, ScopeOpen}, // the version string

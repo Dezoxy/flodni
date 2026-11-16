@@ -402,6 +402,54 @@
             transition: background 0.2s;
         }
 
+        .btn-signout {
+            padding: 6px 14px;
+            border: 1px solid var(--border);
+            border-radius: 8px;
+            background: transparent;
+            color: var(--text);
+            font-size: 12px;
+            cursor: pointer;
+        }
+
+        #signin-dialog {
+            border: 1px solid var(--border);
+            border-radius: 12px;
+            background: var(--card);
+            color: var(--text);
+            padding: 20px 24px;
+            min-width: 320px;
+        }
+
+        #signin-dialog::backdrop {
+            background: rgba(15, 23, 42, 0.5);
+        }
+
+        #signin-dialog h2 {
+            margin: 0 0 8px;
+            font-size: 18px;
+        }
+
+        #signin-dialog input {
+            width: 100%;
+            box-sizing: border-box;
+            margin-top: 8px;
+        }
+
+        .signin-msg {
+            min-height: 18px;
+            margin-top: 8px;
+            font-size: 12px;
+            color: var(--error);
+        }
+
+        .signin-actions {
+            display: flex;
+            justify-content: flex-end;
+            gap: 8px;
+            margin-top: 8px;
+        }
+
         .btn-restart:hover {
             background: #991b1b;
         }
@@ -488,6 +536,7 @@
                         src="https://img.shields.io/github/stars/MrRobotoGit/tiramisu?style=social" alt="Star on GitHub"
                         style="vertical-align:middle;"></a>
                 <button class="btn-restart" id="btn-restart" onclick="restartFlodni()">Restart</button>
+                <button class="btn-signout" id="btn-signout" style="display:none;" onclick="signOut()" title="Ends every panel sign-in">Sign out</button>
                 <div class="mode-toggle">
                     <button class="active" onclick="setMode('simple')">Simple</button>
                     <button onclick="setMode('advanced')">Advanced</button>
@@ -814,25 +863,100 @@
         </div>
     </div>
 
+    <dialog id="signin-dialog">
+        <form id="signin-form" autocomplete="off">
+            <h2>Sign in</h2>
+            <p class="hint">Paste a flodni token that holds the admin scope. It is sent once and not kept in this browser.</p>
+            <input type="password" id="signin-token" autocomplete="off" spellcheck="false" required>
+            <div id="signin-msg" class="signin-msg" role="alert"></div>
+            <div class="signin-actions">
+                <button type="button" class="btn-signout" onclick="document.getElementById('signin-dialog').close()">Cancel</button>
+                <button type="submit" class="btn-primary">Sign in</button>
+            </div>
+        </form>
+    </dialog>
+
     <script>
         // --- API auth: every call goes through api() ---
-        // Sends the token kept in localStorage as a bearer header. On a 401 it asks
-        // once for the token, stores it and retries once. With auth off the header is
-        // ignored and nothing is ever asked.
+        // Two modes, told apart by the server. With api_token alone, the token kept in
+        // localStorage goes out as a bearer header; a 401 asks once for it, stores it and
+        // retries once. With a tokens file, a 401 carries the header Flodni-Auth: login:
+        // the panel then shows a sign-in form that posts the token to /control/login
+        // once, and the browser's same-origin fetches carry the session cookie. That token
+        // is never stored. The Authorization header is sent only when a token is held: an
+        // empty bearer would be refused as a wrong credential and hide the cookie.
         const TOKEN_KEY = 'flodniApiToken';
+        const COOKIE_KEY = 'flodniCookieMode'; // not a secret: it only says a sign-in form was asked for
         let tokenDeclined = false;
-        async function api(url, opts = {}) {
-            const send = () => fetch(url, {
-                ...opts,
-                headers: { ...(opts.headers || {}), 'Authorization': 'Bearer ' + (localStorage.getItem(TOKEN_KEY) || '') }
+
+        function showSignOut() {
+            document.getElementById('btn-signout').style.display = '';
+        }
+
+        // Asks for a token and posts it to /control/login. Resolves true once signed in.
+        function signIn() {
+            const dlg = document.getElementById('signin-dialog');
+            const form = document.getElementById('signin-form');
+            const input = document.getElementById('signin-token');
+            const msg = document.getElementById('signin-msg');
+            msg.textContent = '';
+            input.value = '';
+            return new Promise(resolve => {
+                const finish = ok => { form.onsubmit = null; dlg.onclose = null; input.value = ''; resolve(ok); };
+                dlg.onclose = () => finish(false);
+                form.onsubmit = async ev => {
+                    ev.preventDefault();
+                    const token = input.value.trim();
+                    input.value = '';
+                    let res;
+                    try {
+                        res = await fetch('/control/login', {
+                            method: 'POST',
+                            headers: { 'Content-Type': 'application/json' },
+                            body: JSON.stringify({ token })
+                        });
+                    } catch (_) { msg.textContent = 'Could not reach flodni.'; return; }
+                    if (res.status === 204) { dlg.onclose = null; dlg.close(); finish(true); return; }
+                    msg.textContent = res.status === 401 ? 'That token is not valid.'
+                        : res.status === 403 ? 'That token cannot sign in to the panel (it needs the admin scope).'
+                        : 'Sign-in failed (' + res.status + ').';
+                };
+                dlg.showModal();
+                input.focus();
             });
+        }
+
+        async function signOut() {
+            try { await api('/control/logout', { method: 'POST' }); } catch (_) { }
+            localStorage.removeItem(COOKIE_KEY);
+            location.reload();
+        }
+
+        async function api(url, opts = {}) {
+            const send = () => {
+                const headers = { ...(opts.headers || {}) };
+                const token = localStorage.getItem(TOKEN_KEY);
+                if (token) headers['Authorization'] = 'Bearer ' + token;
+                // A cookie-authenticated POST must be JSON (the server's CSRF rule), body or not.
+                const method = (opts.method || 'GET').toUpperCase();
+                if (method !== 'GET' && !headers['Content-Type']) headers['Content-Type'] = 'application/json';
+                return fetch(url, { ...opts, headers });
+            };
             let res = await send();
             if (res.status !== 401 || tokenDeclined) return res;
+            if (res.headers.get('Flodni-Auth') === 'login') {
+                localStorage.removeItem(TOKEN_KEY); // a stale bearer would be refused before the cookie is read
+                localStorage.setItem(COOKIE_KEY, '1');
+                showSignOut();
+                if (!(await signIn())) { tokenDeclined = true; return res; }
+                return send();
+            }
             const entered = prompt('This flodni requires an API token (api_token / FLODNI_API_TOKEN):');
             if (!entered) { tokenDeclined = true; return res; }
             localStorage.setItem(TOKEN_KEY, entered.trim());
             return send();
         }
+        if (localStorage.getItem(COOKIE_KEY)) showSignOut();
 
         // --- Restart ---
         async function restartFlodni() {

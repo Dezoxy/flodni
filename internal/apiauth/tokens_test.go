@@ -484,3 +484,34 @@ func TestReportJWTOn(t *testing.T) {
 		t.Fatal("jwt must read true when configured")
 	}
 }
+
+// ScopesOf finds an entry by its name, for the panel cookie that names one. It never
+// matches a name in the other modes, an unknown name, or a nil store.
+func TestScopesOf(t *testing.T) {
+	tk, err := loadFile(t, `{"tokens":[`+entryJSON("alice", `"admin"`, hashHex(fakeToken('a')))+`,`+entryJSON("bob", `"read"`, hashHex(fakeToken('b')))+`]}`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if s, ok := tk.ScopesOf("alice"); !ok || !s.Has(ScopeAdmin) {
+		t.Errorf("alice: %v %v, want admin", s, ok)
+	}
+	if s, ok := tk.ScopesOf("bob"); !ok || s.Has(ScopeAdmin) || !s.Has(ScopeRead) {
+		t.Errorf("bob: %v %v, want read only", s, ok)
+	}
+	for _, name := range []string{"", "carol", "ALICE", "alice "} {
+		if _, ok := tk.ScopesOf(name); ok {
+			t.Errorf("ScopesOf(%q) matched", name)
+		}
+	}
+	var none *Tokens
+	if _, ok := none.ScopesOf("alice"); ok {
+		t.Error("a nil store matched a name")
+	}
+	legacy, err := Load(LoadOptions{APIToken: "owner-chosen"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := legacy.ScopesOf("legacy"); ok {
+		t.Error("legacy_token mode has no named entries to sign in with")
+	}
+}

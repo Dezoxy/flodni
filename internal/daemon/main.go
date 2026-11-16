@@ -632,6 +632,11 @@ func Run() {
 		_, _ = w.Write(settingsHTML)
 	}
 
+	// The panel's login cookie (scoped mode only; 404 elsewhere). The gate reads the
+	// cookie through controlSession.Verify.
+	controlSession := newControlSession(app.auth, logger, false)
+	ctl.Login, ctl.Logout = controlSession.Login, controlSession.Logout
+
 	ctl.Config = handleConfig
 
 	// Same-origin proxy to the GoStorm settings API. The Control Panel must not

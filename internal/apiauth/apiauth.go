@@ -19,7 +19,12 @@ import (
 // GET /api/live, which answers "ok" and checks nothing. The Plex webhook cannot send headers, so only
 // those two routes also take the token as ?token=; a query token elsewhere
 // would leak into logs and browser history.
+// POST /control/login is open too: its credential is the body, which the handler
+// checks (and which answers 404 outside scoped mode).
 func controlOpen(r *http.Request) bool {
+	if r.Method == http.MethodPost {
+		return r.URL.Path == "/control/login"
+	}
 	return r.Method == http.MethodGet && (r.URL.Path == "/control" || r.URL.Path == "/api/health" || r.URL.Path == "/api/live")
 }
 
