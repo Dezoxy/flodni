@@ -53,6 +53,14 @@ func handleConfig(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		onDisk := config.LoadConfig()
+		// auth_jwt names who counts as an admin at the next start: startup-only in every
+		// mode. A post that carries a different block is refused; otherwise the file's
+		// block is kept as it is (a post without one must not drop it).
+		if !newCfg.AuthJWT.Same(onDisk.AuthJWT) && newCfg.AuthJWT != nil {
+			refuseOpenPort(w, r, http.StatusForbidden, "auth_jwt is startup-only; edit config.json")
+			return
+		}
+		newCfg.AuthJWT = onDisk.AuthJWT
 		if app.controlToken == "" {
 			// A file that does not parse would be replaced by defaults, dropping a token
 			// the owner is typing into it.

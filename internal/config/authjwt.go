@@ -39,6 +39,28 @@ func (a AuthJWT) Validate() error {
 		if strings.TrimSpace(e) == "" {
 			return errors.New("auth_jwt allowed_emails holds an empty entry")
 		}
+		for i := 0; i < len(e); i++ {
+			if e[i] >= 0x80 {
+				return errors.New("auth_jwt allowed_emails entries must be ASCII")
+			}
+		}
 	}
 	return nil
+}
+
+// Same reports whether two blocks are equal (a nil block and a nil one are).
+func (a *AuthJWT) Same(b *AuthJWT) bool {
+	if a == nil || b == nil {
+		return a == b
+	}
+	if a.Issuer != b.Issuer || a.Audience != b.Audience || a.JWKSURL != b.JWKSURL ||
+		a.Header != b.Header || len(a.AllowedEmails) != len(b.AllowedEmails) {
+		return false
+	}
+	for i := range a.AllowedEmails {
+		if a.AllowedEmails[i] != b.AllowedEmails[i] {
+			return false
+		}
+	}
+	return true
 }

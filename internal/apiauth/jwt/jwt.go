@@ -80,7 +80,7 @@ func New(cfg config.AuthJWT) (*Verifier, error) {
 	if len(cfg.AllowedEmails) > 0 {
 		v.emails = map[string]bool{}
 		for _, e := range cfg.AllowedEmails {
-			v.emails[strings.ToLower(strings.TrimSpace(e))] = true
+			v.emails[asciiLower(strings.TrimSpace(e))] = true
 		}
 	}
 	v.keys.init(cfg.JWKSURL, func() time.Time { return v.now() })
@@ -190,8 +190,33 @@ func (v *Verifier) claims(payload []byte) (Identity, error) {
 	if raw, has := c["email"]; has && json.Unmarshal(raw, &email) != nil {
 		return Identity{}, fail(ReasonClaims)
 	}
-	if v.emails != nil && !v.emails[strings.ToLower(email)] {
-		return Identity{}, fail(ReasonClaims)
+	// ASCII only: Unicode folding maps U+212A (Kelvin sign) to "k" and the like.
+	for i := 0; i < len(email); i++ {
+		if email[i] >= 0x80 {
+			return Identity{}, fail(ReasonClaims)
+		}
+	}
+	if v.emails != nil {
+		if !v.emails[asciiLower(email)] {
+			return Identity{}, fail(ReasonClaims)
+		}
+		// Some providers omit email_verified; an explicit false (bool or string) is refused.
+		if raw, has := c["email_verified"]; has && string(raw) != "null" {
+			var b bool
+			var str string
+			switch {
+			case json.Unmarshal(raw, &b) == nil:
+				if !b {
+					return Identity{}, fail(ReasonClaims)
+				}
+			case json.Unmarshal(raw, &str) == nil:
+				if str != "true" {
+					return Identity{}, fail(ReasonClaims)
+				}
+			default:
+				return Identity{}, fail(ReasonClaims)
+			}
+		}
 	}
 	return Identity{Subject: sub, Email: email}, nil
 }
@@ -238,4 +263,15 @@ func (k key) verify(signed, sig []byte) bool {
 	}
 	der, err := asn1.Marshal(struct{ R, S *big.Int }{new(big.Int).SetBytes(sig[:32]), new(big.Int).SetBytes(sig[32:])})
 	return err == nil && ecdsa.VerifyASN1(k.ec, h[:], der)
+}
+
+// asciiLower lowers A-Z byte-wise and nothing else.
+func asciiLower(s string) string {
+	b := []byte(s)
+	for i, c := range b {
+		if c >= 'A' && c <= 'Z' {
+			b[i] = c + 32
+		}
+	}
+	return string(b)
 }

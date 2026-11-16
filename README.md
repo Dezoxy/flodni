@@ -376,10 +376,14 @@ runtime until the scoped-token gate lands. The block, when you add it to
 The values show Cloudflare Access; `<team>` and the audience tag are your own.
 Any proxy that signs an RS256 or ES256 assertion and publishes a JWKS fits,
 such as oauth2-proxy. The mode is off when the block is absent, and
-`allowed_emails` (optional, matched case-insensitively) is off while empty.
-`issuer`, `audience`, `jwks_url` and `header` are required; `header` may not be
-`Authorization`, and `jwks_url` must be `https`. The audience must be this
-application's own, or anyone the proxy admits to another application passes.
+`allowed_emails` (optional; ASCII only, matched case-insensitively for A-Z; a
+token with `email_verified` false is refused when it is set) is off while
+empty. `issuer`, `audience`, `jwks_url` and `header` are required; `header`
+may not be `Authorization`, and `jwks_url` must be `https`. `auth_jwt` is
+startup-only: `POST /api/config` never writes it, and a post that carries a
+different block is refused with 403 (a post without one keeps the file's). The
+audience must be this application's own, or anyone the proxy admits to another
+application passes.
 
 What a token must satisfy: exactly one header value of three strict unpadded
 base64url segments; `alg` `RS256` or `ES256`, matching the key's type (the key

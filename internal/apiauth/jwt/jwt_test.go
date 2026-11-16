@@ -622,3 +622,43 @@ func (s *signer) jwkKey() (key, bool) {
 	_ = json.Unmarshal(b, &j)
 	return j.key()
 }
+
+func TestAllowedEmailsIsASCIIOnly(t *testing.T) {
+	ec := newEC(t, "ec")
+	v, _ := newVerifier(t, newJWKS(t, ec), func(c *config.AuthJWT) { c.AllowedEmails = []string{"Admin@Example.test", "k@example.test"} })
+	set := func(email string) func(h, c map[string]any) {
+		return func(h, c map[string]any) { c["email"] = email }
+	}
+	// ASCII case folds both ways
+	wantReason(t, v, req(mint(t, ec, set("aDMIN@EXAMPLE.TEST"), nil)), "")
+	// U+212A KELVIN SIGN lowers to "k" under Unicode folding: refused
+	wantReason(t, v, req(mint(t, ec, set("\u212a@example.test"), nil)), ReasonClaims)
+	wantReason(t, v, req(mint(t, ec, set("admin@exampl\u00e9.test"), nil)), ReasonClaims)
+	// a non-ASCII email is refused without a list too
+	v2, _ := newVerifier(t, newJWKS(t, ec), nil)
+	wantReason(t, v2, req(mint(t, ec, set("\u212a@example.test"), nil)), ReasonClaims)
+}
+
+func TestAllowedEmailsEmailVerified(t *testing.T) {
+	ec := newEC(t, "ec")
+	list := func(c *config.AuthJWT) { c.AllowedEmails = []string{"a@example.test"} }
+	v, _ := newVerifier(t, newJWKS(t, ec), list)
+	with := func(val any) string {
+		return mint(t, ec, func(h, c map[string]any) { c["email_verified"] = val }, nil)
+	}
+	wantReason(t, v, req(with(false)), ReasonClaims)
+	wantReason(t, v, req(with("false")), ReasonClaims)
+	wantReason(t, v, req(with(5)), ReasonClaims)
+	wantReason(t, v, req(with(true)), "")
+	wantReason(t, v, req(mint(t, ec, nil, nil)), "") // absent: accepted
+	// without a list the claim is not consulted
+	v2, _ := newVerifier(t, newJWKS(t, ec), nil)
+	wantReason(t, v2, req(with(false)), "")
+}
+
+func TestConfigRefusesNonASCIIAllowedEmail(t *testing.T) {
+	_, err := New(config.AuthJWT{Issuer: testIss, Audience: testAud, JWKSURL: "https://idp.example/k", Header: "H", AllowedEmails: []string{"\u212a@example.test"}})
+	if err == nil {
+		t.Fatal("accepted")
+	}
+}
