@@ -74,13 +74,13 @@ func TestReadAheadGauge(t *testing.T) {
 	}
 
 	mountBDI.Store(nil)
-	if strings.Contains(scrape(), "flodni_fuse_read_ahead_kb") {
+	if strings.Contains(scrape(), "flodni_fuse_read_ahead_bytes") {
 		t.Error("no series before the mount's bdi is known")
 	}
 
 	b := "0:281"
 	mountBDI.Store(&b)
-	if out := scrape(); !strings.Contains(out, "flodni_fuse_read_ahead_kb 4096\n") {
+	if out := scrape(); !strings.Contains(out, "flodni_fuse_read_ahead_bytes 4194304\n") {
 		t.Errorf("gauge missing or wrong:\n%s", grepLines(out, "read_ahead"))
 	}
 
@@ -88,7 +88,7 @@ func TestReadAheadGauge(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(root, "0:281", "read_ahead_kb"), []byte("128\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if out := scrape(); !strings.Contains(out, "flodni_fuse_read_ahead_kb 128\n") {
+	if out := scrape(); !strings.Contains(out, "flodni_fuse_read_ahead_bytes 131072\n") {
 		t.Errorf("gauge did not follow the file:\n%s", grepLines(out, "read_ahead"))
 	}
 
@@ -96,7 +96,7 @@ func TestReadAheadGauge(t *testing.T) {
 	if err := os.Remove(filepath.Join(root, "0:281", "read_ahead_kb")); err != nil {
 		t.Fatal(err)
 	}
-	if strings.Contains(scrape(), "flodni_fuse_read_ahead_kb ") {
+	if strings.Contains(scrape(), "flodni_fuse_read_ahead_bytes ") {
 		t.Error("an unreadable file must leave the series absent")
 	}
 }

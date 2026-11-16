@@ -873,7 +873,7 @@ symlinks from a real filesystem; kept for correctness), and step 7 last.
    entry TTLs with kernel invalidation, splice off) needs privileges and
    changes the live mount. Flodni never writes sysfs: it logs the mount's BDI
    id once at start and exposes `read_ahead_kb` as the gauge
-   `flodni_fuse_read_ahead_kb` (observe only, built), so the host can tune it
+   `flodni_fuse_read_ahead_bytes` (observe only, built), so the host can tune it
    and the effect can be seen. The TTLs and splice come only as config options
    with defaults unchanged, decided in an ADR with numbers.
 

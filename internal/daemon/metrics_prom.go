@@ -160,7 +160,7 @@ func collectProm(w *promtext.Writer) {
 		promSample(fetchFlightDedupCount.Load()))
 }
 
-// collectFuseReadAheadProm writes the mount's kernel read-ahead, read from sysfs at
+// collectFuseReadAheadProm writes the mount's kernel read-ahead in bytes, read from sysfs at
 // each scrape (one small file). No series before the mount's BDI is known, on a
 // platform without sysfs, or when the file cannot be read: a zero would read as
 // "read-ahead off".
@@ -173,9 +173,9 @@ func collectFuseReadAheadProm(w *promtext.Writer) {
 	if err != nil {
 		return
 	}
-	w.Gauge("flodni_fuse_read_ahead_kb",
-		"Kernel read-ahead of the FUSE mount in KiB, read from sysfs at each scrape. Flodni never writes it; the host may tune it. Absent when the file cannot be read.",
-		promSample(kb))
+	w.Gauge("flodni_fuse_read_ahead_bytes",
+		"Kernel read-ahead of the FUSE mount in bytes (sysfs read_ahead_kb times 1024), read at each scrape. Flodni never writes it; the host may tune it. Absent when the file cannot be read.",
+		promSample(kb*1024))
 }
 
 func collectWarmupProm(w *promtext.Writer) {

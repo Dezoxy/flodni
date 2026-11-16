@@ -2444,7 +2444,7 @@ scraper on the same host or Docker network.
 | `flodni_warmup_head_fill_duration_seconds` | histogram | none | Time from the first chunk to the last of a head fill, per file whose head completed. Buckets 2, 5, 10, 15, 30, 60 and 120 s. |
 | `flodni_fuse_short_reads_total` | counter | none | Reads served with fewer bytes than requested away from EOF. |
 | `flodni_fuse_short_read_results_total` | counter | `result` | Outcome of the refill: `repaired` or `failed`. |
-| `flodni_fuse_read_ahead_kb` | gauge | none | Kernel read-ahead of the FUSE mount in KiB, read from sysfs at each scrape. Flodni never writes it; the host may tune it (the start line `[FUSE] mounted, bdi <major:minor>, read_ahead_kb <n>` names the device). Absent where sysfs cannot be read. |
+| `flodni_fuse_read_ahead_bytes` | gauge | none | Kernel read-ahead of the FUSE mount in bytes (`read_ahead_kb` times 1024), read from sysfs at each scrape. Flodni never writes it; the host may tune it (the start line `[FUSE] mounted, bdi <major:minor>, read_ahead_kb <n>` names the device). Absent where sysfs cannot be read. |
 | `flodni_fetch_dedup_total` | counter | none | Concurrent fetches of one chunk that shared a single fetch. |
 | `flodni_engine_short_reads_total` | counter | `path` | Engine reads that ended short and were reported as success: `stream` (the sequential reader) or `fetch` (the stateless block fetch behind the FUSE fallback). 0 from start. |
 | `flodni_engine_short_read_repairs_total` | counter | `result` | Outcome of the stream reader's refill loop, per read that needed it: `repaired` after a reconnect, `unfilled` when a gap stayed. |
