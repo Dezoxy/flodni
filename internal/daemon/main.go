@@ -324,6 +324,9 @@ func Run() {
 	torr.HoldExpiry = keepaliveHold
 	// Redial of a dropped only peer (opt-in, off by default): the engine asks when a peer drops.
 	torr.RedialDroppedPeer = func() bool { return gc().RedialDroppedPeer }
+	// Request refill v2 (opt-in, off by default, startup-only): read once, before the engine
+	// builds its client.
+	torr.EngineRefillV2 = gc().EngineRefillV2
 	go func() {
 		logger.Info("Starting Embedded GoStorm Engine...")
 		server.Start() // Starts Web Server on 8090 and Engine

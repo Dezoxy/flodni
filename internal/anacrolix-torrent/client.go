@@ -1286,6 +1286,10 @@ func (p *Peer) initUpdateRequestsTimer() {
 		}
 	}
 	if enableUpdateRequestsTimer {
+		if p.refillV2() {
+			p.updateRequestsTimerV2 = newReleasedTimer(math.MaxInt64, p.updateRequestsTimerFunc)
+			return
+		}
 		p.updateRequestsTimer = time.AfterFunc(math.MaxInt64, p.updateRequestsTimerFunc)
 	}
 }

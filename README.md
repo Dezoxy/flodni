@@ -942,6 +942,26 @@ the places they were first seen (the stale cache priorities, now dropped).
   single-seeder case after a wake is therefore not covered), and two peers
   dropping together (one address is redialed, not both). A redial the torrent
   did not take (an address it already knows) is not counted.
+- **`engine_refill_v2`** in `config.json` (default `false`, read once at
+  start: a change needs a restart). Four request-refill changes adapted from
+  upstream, none of them measured on a real swarm yet, so they are opt-in:
+  a refill sorts at most the larger of two pieces and four queues of
+  candidate chunks instead of the whole readahead window; a peer whose
+  requests another peer holds may be robbed of them when it has delivered
+  nothing for 2 s while expecting chunks (the steal grace still applies);
+  a peer's queue is topped up when it falls to half of its target instead of
+  at empty, paused for 5 s after the peer rejects a request it held; and the
+  request-update timer, which is compiled out today, would use a timer that
+  releases its function when stopped. The queue target is whatever the
+  engine's adaptive pipeline (or Gradient2) says, so the half-queue point and
+  the candidate cap follow it. With the switch off none of this code is
+  reached: the refill decisions are the ones the engine made before. To A/B
+  it on one swarm, run a period with it off and a period with it on, same
+  library and viewers, and compare `flodni_read_stalls_total`,
+  `flodni_session_first_byte_seconds` and the sessions' `stalls` and
+  `max_stall_ms`. The
+  decisions are pinned in `internal/anacrolix-torrent/refill_flagoff_test.go`
+  (switch off) and `refill_v2_test.go` (switch on).
 
 ## Readability record
 
