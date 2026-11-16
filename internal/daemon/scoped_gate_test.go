@@ -3,6 +3,7 @@ package daemon
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -173,44 +174,109 @@ func TestScopedSaveRefusesStartupOnlySettings(t *testing.T) {
 	}
 }
 
-// A save that does not touch them keeps the values of the copy read at start, not a
-// re-read of the file: a hand edit made since the start does not survive an admin's
-// save, so neither a leaked admin token nor an admitted proxy user can make one stick.
-func TestScopedSaveKeepsTheStartCopyOfTheAuthSettings(t *testing.T) {
-	s := newScopedFixture(t, "")
-	admin := s.fx.Token["admin"]
-	startPath := s.fx.Path
-	// Someone edits the file after the start.
-	edited := strings.Replace(readCfgFile(t, s.cfgPath), s.fx.Path, "/planted/tokens.json", 1)
-	edited = strings.TrimSuffix(strings.TrimSpace(edited), "}") + `,"api_token":"planted-token","auth_panel_https":true}`
-	if err := os.WriteFile(s.cfgPath, []byte(edited), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	// The panel echoes the running settings back, with one real change.
+const scopedJWTBlock = `{"issuer":"https://i.example","audience":"a","jwks_url":"https://i.example/k","header":"H","allowed_emails":%s}`
+
+// echoWith is what the panel posts: the running settings, with one real change.
+func echoWith(t *testing.T, mutate func(map[string]any)) string {
+	t.Helper()
 	running, _ := json.Marshal(gc().Redacted())
 	var post map[string]any
 	_ = json.Unmarshal(running, &post)
-	post["log_level"] = "debug"
+	mutate(post)
 	body, _ := json.Marshal(post)
-	if code, resp := s.do("POST", "/api/config", admin, string(body)); code != http.StatusOK {
-		t.Fatalf("save: %d %s", code, resp)
-	}
-	got := readCfgFile(t, s.cfgPath)
+	return string(body)
+}
+
+func savedFile(t *testing.T, path string) map[string]any {
+	t.Helper()
 	var saved map[string]any
-	if err := json.Unmarshal([]byte(got), &saved); err != nil {
+	if err := json.Unmarshal([]byte(readCfgFile(t, path)), &saved); err != nil {
 		t.Fatal(err)
 	}
-	if saved["auth_tokens_file"] != startPath {
-		t.Errorf("auth_tokens_file = %v, want the start value %q", saved["auth_tokens_file"], startPath)
+	return saved
+}
+
+// A scoped save writes back the file's current value of the startup-only settings, as
+// the other modes do: an owner who tightened auth_jwt.allowed_emails by hand and has not
+// restarted must not have a panel save restore the looser list.
+func TestScopedSaveKeepsAHandEditedAuthJWT(t *testing.T) {
+	s := newScopedFixture(t, `,"auth_jwt":`+fmt.Sprintf(scopedJWTBlock, `["a@x.example","b@x.example"]`))
+	edited := strings.Replace(readCfgFile(t, s.cfgPath), `["a@x.example","b@x.example"]`, `["a@x.example"]`, 1)
+	if err := os.WriteFile(s.cfgPath, []byte(edited), 0o600); err != nil {
+		t.Fatal(err)
 	}
-	if v, ok := saved["api_token"]; ok && v != "" {
-		t.Errorf("api_token = %v: a hand-planted token survived the save", v)
+	// The echoed running block differs from the file's now, and is accepted.
+	body := echoWith(t, func(m map[string]any) { m["log_level"] = "debug" })
+	if code, resp := s.do("POST", "/api/config", s.fx.Token["admin"], body); code != http.StatusOK {
+		t.Fatalf("save with the running block: %d %s", code, resp)
 	}
-	if saved["auth_panel_https"] == true {
-		t.Error("a hand-planted auth_panel_https survived the save")
+	saved := savedFile(t, s.cfgPath)
+	jwt, _ := saved["auth_jwt"].(map[string]any)
+	if emails, _ := jwt["allowed_emails"].([]any); len(emails) != 1 {
+		t.Errorf("allowed_emails = %v, want the hand-edited list of one", jwt["allowed_emails"])
+	}
+	// The block the file holds now is accepted too.
+	body = echoWith(t, func(m map[string]any) {
+		var blk any
+		_ = json.Unmarshal([]byte(fmt.Sprintf(scopedJWTBlock, `["a@x.example"]`)), &blk)
+		m["auth_jwt"] = blk
+	})
+	if code, resp := s.do("POST", "/api/config", s.fx.Token["admin"], body); code != http.StatusOK {
+		t.Errorf("save with the file's block: %d %s", code, resp)
+	}
+}
+
+func TestScopedSaveKeepsAHandEditedPanelHTTPS(t *testing.T) {
+	s := newScopedFixture(t, "")
+	edited := strings.TrimSuffix(strings.TrimSpace(readCfgFile(t, s.cfgPath)), "}") + `,"auth_panel_https":true}`
+	if err := os.WriteFile(s.cfgPath, []byte(edited), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	body := echoWith(t, func(m map[string]any) { m["log_level"] = "debug" })
+	if code, resp := s.do("POST", "/api/config", s.fx.Token["admin"], body); code != http.StatusOK {
+		t.Fatalf("save: %d %s", code, resp)
+	}
+	saved := savedFile(t, s.cfgPath)
+	if saved["auth_panel_https"] != true {
+		t.Errorf("auth_panel_https = %v, want the hand-edited true", saved["auth_panel_https"])
 	}
 	if saved["log_level"] != "debug" {
 		t.Error("the real change was not saved")
+	}
+}
+
+// A value that is neither the running one nor the file's current one is still refused,
+// and a hand-planted api_token never rides along.
+func TestScopedSaveRefusesAThirdValueAndKeepsNoPlantedToken(t *testing.T) {
+	s := newScopedFixture(t, `,"auth_jwt":`+fmt.Sprintf(scopedJWTBlock, `["a@x.example"]`))
+	admin := s.fx.Token["admin"]
+	before := readCfgFile(t, s.cfgPath)
+	for name, mutate := range map[string]func(map[string]any){
+		"auth_jwt": func(m map[string]any) {
+			var blk any
+			_ = json.Unmarshal([]byte(fmt.Sprintf(scopedJWTBlock, `["a@x.example","evil@x.example"]`)), &blk)
+			m["auth_jwt"] = blk
+		},
+		"auth_panel_https": func(m map[string]any) { m["auth_panel_https"] = true },
+		"auth_tokens_file": func(m map[string]any) { m["auth_tokens_file"] = "/elsewhere/tokens.json" },
+	} {
+		if code, _ := s.do("POST", "/api/config", admin, echoWith(t, mutate)); code != http.StatusForbidden {
+			t.Errorf("%s: status %d, want 403", name, code)
+		}
+		if after := readCfgFile(t, s.cfgPath); after != before {
+			t.Errorf("%s: the file changed on a refusal", name)
+		}
+	}
+	planted := strings.TrimSuffix(strings.TrimSpace(before), "}") + `,"api_token":"planted-token"}`
+	if err := os.WriteFile(s.cfgPath, []byte(planted), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	body := echoWith(t, func(m map[string]any) { m["log_level"] = "debug" })
+	if code, resp := s.do("POST", "/api/config", admin, body); code != http.StatusOK {
+		t.Fatalf("save: %d %s", code, resp)
+	}
+	if v, ok := savedFile(t, s.cfgPath)["api_token"]; ok && v != "" {
+		t.Errorf("api_token = %v: a hand-planted token survived the save", v)
 	}
 }
 

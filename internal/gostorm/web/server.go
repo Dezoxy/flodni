@@ -124,12 +124,7 @@ func Start() {
 		}()
 	}
 
-	switch authTokens().Mode() { // a nil store reads as open here, and is closed by the gate
-	case apiauth.ModeScoped:
-		log.TLogln("Scoped-token auth enabled (all routes except GET /echo)")
-	case apiauth.ModeLegacyToken:
-		log.TLogln("Bearer-token auth enabled (all routes except GET /echo)")
-	}
+	log.TLogln(authLine(authTokens()))
 	go func() {
 		log.TLogln("Start http server at", settings.IP+":"+settings.Port)
 		waitChan <- newServer(settings.IP+":"+settings.Port, route).ListenAndServe()

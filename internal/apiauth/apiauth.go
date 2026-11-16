@@ -104,8 +104,8 @@ type JWTVerifier interface {
 // no fall-through. present with nil: authenticated as name, with admin scope.
 type CookieCredential func(r *http.Request) (name string, present bool, err error)
 
-// WithTokens sets the credential store, replacing the token argument. A nil or open
-// store leaves the port open.
+// WithTokens sets the credential store, replacing the token argument. An open store
+// leaves the port open; a nil one is a wiring mistake and answers 503 on every route.
 func WithTokens(t *Tokens) Option {
 	return func(o *options) { o.tokens, o.tokensSet = t, true }
 }
@@ -187,8 +187,19 @@ func gate(p profile, token string, logger *slog.Logger, next http.Handler, opts 
 	}
 	tokens := o.tokens
 	if tokens == nil && o.tokensSet {
-		// Fail closed: answer nothing at all, open routes included.
+		// Fail closed: answer nothing at all, open routes included. It is a wiring
+		// mistake, so it is loud: one error now, and every request logged and counted.
+		if logger != nil {
+			logger.Error(fmt.Sprintf("[%s] no credential store was handed to the gate: every request answers 503", p.name), "name", p.name)
+		}
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if o.observer != nil {
+				o.observer(RoutePreRoute, "", ReasonClosed)
+			}
+			if logger != nil {
+				logger.Info(fmt.Sprintf("[%s] 503 %s %q from %s: %s", p.name, r.Method, r.URL.Path, r.RemoteAddr, ReasonClosed),
+					"name", p.name, "method", r.Method, "path", r.URL.Path, "remote_addr", r.RemoteAddr, "reason", ReasonClosed)
+			}
 			http.Error(w, "authentication is not configured", http.StatusServiceUnavailable)
 		})
 	}

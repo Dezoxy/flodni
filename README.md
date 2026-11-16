@@ -109,6 +109,70 @@ entry; add it to the `tokens` array of the file:
 {"tokens": [{"name": "webhook", "scopes": ["webhook"], "sha256": "<64 hex characters>"}]}
 ```
 
+`new-token` hashes the token for you: the entry's `sha256` is the SHA-256 of the
+token, hex (`printf %s "$TOKEN" | sha256sum` gives the same). A token is 256
+random bits, so a plain hash is enough; a hand-hashed short password is outside
+the model, which is why `new-token` is the only supported way to make one. The
+file can be mounted read-only and backed up without leaking a credential.
+
+#### The scopes
+
+A token holds one or more of eight scopes. `admin` implies all the others; no
+other scope implies another (a `library` token cannot read sessions unless it
+also holds `read`).
+
+| Scope | What it opens |
+| --- | --- |
+| `webhook` | The two play webhooks (`POST`), the only routes that take `?token=`. |
+| `metrics` | `GET /metrics*` on the control port. |
+| `read` | Health detail, the startup report, sessions, the library list, file and audit. |
+| `library` | Library add, remove, confirm and inspect. |
+| `scrape` | `POST /api/torrents/scrape` and its status. |
+| `engine` | The engine's torrent list, active and get, settings get, cache and the streaming routes. `/stream` plays or reports a hash the engine already holds and never adds by link. |
+| `upload` | `POST /torrent/upload`, which adds a torrent. |
+| `admin` | Everything above, plus config reads and writes, restart, warmup evict, the engine's settings set, torrent add and removal on the engine, shutdown, and `/stream` that adds. |
+
+`GET /api/live`, `GET /api/health`, `GET /control` and the engine's `GET /echo`
+need no credential. A route, method or engine action the table does not list
+needs `admin`.
+
+#### One token per caller
+
+Give each caller the scopes it needs and nothing more; no caller needs `admin`
+day to day.
+
+| Caller | Scopes |
+| --- | --- |
+| a media bridge that files titles | `library`, `upload` |
+| a health job that retries dead swarms | `read`, `scrape`, `engine`, `library` |
+| a removal job | `library` |
+| a playback guard that checks sessions and torrent health (`GET /api/sessions`, `GET /api/torrents/health`; `GET /api/health` is open and needs no token) | `read` |
+| an operator CLI | `library`, `upload`, `engine`, `metrics` |
+| a webhook sender that cannot set headers (the `?token=` form) | `webhook` |
+| a metrics scraper | `metrics` |
+| the panel behind an identity-aware proxy | the proxy's assertion (below), which is `admin` |
+| the break-glass credential | `admin`, kept offline |
+
+That is six tokens plus the break-glass one. The break-glass `admin` token is
+also the way into the panel when the identity provider is down.
+
+A configuration that uses the tokens file and the proxy sign-in looks like this
+(the `auth_jwt` values show Cloudflare Access; see "Proxy-signed identity (IdP
+mode)" below for what is checked and how the keys are fetched):
+
+```json
+{
+  "auth_tokens_file": "/run/secrets/flodni-tokens.json",
+  "auth_jwt": {
+    "issuer":   "https://<team>.cloudflareaccess.com",
+    "audience": "<application audience tag>",
+    "jwks_url": "https://<team>.cloudflareaccess.com/cdn-cgi/access/certs",
+    "header":   "Cf-Access-Jwt-Assertion",
+    "allowed_emails": []
+  }
+}
+```
+
 Migrate in this order, because both settings together stop the start and the
 change is one restart:
 
@@ -142,32 +206,130 @@ only if its scopes are exactly `webhook`; anywhere else the parameter is refused
 same host and port, `Sec-Fetch-Site: same-origin` when present, and
 `Content-Type: application/json`. `auth_panel_https` (startup-only, default
 false) says the panel is served over https, so that `Origin` must be https.
-`flodni_auth_refusals_total{route,scope,reason}` counts the refusals.
 
-Flodni refuses to start, and never falls back to an open port, when: the file
-cannot be read or parsed, has an unknown field or key, trailing data, is over
-64 KiB, or repeats a JSON key, or is not a regular file, or holds no token, more
-than 64, an unknown scope, an entry without scopes, a repeated name or hash, a
-hash that is not 64 lower-case hex characters or is the hash of the empty
-string, or a bad or reserved name; when `api_token` is also set (remove it:
-there is no alias); when `auth_jwt` is set without a tokens file or is invalid;
-and when `gostorm_url` is not a loopback address. A `config.json` that cannot be
-read or parsed also stops the start in every mode, because the pointer to the
-tokens file lives there, and so does one with an unknown key that mentions
-`auth` (`auth_token_file`, `auth-tokens-file`), a repeated or re-cased `api_token`
-or `auth_*` key, a null `api_token` or `auth_tokens_file`, or an `auth_jwt` block
-that repeats or re-cases a key. Any other
-unknown top-level key only logs one warning that lists the names. A file
-writable by group or others only logs a warning. `GET /api/startup` and the
+`flodni_auth_refusals_total{route,scope,reason}` counts every refusal of both
+gates, in every mode. `route` is the route pattern from the table (never a raw
+path), `unmatched` for a path no row names, or `pre_route` for a refusal by the
+engine's outer gate, which runs before routing; `scope` is the scope the route
+needs (empty for `pre_route`), never the presented token's, so no name or token
+can become a label. `reason` is one of:
+
+| Reason | Meaning |
+| --- | --- |
+| `missing` | No credential on a route that needs one. |
+| `invalid` | A credential was presented and is wrong (unknown token, bad shape). |
+| `scope` | A valid token without the scope the route needs. |
+| `query_not_allowed` | A `token` query parameter where it is not allowed, or on a webhook with a token that holds more than `webhook`. |
+| `body` | The engine's action peek refused the body (too large, unparsable, encoded). |
+| `csrf` | The `Origin`, `Sec-Fetch-Site` or `Content-Type` rule for a cookie or proxy-header request. |
+| `session` | A session cookie that is expired, tampered with or from before a logout. |
+| `jwt_malformed`, `jwt_alg`, `jwt_unknown_kid`, `jwt_keys_unavailable`, `jwt_signature`, `jwt_issuer`, `jwt_audience`, `jwt_expired`, `jwt_not_yet_valid`, `jwt_claims` | A proxy assertion was present and failed. |
+| `host`, `origin`, `cross_site` | The Host allowlist and the open-port `Origin` and `Sec-Fetch-Site` refusals. |
+| `closed` | The gate was built with no credential store and answers 503: a wiring mistake, never a configuration. The engine also logs an error at start. |
+
+A refusal is logged with the method, the quoted path, the address and the
+reason, never the query, a token, a cookie or a header value; a success on a
+mutating route logs the token's name.
+
+Flodni refuses to start, and never falls back to an open port, in each of these
+cases; the message names the cause and never prints a token:
+
+- the tokens file cannot be read or parsed, is not a regular file, is over
+  64 KiB, has trailing data, an unknown or re-cased key, or a repeated one;
+- the file holds no token or more than 64, an entry without scopes or with an
+  unknown scope, a repeated name or hash, a hash that is not 64 lower-case hex
+  characters or is the hash of the empty string, or a bad or reserved name;
+- `api_token` (or `FLODNI_API_TOKEN`) and `auth_tokens_file` are both set:
+  remove `api_token`, there is no alias;
+- `auth_jwt` is set without `auth_tokens_file`, or its block is incomplete,
+  names `Authorization` as its header, or has a `jwks_url` that is not https;
+- `gostorm_url` is not a loopback address (the engine is called without a
+  credential);
+- `config.json` exists but cannot be read or parsed, in every mode, because the
+  pointer to the tokens file lives there;
+- `config.json` holds `api_token` more than once, re-cased (`API_TOKEN`,
+  `Api_Token`) or as `null`, or `auth_tokens_file`, `auth_jwt` or
+  `auth_panel_https` repeated, re-cased or as `null`;
+- `config.json` holds any other top-level key whose name contains `auth`,
+  whatever its case or separators (`auth_token_file`, `auth-tokens-file`,
+  `author`);
+- the `auth_jwt` block repeats, re-cases or adds a key.
+
+Any other unknown top-level key only logs one warning that lists the names. A
+file writable by group or others only logs a warning. `GET /api/startup` and the
 `[Startup] report` line carry an `auth` section (`mode` of `open`,
 `legacy_token` or `scoped`, the token count, the scopes in use, and `jwt`) with
-no name, hash or path. With only `api_token` set, behaviour is as before.
+no name, hash or path. With only `api_token` set, behaviour is as before: one
+token with every scope, `?token=` on the two webhook routes, and a wrong bearer
+on a webhook still falls through to the query token.
 
 In scoped mode `api_token`, `auth_tokens_file`, `auth_jwt` and
 `auth_panel_https` are startup-only: `POST /api/config` answers 403 (and writes
-nothing) to a change, as it does to a non-loopback `gostorm_url`, and a save
-writes back the values read at start. Flodni's own calls to its engine go
-in-process, with no credential and no URL.
+nothing) to a change, as it does to a non-loopback `gostorm_url`. A save
+writes back the file's current value of `auth_tokens_file`, `auth_jwt` and
+`auth_panel_https`, in every mode, so a hand edit made since the start survives
+it; a post may echo either the running value or the file's, and one that matches
+neither is refused. `api_token` must stay unset in scoped mode. Flodni's own calls to its
+engine go in-process, with no credential and no URL.
+
+#### Panel sign-in (session cookie)
+
+A person signs in to the panel with an `admin` token, so the browser keeps no
+token. `POST /control/login` with `{"token": "..."}` answers 204 and sets the
+`flodni_session` cookie; a token without `admin` gets 403, an unknown one 401
+(counted as `scope` and `invalid`). `POST /control/logout` revokes every
+session. Both routes exist only in scoped mode (404 in open and `api_token`-only
+mode) and only the control port reads the cookie, never the engine's.
+
+- The cookie holds the token entry's name, an expiry and a generation, with an
+  HMAC-SHA256 tag. It is `HttpOnly`, `SameSite=Strict`, `Path=/`, with no
+  `Domain`, and expires 12 hours after login (absolute: use never extends it).
+- `Secure` is set when the request arrived over TLS, when the login's `Origin`
+  is https, when a proxy said `X-Forwarded-Proto: https`, or when
+  `auth_panel_https` is true. Logout clears the cookie with the same rule.
+- The HMAC key is 32 random bytes made at each start and kept in memory, so a
+  restart signs everyone out. Logout increments a process-wide generation, so
+  every cookie issued before it stops verifying, a stolen copy included. The
+  cookie also names its token entry, which must still exist and hold `admin` on
+  every request.
+- A cookie request is an ambient-credential request: a non-GET needs the same
+  `Origin` host and port, `Sec-Fetch-Site: same-origin` when present, and
+  `Content-Type: application/json`, as `auth_jwt` requests do (refusals count as
+  `csrf`; a bad or revoked cookie counts as `session` and is not retried as
+  another credential).
+- A 401 in scoped mode on the control port carries `Flodni-Auth: login`, which
+  makes the panel show its sign-in form; without that header (open and
+  `api_token`-only mode) the panel keeps its bearer prompt.
+- Cookies ignore ports: the browser sends `flodni_session` to every port of
+  the panel's hostname, so run no other service you do not trust on it.
+- The panel page answers `Content-Security-Policy: frame-ancestors 'none'` and
+  `X-Frame-Options: DENY`.
+
+#### Upgrading from v0.2.x to v0.3.0
+
+With no token configured nothing about the open port changes, except the items
+marked "every mode". Read these before the first start of v0.3.0:
+
+- A `config.json` that exists but cannot be read or parsed stops the start, in
+  every mode. v0.2.6 started on the defaults and raised the `config_parse_failed`
+  alarm: clear that alarm in `GET /api/startup` first.
+- `config.json` keys are stricter, in every mode: an unknown key whose name
+  contains `auth` (a typo such as `auth_token_file`, or `author`) and a repeated,
+  null or re-cased `api_token` or `auth_*` key stop the start. The one that
+  bites is `API_TOKEN`: v0.2.6 read the file case-insensitively, so
+  `{"API_TOKEN": "..."}` was a working token; it now refuses. Rename it
+  `api_token`.
+- `api_token` together with `auth_tokens_file` stops the start; see the
+  migration order above.
+- The library add and inspect routes accept only a `magnet:` link whose first
+  `xt` is an anchored 40-hex or 32-base32 hash, in every mode; any other link,
+  `http(s)` and `file:` included, is 400 before the engine is called.
+- The engine answers 404, not a 307 redirect, to `POST /torrents/` with a
+  trailing slash, in every mode.
+- Scoped mode, once chosen: both ports deny by default, a wrong bearer is
+  refused rather than falling through to a query token, and `gostorm_url` must
+  be a loopback address. A caller holding the old `api_token` is refused after
+  the restart that adopts the file.
 
 The command-line paths (the entrypoint's `FLODNI_SOURCE_PATH` and
 `FLODNI_MOUNT_PATH`) win over `physical_source_path` and `fuse_mount_path` in

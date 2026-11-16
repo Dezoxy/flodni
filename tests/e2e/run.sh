@@ -16,7 +16,7 @@
 # non-replacement variant (the last one wins; a scrape sample for the docs);
 # E2E_ONLY=<variant> runs just that variant (default, slow-seeder,
 # index-cache, warm-on-add, warm-lifecycle, catch-up, late-confirm, keep-alive,
-# budget-refusal, replacement, removal). slow-seeder is default with a seeder that
+# budget-refusal, replacement, removal, scoped). slow-seeder is default with a seeder that
 # keeps the engine's 1 MiB per-peer request allowance. The index-cache variant runs
 # with a random FLODNI_API_TOKEN: the seeder must see 401 without the bearer
 # header before its authorised add, and the same for GoStorm's 8090 (401 on
@@ -48,6 +48,13 @@
 # asserts that C is warmed by a wake from the stored record and B never is. A public
 # canary tracker (listed in trackers.txt, so only a public torrent may announce to it)
 # must see a public control title and none of the private ones.
+# The scoped variant (no seeder, no torrent) starts the real image with a tokens file
+# (auth_tokens_file) of tokens minted at run time by `flodni auth new-token`, and asserts
+# on both ports: no credential is 401 (with Flodni-Auth: login on the control port only), a
+# token of another scope is 403, one of the right scope passes, ?token= works for a
+# webhook-only token and nowhere else, a library add of an http link is 400, /api/live,
+# /control and /echo are open, the startup report says auth.mode scoped with no
+# auth_not_enforced alarm, and no token reaches the container's log.
 # E2E_WARM_NEGATIVE=1 runs the warm-on-add variant with the switch off: it must
 # fail at step 2 (no fill). It is not part of make e2e.
 set -euo pipefail
@@ -492,6 +499,13 @@ JSON
       # the first pass runs 1 s after a start. The variant rewrites this file in place
       # with warm_on_add true.
       catchup_config false "$file"
+      ;;
+    scoped)
+      # The default config plus the tokens file, which run_scoped mounts at /tokens.json.
+      cat >"$file" <<JSON
+{"telemetry": false, "telemetry_url": "", "scheduler": {"enabled": false},
+ "auth_tokens_file": "/tokens.json"}
+JSON
       ;;
     removal) write_config index-cache "$file" ;;
     warm-lifecycle) write_config warm-on-add "$file" ;;
@@ -2260,6 +2274,202 @@ run_removal() {
   stop_stack
 }
 
+# ---- scoped: the tokens file, both ports ----
+
+# scoped_req port method path [bearer] [body]: the raw response (head and body) of one
+# request to a port of the container, over bash's /dev/tcp (no curl in the image). A bearer
+# is only ever a token minted for this run.
+scoped_req() {
+  docker exec "$flodni" bash -c 'port=$1 method=$2 path=$3 bearer=${4:-} body=${5:-}
+    exec 3<>/dev/tcp/127.0.0.1/$port || exit 1
+    auth=""
+    if [ -n "$bearer" ]; then auth="Authorization: Bearer $bearer\r\n"; fi
+    printf "%s %s HTTP/1.0\r\nHost: x\r\n%b" "$method" "$path" "$auth" >&3
+    printf "Content-Type: application/json\r\nContent-Length: %s\r\n\r\n%s" "${#body}" "$body" >&3
+    cat <&3' _ "$@" 2>/dev/null || true
+}
+
+# sc_expect label want port method path [bearer] [body]: the status must be want. The
+# response is left in SC_RESP for the header and body checks that follow.
+SC_RESP=""
+sc_expect() {
+  local label=$1 want=$2 got
+  shift 2
+  SC_RESP=$(scoped_req "$@")
+  got=$(awk 'NR==1 { print $2 }' <<<"$SC_RESP")
+  if [ "$got" != "$want" ]; then
+    echo "FAIL (scoped): $label: status '${got:-none}', want $want" >&2
+    dump_diagnostics
+    return 1
+  fi
+  echo "ok (scoped): $label: $got" >&2
+}
+
+# sc_header label present|absent name: a response header (case-insensitive) of SC_RESP.
+sc_header() {
+  local label=$1 want=$2 name=$3 has=absent
+  if grep -qi "^$name:" <<<"$SC_RESP"; then has=present; fi
+  if [ "$has" != "$want" ]; then
+    echo "FAIL (scoped): $label: header $name is $has, want $want" >&2
+    dump_diagnostics
+    return 1
+  fi
+  echo "ok (scoped): $label: header $name $has" >&2
+}
+
+# sc_body label present|absent text: a fixed string in SC_RESP.
+sc_body() {
+  local label=$1 want=$2 text=$3 has=absent
+  if grep -qF -- "$text" <<<"$SC_RESP"; then has=present; fi
+  if [ "$has" != "$want" ]; then
+    echo "FAIL (scoped): $label: '$text' is $has in the response, want $want" >&2
+    dump_diagnostics
+    return 1
+  fi
+  echo "ok (scoped): $label: '$text' $has" >&2
+}
+
+# mint name scopes: a fresh token and its file entry, from the image's own CLI. Sets
+# MINT_TOKEN and MINT_ENTRY. Nothing is written to disk but the tokens file.
+MINT_TOKEN="" MINT_ENTRY=""
+mint() {
+  local out
+  out=$(docker run --rm --entrypoint /usr/local/bin/flodni "$FLODNI_IMAGE" auth new-token --name "$1" --scopes "$2" 2>/dev/null)
+  MINT_TOKEN=$(sed -n 1p <<<"$out")
+  MINT_ENTRY=$(sed -n 2p <<<"$out")
+  if [ -z "$MINT_TOKEN" ] || [ -z "$MINT_ENTRY" ]; then
+    echo "FAIL (scoped): flodni auth new-token printed no token or entry for $1" >&2
+    return 1
+  fi
+}
+
+run_scoped() {
+  local v=scoped t0=$SECONDS dir waited=0
+  dir="$work/$v"
+  mkdir -p "$dir/state" "$dir/cache"
+  chmod 777 "$dir/cache"
+  echo "=== variant: $v ===" >&2
+
+  local tok_read tok_hook tok_engine tok_lib tok_metrics entries
+  mint reader read || return 1; tok_read=$MINT_TOKEN; entries=$MINT_ENTRY
+  mint hook webhook || return 1; tok_hook=$MINT_TOKEN; entries="$entries,$MINT_ENTRY"
+  mint engine-client engine || return 1; tok_engine=$MINT_TOKEN; entries="$entries,$MINT_ENTRY"
+  mint library-client library || return 1; tok_lib=$MINT_TOKEN; entries="$entries,$MINT_ENTRY"
+  mint scraper metrics || return 1; tok_metrics=$MINT_TOKEN; entries="$entries,$MINT_ENTRY"
+  printf '{"tokens": [%s]}\n' "$entries" >"$dir/tokens.json"
+  chmod 644 "$dir/tokens.json"
+  write_config "$v" "$dir/config.json"
+
+  network="e2e-$v-$$"
+  flodni="e2e-flodni-$v"
+  docker network create --internal "$network" >/dev/null
+  docker run -d --name "$flodni" --network "$network" --network-alias flodni \
+    --device /dev/fuse --cap-add SYS_ADMIN --security-opt apparmor:unconfined \
+    -v "$dir/config.json:/config.json:ro" -v "$dir/tokens.json:/tokens.json:ro" \
+    -v "$dir/state:/state" -v "$dir/cache:/cache" "$FLODNI_IMAGE" >/dev/null
+
+  # Up when the control port serves and the engine answers its readiness probe.
+  until [ "$(awk 'NR==1 { print $2 }' <<<"$(scoped_req 9080 GET /api/live)")" = 200 ] &&
+    [ "$(awk 'NR==1 { print $2 }' <<<"$(scoped_req 8090 GET /echo)")" = 200 ]; do
+    if ! is_running "$flodni"; then
+      echo "FAIL ($v): the container exited before it served" >&2
+      dump_diagnostics
+      return 1
+    fi
+    if [ "$waited" -ge "$WAIT_SECONDS" ]; then
+      echo "FAIL ($v): no answer on 9080 and 8090 after ${WAIT_SECONDS}s" >&2
+      dump_diagnostics
+      return 1
+    fi
+    sleep 2
+    waited=$((waited + 2))
+  done
+
+  local wrong=fl_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+  local magnet_http='{"type":"movie","title":"x","year":2000,"magnet":"http://host.invalid/x?xt=urn:btih:0123456789abcdef0123456789abcdef01234567"}'
+
+  # Open routes: no credential, both ports.
+  sc_expect "control /api/live is open" 200 9080 GET /api/live || return 1
+  sc_body "control /api/live" present ok || return 1
+  sc_expect "control /control is open" 200 9080 GET /control || return 1
+  sc_expect "engine /echo is open" 200 8090 GET /echo || return 1
+
+  # Control port: no credential, a wrong one, the wrong scope, the right scope.
+  sc_expect "control without a credential" 401 9080 GET /api/startup || return 1
+  sc_header "control without a credential" present Flodni-Auth || return 1
+  sc_expect "control with an unknown token" 401 9080 GET /api/startup "$wrong" || return 1
+  sc_expect "control with a webhook token on a read route" 403 9080 GET /api/startup "$tok_hook" || return 1
+  sc_header "control wrong scope" absent Flodni-Auth || return 1
+  sc_expect "control with a read token on a library route" 403 9080 POST /api/library/add "$tok_read" "$magnet_http" || return 1
+  sc_expect "control with a library token on a read route" 403 9080 GET /api/startup "$tok_lib" || return 1
+
+  # The startup report appears once the mount is up and the walk has finished.
+  waited=0
+  until [ "$(awk 'NR==1 { print $2 }' <<<"$(scoped_req 9080 GET /api/startup "$tok_read")")" = 200 ]; do
+    if [ "$waited" -ge "$WAIT_SECONDS" ]; then
+      echo "FAIL ($v): no startup report after ${WAIT_SECONDS}s" >&2
+      dump_diagnostics
+      return 1
+    fi
+    sleep 2
+    waited=$((waited + 2))
+  done
+  sc_expect "control with a read token" 200 9080 GET /api/startup "$tok_read" || return 1
+  sc_body "startup report mode" present '"mode":"scoped"' || return 1
+  sc_body "startup report alarms" absent auth_not_enforced || return 1
+  sc_expect "control with a library token on a library route" 400 9080 POST /api/library/add "$tok_lib" "$magnet_http" || return 1
+  sc_body "an http link is refused as not a magnet" present "only a magnet" || return 1
+
+  # ?token= is for a webhook-only token on the two webhook routes, and nowhere else.
+  sc_expect "webhook with ?token= of a webhook token" 200 9080 POST "/webhook?token=$tok_hook" || return 1
+  sc_expect "webhook with ?token= of a library token" 401 9080 POST "/webhook?token=$tok_lib" || return 1
+  sc_expect "?token= off the webhook routes" 401 9080 GET "/api/startup?token=$tok_read" || return 1
+
+  # The refusals so far are in the metric family, by route, scope and reason.
+  sc_expect "control metrics with a metrics token" 200 9080 GET /metrics/prometheus "$tok_metrics" || return 1
+  sc_body "refusal metric" present 'flodni_auth_refusals_total{' || return 1
+  sc_body "refusal metric reasons" present 'reason="scope"' || return 1
+
+  # The engine port enforces the same tokens, by its own routes.
+  local list='{"action":"list"}'
+  sc_expect "engine without a credential" 401 8090 POST /torrents "" "$list" || return 1
+  sc_header "engine without a credential" absent Flodni-Auth || return 1
+  sc_expect "engine with a read token" 403 8090 POST /torrents "$tok_read" "$list" || return 1
+  sc_expect "engine with a webhook token" 403 8090 POST /torrents "$tok_hook" "$list" || return 1
+  sc_expect "engine with an engine token" 200 8090 POST /torrents "$tok_engine" "$list" || return 1
+  sc_expect "engine shutdown with an engine token" 403 8090 POST /shutdown "$tok_engine" || return 1
+  sc_expect "engine with ?token= and no bearer" 401 8090 POST "/torrents?token=$tok_engine" "" "$list" || return 1
+
+  # The container's own log: the start decided scoped mode, the report says so, and no
+  # token of this run was written to it.
+  local logs
+  logs=$(docker logs "$flodni" 2>&1)
+  if ! grep -qF 'Scoped-token auth enabled' <<<"$logs"; then
+    echo "FAIL ($v): the engine did not log its auth line" >&2
+    dump_diagnostics
+    return 1
+  fi
+  if ! grep -F '[Startup] report' <<<"$logs" | grep -qF '"mode":"scoped"' ||
+    grep -F '[Startup] report' <<<"$logs" | grep -qF auth_not_enforced; then
+    echo "FAIL ($v): the [Startup] report line does not say scoped, or raises auth_not_enforced" >&2
+    dump_diagnostics
+    return 1
+  fi
+  local t
+  for t in "$tok_read" "$tok_hook" "$tok_engine" "$tok_lib" "$tok_metrics" "$wrong"; do
+    if grep -qF -- "$t" <<<"$logs"; then
+      echo "FAIL ($v): a token reached the container's log" >&2
+      return 1
+    fi
+  done
+  echo "ok ($v): the start logged scoped mode and no token reached the log" >&2
+  echo "PASS ($v): both ports enforce the scopes, ?token= is webhook-only, /api/live /control and /echo are open, $((SECONDS - t0))s" >&2
+
+  docker rm -f "$flodni" >/dev/null
+  docker network rm "$network" >/dev/null
+  flodni="" network=""
+}
+
 want_variant() { [ -z "${E2E_ONLY:-}" ] || [ "$E2E_ONLY" = "$1" ]; }
 
 if want_variant default; then run_variant default; fi
@@ -2273,4 +2483,5 @@ if want_variant keep-alive; then run_keepalive; fi
 if want_variant budget-refusal; then run_budget_refusal; fi
 if want_variant replacement; then run_replacement; fi
 if want_variant removal; then run_removal; fi
+if want_variant scoped; then run_scoped; fi
 echo "e2e: all variants passed" >&2

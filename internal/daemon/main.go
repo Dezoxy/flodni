@@ -636,10 +636,7 @@ func Run() {
 	ctl.Startup = app.startup.handler
 	ctl.WarmupEvict = newWarmupEvictHandler(evictWarmupTo)
 
-	ctl.Panel = func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "text/html")
-		_, _ = w.Write(settingsHTML)
-	}
+	ctl.Panel = handlePanel
 
 	// The panel's login cookie (scoped mode only; 404 elsewhere). The gate reads the
 	// cookie through controlSession.Verify.

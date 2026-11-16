@@ -5,7 +5,10 @@ Date: 2026-11-16
 ## Status
 
 Accepted on 2026-11-16, for v0.3.0, after two rounds of security review.
-Nothing in this record is built yet; the migration steps below build it.
+Implemented in v0.3.0: the seven migration steps below are built and merged, and
+the README ("Scoped tokens"), `SECURITY.md` and the threat model describe the
+result. Where this record and the code differ, the code and the README are
+current; the differences found while building it are corrected in place below.
 
 The owner decided the five open points that mattered:
 
@@ -395,9 +398,11 @@ JSON, because the config already is:
 - **Startup-only settings.** In scoped mode `api_token`, `auth_tokens_file`,
   `auth_jwt` and `auth_panel_https` are read at start and never changed
   through the API. A `POST /api/config` whose body would change any of them
-  answers 403 and writes nothing; a save that does not touch them keeps the
-  values of the copy **read at start**, not a re-read of the file at save
-  time, as a save keeps `api_token` today. This closes a persistence
+  answers 403 and writes nothing; a save writes back
+  the file's **current** value of `auth_tokens_file`, `auth_jwt` and
+  `auth_panel_https`, re-read at save time, in every mode, so a hand edit made
+  since the start survives a save (a post that echoes the running value or the
+  file's is accepted; any other value is refused). This closes a persistence
   path the existing gate has: with a token enforced, a posted `api_token` is
   written to `config.json`, and a restart (which an `admin` may also request)
   then activates it, so a leaked admin token, a 12-hour cookie or an admitted
@@ -760,7 +765,11 @@ scoped mode:
     `jwt_signature`, `jwt_issuer`, `jwt_audience`, `jwt_expired`,
     `jwt_not_yet_valid`, `jwt_claims`: a JWT header was present and failed;
   - `host`, `origin`, `cross_site`: the existing refusals of the same gate,
-    counted in the same family in **every mode, open mode included**.
+    counted in the same family in **every mode, open mode included**;
+  - `closed` (added while building it): a gate built with no credential store
+    answers 503 to everything; a wiring mistake, never a configuration, so it
+    is logged as an error when the gate is built and every request is logged
+    and counted under `route="pre_route"`.
   Emitted by the daemon's Prometheus text writer (`metrics_prom.go`);
   `apiauth` reports each refusal through an observer option so it imports no
   metrics code.
@@ -785,7 +794,11 @@ scoped mode:
 | Configuration | Behaviour |
 |---|---|
 | No `api_token`, no tokens file, `config.json` absent or readable | **v0.2.6**: both servers open, the open-port hardening in force. The additions are `GET /api/live`, the refusal metric family (which also counts the existing Host, Origin and cross-site refusals), and the `auth` section of the startup report. |
-| `config.json` exists but cannot be read or parsed | **Refuses to start, in every mode.** The one deliberate departure from v0.2.6. |
+| `config.json` exists but cannot be read or parsed | **Refuses to start, in every mode.** A deliberate departure from v0.2.6; the next four rows are the others. |
+| `config.json` holds `api_token` repeated, in another case (`API_TOKEN`, `Api_Token`) or as `null` | **Refuses to start, in every mode.** v0.2.6 decoded the file with a plain `json.Unmarshal` and no key check, so `API_TOKEN` folded onto `api_token` and was a working token. Release note: rename it `api_token`. |
+| `config.json` holds a top-level key that is not a known setting and whose name contains `auth` (any case or separator: `auth_token_file`, `auth-tokens-file`, `author`) | **Refuses to start, in every mode.** A mistyped auth key would otherwise leave the daemon open with one warning. Any other unknown key still only logs one warning that lists the names. |
+| `auth_tokens_file`, `auth_jwt` or `auth_panel_https` repeated, re-cased or `null`; an `auth_jwt` block that repeats, re-cases or adds a key | **Refuses to start, in every mode.** `encoding/json` keeps the last duplicate and matches keys without regard to case, so each of these could silently turn auth off or point it elsewhere. |
+| Library add or inspect with a link that is not a `magnet:` with an anchored 40-hex or 32-base32 hash | 400 before any engine call, in every mode. v0.2.6 passed an `http(s)` link on to the engine. |
 | `api_token` only | Today's behaviour: one token, every scope, `?token=` on the two webhook routes. Reported as `legacy_token`. |
 | `auth_tokens_file` only | Scoped mode: deny by default. |
 | `api_token` **and** `auth_tokens_file` | **Refuses to start**, naming both settings. There is no alias that keeps the old token alive beside scoped ones. |
