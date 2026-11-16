@@ -107,6 +107,12 @@ func TestSecureCases(t *testing.T) {
 			if got := issue(t, m, r, "owner").Secure; got != tc.want {
 				t.Errorf("Secure = %v, want %v", got, tc.want)
 			}
+			// The cookie logout sets to clear the session carries the same Secure.
+			rec := httptest.NewRecorder()
+			m.Revoke(rec, r)
+			if cs := rec.Result().Cookies(); len(cs) != 1 || cs[0].Secure != tc.want {
+				t.Errorf("logout cookie = %+v, want one with Secure %v", cs, tc.want)
+			}
 		})
 	}
 }
@@ -239,7 +245,7 @@ func TestLogoutRevokesEveryCookie(t *testing.T) {
 	stolen := *a
 	b := issue(t, m, plainReq(), "guest")
 	rec := httptest.NewRecorder()
-	m.Revoke(rec)
+	m.Revoke(rec, plainReq())
 	for _, ck := range []*http.Cookie{a, &stolen, b} {
 		if _, present, err := m.Verify(withCookie(ck)); !present || !errors.Is(err, ErrSession) {
 			t.Errorf("a cookie from before logout: present=%v err=%v", present, err)
@@ -292,7 +298,7 @@ func TestConcurrentIssueVerifyRevoke(t *testing.T) {
 				ck := issue(t, m, plainReq(), "owner")
 				m.Verify(withCookie(ck))
 				if j%50 == 0 {
-					m.Revoke(httptest.NewRecorder())
+					m.Revoke(httptest.NewRecorder(), plainReq())
 				}
 			}
 		}()

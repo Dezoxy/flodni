@@ -117,8 +117,8 @@ func (m *Manager) isHTTPS(r *http.Request) bool {
 }
 
 // Revoke is logout: it increments the generation, so every cookie issued before it
-// stops verifying, and clears the caller's cookie.
-func (m *Manager) Revoke(w http.ResponseWriter) {
+// stops verifying, and clears the caller's cookie with the same Secure rule as Issue.
+func (m *Manager) Revoke(w http.ResponseWriter, r *http.Request) {
 	m.gen.Add(1)
 	http.SetCookie(w, &http.Cookie{
 		Name:     CookieName,
@@ -126,6 +126,7 @@ func (m *Manager) Revoke(w http.ResponseWriter) {
 		Path:     "/",
 		MaxAge:   -1,
 		HttpOnly: true,
+		Secure:   m.secure(r),
 		SameSite: http.SameSiteStrictMode,
 	})
 }

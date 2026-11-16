@@ -130,7 +130,7 @@ func (h *Handlers) Logout(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	h.m.Revoke(w)
+	h.m.Revoke(w, r)
 	w.Header().Set("Cache-Control", "no-store")
 	if h.log != nil {
 		h.log.Info(fmt.Sprintf("[Control] panel sessions revoked from %s", r.RemoteAddr), "remote_addr", r.RemoteAddr)
