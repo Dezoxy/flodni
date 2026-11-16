@@ -34,6 +34,7 @@ func TestMayTakeOverStreamingPrimary(t *testing.T) {
 
 func TestActiveStreamingPrimaryNeedsAPrimaryThatStreamedAndReadLately(t *testing.T) {
 	newTestApp(t)
+	useTestGlobals(t)
 	const path = "/test/active-primary.mkv"
 	probe := newTestHandle(path)
 	registerHandle(t, probe)
@@ -50,7 +51,7 @@ func TestActiveStreamingPrimaryNeedsAPrimaryThatStreamedAndReadLately(t *testing
 	}
 	mk(true, false, 0) // a probe holding primary: never streamed
 	mk(false, true, 0) // streams, but is not the primary
-	mk(true, true, 10*primaryActiveWindow)
+	mk(true, true, 10*primaryActiveWindow())
 	if activeStreamingPrimary(path, probe) != nil {
 		t.Fatal("a primary that never streamed, a streamer that is not primary and a quiet primary must not count")
 	}

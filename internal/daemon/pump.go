@@ -818,9 +818,16 @@ func shouldInterruptPump(prevOff, off, budget int64, tailServed bool) bool {
 }
 
 // primaryActiveWindow is how recently a primary that has streamed must have read to count as a
-// player that is watching. A paused player that buffered ahead goes quiet for longer; its
-// primary is then up for taking, which is what a reopen or a seek through another handle needs.
-const primaryActiveWindow = 2 * time.Second
+// player that is watching: the configured warm_start_idle_seconds, the idle time after which
+// the read path already treats a handle as starting afresh. A buffered player goes quiet for
+// seconds between bursts; once it is quiet for longer nothing watches through its primary and
+// it is up for taking, which is what a reopen or a seek through another handle needs.
+func primaryActiveWindow() time.Duration {
+	if n := gc().WarmStartIdleSeconds; n > 0 {
+		return time.Duration(n) * time.Second
+	}
+	return 6 * time.Second
+}
 
 // activeStreamingPrimary returns the primary handle on path, other than except, that has
 // streamed like a player and read within primaryActiveWindow, or nil. A stale probe primary
@@ -834,7 +841,7 @@ func activeStreamingPrimary(path string, except *MkvHandle) *MkvHandle {
 		if !ok || other == except || other.path != path || !other.isPrimaryHandle.Load() || !other.streamedOnce.Load() {
 			return true
 		}
-		if now-other.lastRead.Load() <= int64(primaryActiveWindow) {
+		if now-other.lastRead.Load() <= int64(primaryActiveWindow()) {
 			found = other
 			return false
 		}

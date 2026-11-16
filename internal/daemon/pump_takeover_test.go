@@ -49,10 +49,40 @@ func TestAPlayerWhosePrimaryWentQuietTakesThePump(t *testing.T) {
 		t.Fatalf("primary owner = %s with A still reading, want [A]", got)
 	}
 
-	a.h.lastRead.Store(time.Now().Add(-2 * primaryActiveWindow).UnixNano())
+	a.h.lastRead.Store(time.Now().Add(-2 * primaryActiveWindow()).UnixNano())
 	b.readRange(700*mb+16*probeStep, 16*probeStep, probeStep)
 	if got := sim.primaryOwner(); got != "[B]" {
 		t.Errorf("primary owner = %s, want [B] once A went quiet", got)
+	}
+}
+
+// A buffered player goes quiet between bursts. Three seconds is inside the window: a probe
+// arriving then still defers to the primary, and the resume position stays the player's.
+func TestAProbeArrivingWhileThePrimaryIsBrieflyQuietLeavesItAlone(t *testing.T) {
+	sim := newPumpSim(t, "/test/takeover-brief-quiet.mkv", probeSize, probeAt, probeFetch)
+	a := sim.open("A")
+	sim.settle()
+	a.readRange(probeAt, 40*probeStep, probeStep)
+	last := probeAt + 39*probeStep
+	a.h.lastRead.Store(time.Now().Add(-3 * time.Second).UnixNano())
+	if 3*time.Second >= primaryActiveWindow() {
+		t.Fatalf("setup: 3 s is not inside the window (%v)", primaryActiveWindow())
+	}
+	b := sim.open("B")
+
+	streamFar(b, 700*mb, 16)
+	b.release()
+	if got := sim.primaryOwner(); got != "[A]" {
+		t.Errorf("primary owner = %s, want [A]: a probe took the primary from a briefly quiet player", got)
+	}
+	if got := sim.resumeOff(); got != last {
+		t.Errorf("persisted resume position = %d MiB, want A's %d MiB", got/mb, last/mb)
+	}
+	if got := atomic.LoadInt64(&sim.pumpState().playerOff); got != 0 {
+		t.Errorf("shared player position = %d MiB, want it untouched", got/mb)
+	}
+	if sim.pumpTarget() >= 600*mb {
+		t.Errorf("pump target = %d MiB: the pump followed the probe", sim.pumpTarget()/mb)
 	}
 }
 
