@@ -220,14 +220,13 @@ is set and returns status words only. The image's health check runs
 `flodni healthcheck`, which requests it on `127.0.0.1:<metrics_port>` and
 exits 0 on HTTP 200 and 1 otherwise; run it with
 `docker exec <container> flodni healthcheck`. If `config.json` cannot be read or
-parsed at that moment (an edit in progress), it asks the default port, 9080,
+parsed at that moment (an edit in progress), it asks the port the file names if that key still decoded, else the default 9080,
 rather than report the daemon unhealthy.
 
 `GET /api/live` on the control port answers `200` and `ok` and checks nothing, so
 a container or load balancer that only needs to know the process serves can poll
 it cheaply. Unlike `/api/health` it runs no mount, engine or database check and
-returns no `warnings`. It is open even when a token is set, and `GET` and `HEAD`
-only.
+returns no `warnings`. It is open even when a token is set, for `GET` only (other methods are refused like any other route).
 
 **An unreadable `config.json` refuses to start.** A `config.json` that exists but
 cannot be read, or does not parse (comments are stripped first; a value of the

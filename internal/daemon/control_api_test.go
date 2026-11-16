@@ -32,7 +32,7 @@ func controlAPIServer(t *testing.T, startToken, fileToken string) (h http.Handle
 
 	newTestApp(t).controlToken = startToken
 	prevCfg, prevLog, prevRestart := globalConfig.Load(), logger, restartSelf
-	cfg := loadCfg()
+	cfg := loadCfg(t)
 	globalConfig.Store(&cfg)
 	logger = flog.NewText(io.Discard)
 	n := 0
@@ -223,7 +223,7 @@ func TestOpenPortRefusesChangingAllowedHosts(t *testing.T) {
 	if err := os.WriteFile(path, []byte(`{"log_level":"info","allowed_hosts":["x.example"]}`), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	cfg := loadCfg() // the running config holds the list too
+	cfg := loadCfg(t) // the running config holds the list too
 	globalConfig.Store(&cfg)
 	before, _ := os.ReadFile(path)
 	for _, body := range []string{
@@ -306,7 +306,7 @@ func TestOpenPortSaveEqualToRunningListKeepsTheHandEdit(t *testing.T) {
 	if err := os.WriteFile(path, []byte(`{"allowed_hosts":["old.example"]}`), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	cfg := loadCfg() // the running config: old.example
+	cfg := loadCfg(t) // the running config: old.example
 	globalConfig.Store(&cfg)
 	if err := os.WriteFile(path, []byte(`{"allowed_hosts":["old.example","hand.example"]}`), 0o600); err != nil {
 		t.Fatal(err)
@@ -335,10 +335,10 @@ func TestInvalidPostedAllowedHostsIs400(t *testing.T) {
 	}
 }
 
-// A type error in another key makes the file fail to parse, but the list it holds is
-// still enforced; a save with a token must not write null over it. Since ADR 0004 the
-// save is refused (409) in every mode and the file is left as the owner wrote it.
-func TestTokenSaveKeepsTheListWhenAnotherKeyIsMistyped(t *testing.T) {
+// A type error in another key makes the file fail to load. Since ADR 0004 a save
+// over it is refused (409) in every mode, so the list it holds is never overwritten
+// and the file is left as the owner wrote it.
+func TestSaveOverATypeErrorFileIs409AndLeavesTheList(t *testing.T) {
 	h, path, _ := controlAPIServer(t, "tok", "tok")
 	broken := `{"api_token":"tok","allowed_hosts":["x.example"],"metrics_port":"abc"}`
 	if err := os.WriteFile(path, []byte(broken), 0o600); err != nil {

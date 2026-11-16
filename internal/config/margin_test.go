@@ -3,7 +3,7 @@ package config
 import "testing"
 
 func TestUnconfirmedReadMargin(t *testing.T) {
-	if got := loadCfg().UnconfirmedReadMarginMB; got != 64 {
+	if got := loadCfg(t).UnconfirmedReadMarginMB; got != 64 {
 		t.Fatalf("default = %d MB, want 64", got)
 	}
 	tests := []struct {

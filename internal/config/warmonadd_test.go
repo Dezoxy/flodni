@@ -11,7 +11,7 @@ import (
 // what it got, encode it back) keeps it.
 
 func TestWarmOnAddDefaultsToOff(t *testing.T) {
-	if loadCfg().WarmOnAdd {
+	if loadCfg(t).WarmOnAdd {
 		t.Fatal("warm_on_add is on by default: it spends bandwidth on every add")
 	}
 }

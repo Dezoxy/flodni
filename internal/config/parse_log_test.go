@@ -39,9 +39,13 @@ func TestUnparsableConfigIsLoggedAndFlagged(t *testing.T) {
 	}
 }
 
-// loadCfg is LoadConfig for the tests that read a default or a valid file and
-// have no use for the error.
-func loadCfg() Config {
-	c, _ := LoadConfig()
+// loadCfg is LoadConfig for the tests that read a default or a valid file: any
+// error fails the test.
+func loadCfg(t *testing.T) Config {
+	t.Helper()
+	c, err := LoadConfig()
+	if err != nil {
+		t.Fatalf("LoadConfig: %v", err)
+	}
 	return c
 }

@@ -64,7 +64,7 @@ func TestGetConfigNeverReturnsThePlexToken(t *testing.T) {
 		}
 		h, path, _ := controlAPIServer(t, start, "")
 		writeCfg(t, path, `{"log_level":"info","api_token":"`+start+`","plex":{"url":"http://x","token":"`+plexSecret+`"}}`)
-		cfg := loadCfg()
+		cfg := loadCfg(t)
 		globalConfig.Store(&cfg)
 		code, body := getConfig(h, bearer)
 		if code != http.StatusOK {

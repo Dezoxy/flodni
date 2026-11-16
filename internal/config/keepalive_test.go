@@ -9,7 +9,7 @@ import (
 // playback_keepalive_minutes is the keep-alive's one off switch: 15 by default, 0 turns
 // it off, a negative or absurd value falls back to 15.
 func TestPlaybackKeepaliveMinutes(t *testing.T) {
-	if got := loadCfg().PlaybackKeepaliveMinutes; got != 15 {
+	if got := loadCfg(t).PlaybackKeepaliveMinutes; got != 15 {
 		t.Fatalf("default = %d, want 15", got)
 	}
 	for body, want := range map[string]int{
@@ -29,7 +29,7 @@ func TestPlaybackKeepaliveMinutes(t *testing.T) {
 // playback_keepalive_max_torrents is the cap: 4 by default, at least 1. 0 or a negative
 // value is replaced by 4, so 0 never means off or unlimited here.
 func TestPlaybackKeepaliveMaxTorrents(t *testing.T) {
-	if got := loadCfg().PlaybackKeepaliveMaxTorrents; got != 4 {
+	if got := loadCfg(t).PlaybackKeepaliveMaxTorrents; got != 4 {
 		t.Fatalf("default = %d, want 4", got)
 	}
 	for body, want := range map[string]int{

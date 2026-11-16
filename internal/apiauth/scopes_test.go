@@ -2,6 +2,7 @@ package apiauth
 
 import (
 	"bufio"
+	"net/http/httptest"
 	"os"
 	"strings"
 	"testing"
@@ -100,7 +101,45 @@ func TestLivenessRouteIsOpen(t *testing.T) {
 	if got := serve(tok, "POST", "/api/live", "").Code; got != 401 {
 		t.Errorf("POST /api/live = %d, want 401", got)
 	}
+	if got := serve(tok, "HEAD", "/api/live", "").Code; got != 401 {
+		t.Errorf("HEAD /api/live = %d, want 401 (GET only, like the table)", got)
+	}
 	if got := serve(tok, "GET", "/api/live/x", "").Code; got != 401 {
 		t.Errorf("GET /api/live/x = %d, want 401", got)
+	}
+}
+
+// The table's own rules. A pattern with an ActionNone row and action rows would
+// let the first row win; every catch-all action row is admin; and an open row is
+// open in the gate, and nothing else is.
+func TestRouteTableInvariants(t *testing.T) {
+	type key struct {
+		s    Server
+		m, p string
+	}
+	none, acted := map[key]bool{}, map[key]bool{}
+	for _, r := range Routes() {
+		k := key{r.Server, r.Method, r.Pattern}
+		if r.Action == ActionNone {
+			none[k] = true
+		} else {
+			acted[k] = true
+		}
+		if r.Action == ActionAny && r.Scope != ScopeAdmin {
+			t.Errorf("%+v: a catch-all action must be admin", r)
+		}
+		open := controlOpen
+		if r.Server == Engine {
+			open = gostormOpen
+		}
+		req := httptest.NewRequest(r.Method, r.Pattern, nil)
+		if got := open(req); got != (r.Scope == ScopeOpen) {
+			t.Errorf("%+v: the gate's open set says %v", r, got)
+		}
+	}
+	for k := range none {
+		if acted[k] {
+			t.Errorf("%+v has both an action-less row and action rows", k)
+		}
 	}
 }

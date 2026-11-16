@@ -493,12 +493,12 @@ func Run() {
 
 	globalTorrentRemover = NewTorrentRemover(logger)
 
-	// Own mux (see controlRoutes): every pattern goes through routes.handle so the
-	// route-to-scope test can list them.
-	routes := newControlRoutes()
-	routes.handle("/plex/webhook", handlePlexWebhook)
+	// The control server's handlers are collected in ctl and registered together by
+	// registerControlRoutes, so the route-to-scope tests can drive the real mux.
+	var ctl controlHandlers
+	ctl.PlexWebhook = handlePlexWebhook
 
-	routes.handle("/metrics", func(w http.ResponseWriter, r *http.Request) {
+	ctl.Metrics = func(w http.ResponseWriter, r *http.Request) {
 		cacheStats := metaCache.Stats()
 		cleanupStats := globalCleanupManager.Stats()
 		lockStats := globalLockManager.Stats()
@@ -561,11 +561,11 @@ func Run() {
 			peerStats.UsefulBpsTCP, peerStats.UsefulBpsUTP,
 			peerStats.EjectUTP, peerStats.ChurnTotal, peerStats.ChurnUTP, deadlinePieces,
 			g2Stats.Peers, g2Stats.BackingOff, g2Stats.LimitMin, g2Stats.LimitMax)
-	})
+	}
 
-	routes.handle("/webhook", handlePlexWebhook)
+	ctl.Webhook = handlePlexWebhook
 
-	routes.handle("/metrics/profiling", func(w http.ResponseWriter, r *http.Request) {
+	ctl.Profiling = func(w http.ResponseWriter, r *http.Request) {
 		totalReads, cacheHits, httpFetches, streamingReads, avgHTTPLatency, avgCacheLatency, cacheHitRate := globalProfilingStats.Stats()
 
 		_, _ = fmt.Fprintf(w, `{"version":"%s", "total_reads":%d, "cache_hits":%d, "cache_hit_rate_pct":%.2f, "http_fetches":%d, "streaming_reads":%d, "non_streaming_reads":%d, "avg_http_latency_ms":%.2f, "avg_cache_latency_ms":%.2f, "max_conns_per_host":%d}`,
@@ -579,11 +579,11 @@ func Run() {
 			float64(avgHTTPLatency.Microseconds())/1000.0,
 			float64(avgCacheLatency.Microseconds())/1000.0,
 			gc().MaxConnsPerHost)
-	})
+	}
 
-	routes.handle("/metrics/prometheus", handlePrometheus)
+	ctl.Prometheus = handlePrometheus
 
-	routes.handle("/metrics/ttff", func(w http.ResponseWriter, r *http.Request) {
+	ctl.TTFF = func(w http.ResponseWriter, r *http.Request) {
 		_, _ = fmt.Fprintf(w, `{"sessions_completed":%d,"sessions_filtered":%d,`+
 			`"open_to_header_ms":%s,"open_to_deep_read_ms":%s,"seek_latency_ms":%s,`+
 			`"read_latency_ms":{"warmup_head":%s,"warmup_tail":%s,"racache_hit":%s,"fetch_block":%s},`+
@@ -593,35 +593,35 @@ func Run() {
 			histJSON(&ttffStats.warmupHead), histJSON(&ttffStats.warmupTail),
 			histJSON(&ttffStats.raCacheHit), histJSON(&ttffStats.fetchBlock),
 			ttffStats.stallCount.Load(), ttffStats.maxStallMS.Load())
-	})
+	}
 
-	routes.handle("/api/sessions", handleSessions)
+	ctl.Sessions = handleSessions
 	// Assigned only when the database is open: a nil *metadb.DB in the interface
 	// would not compare equal to nil and the handler would never answer 503.
 	var healthStore readabilityLister
 	if stateDB != nil {
 		healthStore = stateDB
 	}
-	routes.handle("/api/torrents/health", newTorrentsHealthHandler(healthStore, fileStates.WarmSnapshot, logger))
-	routes.handle("/api/torrents/scrape", handleScrapeTrigger)
-	routes.handle("/api/torrents/scrape/status", handleScrapeStatus)
-	routes.handle("/api/health", newHealthChecks().handler)
-	routes.handle("/api/live", handleLive)
-	routes.handle("/api/startup", app.startup.handler)
-	routes.handle("/api/warmup/evict", newWarmupEvictHandler(evictWarmupTo))
+	ctl.TorrentsHealth = newTorrentsHealthHandler(healthStore, fileStates.WarmSnapshot, logger)
+	ctl.ScrapeTrigger = handleScrapeTrigger
+	ctl.ScrapeStatus = handleScrapeStatus
+	ctl.Health = newHealthChecks().handler
+	ctl.Live = handleLive
+	ctl.Startup = app.startup.handler
+	ctl.WarmupEvict = newWarmupEvictHandler(evictWarmupTo)
 
-	routes.handle("/control", func(w http.ResponseWriter, r *http.Request) {
+	ctl.Panel = func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/html")
 		_, _ = w.Write(settingsHTML)
-	})
+	}
 
-	routes.handle("/api/config", handleConfig)
+	ctl.Config = handleConfig
 
 	// Same-origin proxy to the GoStorm settings API. The Control Panel must not
 	// build an absolute URL of its own: behind a reverse proxy the GoStorm port is
 	// not exposed, and an http:// call from an https:// page is blocked as mixed
 	// content, which left the whole GoStorm section empty and unsaveable.
-	routes.handle("/api/gostorm/settings", func(w http.ResponseWriter, r *http.Request) {
+	ctl.GostormSettings = func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != "POST" {
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 			return
@@ -655,9 +655,9 @@ func Run() {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(resp.StatusCode)
 		_, _ = io.Copy(w, resp.Body)
-	})
+	}
 
-	routes.handle("/api/restart", handleRestart)
+	ctl.Restart = handleRestart
 
 	// Library API (external clients)
 	// Adds one title without any discovery: register the
@@ -743,13 +743,13 @@ func Run() {
 		// Next episode (idle unless warm_next_episode is on): see warm_next.go.
 		startWarmNext(libMgr)
 		libHandler := library.NewHandler(libMgr)
-		routes.handle("/api/library/add", libHandler.Add)
-		routes.handle("/api/library/remove", libHandler.Remove)
-		routes.handle("/api/library/list", libHandler.List)
-		routes.handle("/api/library/inspect", libHandler.Inspect)
-		routes.handle("/api/library/audit", libHandler.Audit)
-		routes.handle("/api/library/file", libHandler.File)
-		routes.handle("/api/library/confirm", libHandler.Confirm)
+		ctl.LibraryAdd = libHandler.Add
+		ctl.LibraryRemove = libHandler.Remove
+		ctl.LibraryList = libHandler.List
+		ctl.LibraryInspect = libHandler.Inspect
+		ctl.LibraryAudit = libHandler.Audit
+		ctl.LibraryFile = libHandler.File
+		ctl.LibraryConfirm = libHandler.Confirm
 	}
 
 	// Control server: metrics, dashboard API and the library API.
@@ -767,9 +767,11 @@ func Run() {
 	if gc().APIToken != "" {
 		logger.Info("[Control] bearer-token auth enabled")
 	}
+	routes := apiauth.NewRegistrar()
+	registerControlRoutes(routes, ctl)
 	controlSrv := &http.Server{
 		Addr:              fmt.Sprintf(":%d", gc().MetricsPort),
-		Handler:           apiauth.Middleware(app.controlToken, logger, routes.mux, apiauth.WithAllowedHosts(gc().EffectiveAllowedHosts())),
+		Handler:           apiauth.Middleware(app.controlToken, logger, routes, apiauth.WithAllowedHosts(gc().EffectiveAllowedHosts())),
 		ReadHeaderTimeout: 10 * time.Second,
 		ReadTimeout:       60 * time.Second,
 		WriteTimeout:      600 * time.Second,
