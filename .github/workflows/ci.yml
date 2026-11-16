@@ -69,6 +69,7 @@ jobs:
         run: |
           go test -race -count=1 -run 'Private|PeerRequestServer|PeerWake|ProcessCounters|Malformed' .
           go test -race -count=1 -run Malformed ./tracker/http ./webseed
+          go test -race -count=1 -run DecodeDepth ./bencode
 
   workflow-lint:
     name: Workflow lint (actionlint, zizmor)

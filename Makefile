@@ -57,6 +57,7 @@ go-test:
 	go test -race -count=1 $(GO_PKGS)
 	cd internal/anacrolix-torrent && go test -race -count=1 -run 'Private|PeerRequestServer|PeerWake|ProcessCounters|Malformed' .
 	cd internal/anacrolix-torrent && go test -race -count=1 -run Malformed ./tracker/http ./webseed
+	cd internal/anacrolix-torrent && go test -race -count=1 -run DecodeDepth ./bencode
 
 ## e2e             end-to-end stream test: seed a private torrent, read it through FUSE in the real image (Docker, /dev/fuse)
 e2e:
