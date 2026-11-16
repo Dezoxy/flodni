@@ -154,9 +154,28 @@ func collectProm(w *promtext.Writer) {
 		"Outcome of the refill after a short read.",
 		promSample(fuseShortReadRepaired.Load(), lbl("result", "repaired")),
 		promSample(fuseShortReadFailed.Load(), lbl("result", "failed")))
+	collectFuseReadAheadProm(w)
 	w.Counter("flodni_fetch_dedup_total",
 		"Concurrent fetches of the same chunk that shared one fetch.",
 		promSample(fetchFlightDedupCount.Load()))
+}
+
+// collectFuseReadAheadProm writes the mount's kernel read-ahead, read from sysfs at
+// each scrape (one small file). No series before the mount's BDI is known, on a
+// platform without sysfs, or when the file cannot be read: a zero would read as
+// "read-ahead off".
+func collectFuseReadAheadProm(w *promtext.Writer) {
+	bdi := mountBDI.Load()
+	if bdi == nil {
+		return
+	}
+	kb, err := readAheadKB(sysBDIRoot, *bdi)
+	if err != nil {
+		return
+	}
+	w.Gauge("flodni_fuse_read_ahead_kb",
+		"Kernel read-ahead of the FUSE mount in KiB, read from sysfs at each scrape. Flodni never writes it; the host may tune it. Absent when the file cannot be read.",
+		promSample(kb))
 }
 
 func collectWarmupProm(w *promtext.Writer) {
