@@ -52,15 +52,18 @@ func handleConfig(w http.ResponseWriter, r *http.Request) {
 				"plex.token cannot be set or changed through the API while no token is enforced"+setPlexTokenHint)
 			return
 		}
-		onDisk := config.LoadConfig()
+		// A file that exists but cannot be read or parsed would be replaced by defaults,
+		// dropping a token the owner is typing into it. Refused in every mode.
+		onDisk, loadErr := config.LoadConfig()
+		if loadErr != nil {
+			// The cause is logged (path and error class, never file content) so an owner
+			// can tell a directory from a syntax error without guessing.
+			logger.Warn(fmt.Sprintf("[Config] save refused, config.json is unusable: %v", loadErr), "err", loadErr)
+			refuseOpenPort(w, r, http.StatusConflict,
+				"config.json cannot be read or parsed; fix it before saving through the API")
+			return
+		}
 		if app.controlToken == "" {
-			// A file that does not parse would be replaced by defaults, dropping a token
-			// the owner is typing into it.
-			if config.ParseFailed.Load() {
-				refuseOpenPort(w, r, http.StatusConflict,
-					"config.json does not parse; fix it before saving through the API")
-				return
-			}
 			// allowed_hosts is the same kind of setting, and gostorm_url feeds the engine's
 			// list, so the derived list is gated, not each field: a client could clear or
 			// widen what the next start enforces. A post that leaves it as it is saves as before.
@@ -110,12 +113,22 @@ func handleConfig(w http.ResponseWriter, r *http.Request) {
 		}
 		// Update file
 		data, _ := json.MarshalIndent(newCfg, "", "  ")
+		// A save must never write a file the next start refuses: prove the bytes load.
+		if err := checkLoadable(data); err != nil {
+			logger.Warn(fmt.Sprintf("[Config] save refused, the result would not load: %v", err), "err", err)
+			refuseOpenPort(w, r, http.StatusBadRequest, "the saved settings would not load back; nothing was written")
+			return
+		}
 		if err := atomicfile.WriteFileKeepMode(gc().ConfigPath, data, 0600); err != nil {
 			http.Error(w, err.Error(), 500)
 			return
 		}
 		// Reload in memory (V1.4.0 Live Update)
-		cfg := config.LoadConfig()
+		cfg, err := config.LoadConfig()
+		if err != nil {
+			http.Error(w, "saved, but the file no longer loads: "+err.Error(), http.StatusInternalServerError)
+			return
+		}
 		// A save must not reintroduce a path other than the mounted one.
 		_ = applyEffectivePaths(&cfg, physicalSourcePath, virtualMountPath)
 		// RootPath comes from -path at startup, not from the file; without it
@@ -127,6 +140,10 @@ func handleConfig(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(200)
 	}
 }
+
+// checkLoadable is config.CheckLoadable; a test replaces it to force a refusal,
+// because the strip no longer lets a real input fail.
+var checkLoadable = config.CheckLoadable
 
 // setTokenHint says where a token is set when the API may not set it.
 const setTokenHint = ": set api_token through the FLODNI_API_TOKEN environment variable " +
