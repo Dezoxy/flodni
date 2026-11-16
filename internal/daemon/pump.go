@@ -319,6 +319,12 @@ func (h *MkvHandle) nativePump(ctx context.Context, pumpReader streamReader, sta
 		return
 	}
 
+	// ctx is checked only at the top of the loop; without this a cancelled pump blocked in
+	// ReadAt keeps its slot and keeps downloading until the stream times out.
+	// Adapted from upstream Tiramisu 2c6300e.
+	stopInterruptOnCancel := context.AfterFunc(ctx, pumpReader.Interrupt)
+	defer stopInterruptOnCancel()
+
 	if h.hash == "" {
 		// Late hash resolution for handles where Open() didn't complete it.
 		if hash, fileID, err := resolveTargetFile(h.url, h.size, h.path); err == nil {

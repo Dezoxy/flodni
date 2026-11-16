@@ -78,6 +78,7 @@ type MkvHandle struct {
 	seqAdvances     atomic.Int32 // consecutive sequential streaming reads, feeds the promotion below
 	budgetHold      budgetHold   // reader budget: this handle's wait for a webhook (reader_budget.go)
 	wakeRefused     atomic.Bool  // the engine refused to wake this handle's torrent: every read answers EIO
+	released        atomic.Bool  // Release ran: a second call (kernel and orphan sweep) must change nothing
 }
 
 // Compile-time interface checks for MkvHandle
@@ -943,6 +944,12 @@ func ownsPumpState(handleState, registered *NativePumpState) bool {
 }
 
 func (h *MkvHandle) Release(fuseCtx context.Context) syscall.Errno {
+	// Once per handle: a repeat would drop the shared pump's reference a second time (a
+	// sibling's), move the resume position to wherever a late read left lastOff, and free the
+	// open-tracker count twice.
+	if !h.released.CompareAndSwap(false, true) {
+		return 0
+	}
 	ttffReleaseClose(h.path)
 	logger.Info(fmt.Sprintf("=== RELEASE VIRTUAL === path=%s", h.path), "path", h.path)
 
