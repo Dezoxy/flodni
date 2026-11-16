@@ -2,6 +2,8 @@ package torrent
 
 import (
 	"errors"
+	"fmt"
+	"math"
 	"net"
 
 	"github.com/RoaringBitmap/roaring/v2"
@@ -85,7 +87,31 @@ func torrentRequestOffset(torrentLength, pieceSize int64, r Request) (off int64)
 	return
 }
 
+// maxPieceLength caps the piece length: offsets within a piece are 32-bit on the wire and storage
+// allocates per piece.
+const maxPieceLength = 1 << 30
+
 func validateInfo(info *metainfo.Info) error {
+	// Malformed-info guards, adapted from Tiramisu fd976eb (v1 only).
+	if info.PieceLength < 0 {
+		return errors.New("negative piece length")
+	}
+	if info.PieceLength > maxPieceLength {
+		return fmt.Errorf("piece length %v exceeds %v", info.PieceLength, maxPieceLength)
+	}
+	if info.PieceLength == 0 && len(info.Pieces) != 0 {
+		return errors.New("zero piece length with piece hashes")
+	}
+	var total int64
+	for _, fi := range info.UpvertedFiles() {
+		if fi.Length < 0 {
+			return fmt.Errorf("negative file length %v", fi.Length)
+		}
+		if fi.Length > math.MaxInt64-total {
+			return errors.New("total file length overflows")
+		}
+		total += fi.Length
+	}
 	if len(info.Pieces)%20 != 0 {
 		return errors.New("pieces has invalid length")
 	}

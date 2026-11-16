@@ -449,7 +449,7 @@ func (t *Torrent) saveMetadataPiece(index int, data []byte) {
 	if t.haveInfo() {
 		return
 	}
-	if index >= len(t.metadataCompletedChunks) {
+	if index < 0 || index >= len(t.metadataCompletedChunks) {
 		t.logger.Printf("%s: ignoring metadata piece %d", t, index)
 		return
 	}
@@ -462,8 +462,12 @@ func (t *Torrent) metadataPieceCount() int {
 }
 
 func (t *Torrent) haveMetadataPiece(piece int) bool {
+	if piece < 0 {
+		return false
+	}
 	if t.haveInfo() {
-		return (1<<14)*piece < len(t.metadataBytes)
+		// Compare indexes, not offsets: (1<<14)*piece wraps for a large peer-supplied piece.
+		return piece < t.metadataPieceCount()
 	} else {
 		return piece < len(t.metadataCompletedChunks) && t.metadataCompletedChunks[piece]
 	}
@@ -3706,10 +3710,12 @@ func (t *Torrent) checkValidReceiveChunk(r Request) error {
 	if r.Begin >= pieceLength {
 		return fmt.Errorf("chunk begins beyond end of piece (%v >= %v)", r.Begin, pieceLength)
 	}
-	// We could check chunk lengths here, but chunk request size is not changed often, and tricky
-	// for peers to manipulate as they need to send potentially large buffers to begin with. There
-	// should be considerable checks elsewhere for this case due to the network overhead. We should
-	// catch most of the overflow manipulation stuff by checking index and begin above.
+	// The chunk must be exactly the one we would request: a misaligned or oversized chunk would be
+	// written past its chunk, or past the piece, which the storage layer panics on. Adapted from
+	// upstream anacrolix/torrent 4b30f293 via Tiramisu fd976eb.
+	if expected := t.requestIndexToRequest(t.requestIndexFromRequest(r)); r != expected {
+		return fmt.Errorf("chunk %v doesn't match expected request %v", r, expected)
+	}
 	return nil
 }
 

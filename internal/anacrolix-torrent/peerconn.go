@@ -71,6 +71,8 @@ type PeerConn struct {
 	// The peer has everything. This can occur due to a special message, when
 	// we may not even know the number of pieces in the torrent yet.
 	peerSentHaveAll bool
+	// Whether we've pinged the peer's DHT node in response to a Port message.
+	sentDhtPing bool
 
 	peerRequestDataAllocLimiter alloclim.Limiter
 
@@ -234,7 +236,7 @@ func (cn *PeerConn) requestMetadataPiece(index int) {
 }
 
 func (cn *PeerConn) requestedMetadataPiece(index int) bool {
-	return index < len(cn.metadataRequests) && cn.metadataRequests[index]
+	return index >= 0 && index < len(cn.metadataRequests) && cn.metadataRequests[index]
 }
 
 func (cn *PeerConn) onPeerSentCancel(r Request) {
@@ -793,6 +795,30 @@ func (c *PeerConn) logProtocolBehaviour(level log.Level, format string, arg ...i
 	)).SkipCallers(1).Levelf(level, format, arg...)
 }
 
+// onPeerSentPort pings the peer's DHT node. Called from mainReadLoop with the client lock held.
+func (c *PeerConn) onPeerSentPort(port uint16) {
+	// Only the first Port message is acted on: a peer must not make us ping a port of its choice
+	// per message.
+	if c.sentDhtPing {
+		return
+	}
+	ipa, ok := tryIpPortFromNetAddr(c.RemoteAddr)
+	if !ok {
+		return
+	}
+	c.sentDhtPing = true
+	pingAddr := net.UDPAddr{
+		IP:   ipa.IP,
+		Port: ipa.Port,
+	}
+	if port != 0 {
+		pingAddr.Port = int(port)
+	}
+	c.t.cl.eachDhtServer(func(s DhtServer) {
+		go s.Ping(&pingAddr)
+	})
+}
+
 // Processes incoming BitTorrent wire-protocol messages. The client lock is held upon entry and
 // exit. Returning will end the connection.
 func (c *PeerConn) mainReadLoop() (err error) {
@@ -914,20 +940,7 @@ func (c *PeerConn) mainReadLoop() (err error) {
 			req := newRequestFromMessage(&msg)
 			c.onPeerSentCancel(req)
 		case pp.Port:
-			ipa, ok := tryIpPortFromNetAddr(c.RemoteAddr)
-			if !ok {
-				break
-			}
-			pingAddr := net.UDPAddr{
-				IP:   ipa.IP,
-				Port: ipa.Port,
-			}
-			if msg.Port != 0 {
-				pingAddr.Port = int(msg.Port)
-			}
-			cl.eachDhtServer(func(s DhtServer) {
-				go s.Ping(&pingAddr)
-			})
+			c.onPeerSentPort(msg.Port)
 		case pp.Suggest:
 			torrent.Add("suggests received", 1)
 			log.Fmsg("peer suggested piece %d", msg.Index).AddValues(c, msg.Index).LogLevel(log.Debug, c.t.logger)
