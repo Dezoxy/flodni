@@ -7,8 +7,6 @@ import (
 	"os"
 	"strings"
 	"testing"
-
-	"flodni/internal/config"
 )
 
 // The media server token is a credential for another system. GET /api/config must
@@ -66,7 +64,7 @@ func TestGetConfigNeverReturnsThePlexToken(t *testing.T) {
 		}
 		h, path, _ := controlAPIServer(t, start, "")
 		writeCfg(t, path, `{"log_level":"info","api_token":"`+start+`","plex":{"url":"http://x","token":"`+plexSecret+`"}}`)
-		cfg := config.LoadConfig()
+		cfg := loadCfg(t)
 		globalConfig.Store(&cfg)
 		code, body := getConfig(h, bearer)
 		if code != http.StatusOK {

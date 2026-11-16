@@ -11,7 +11,7 @@ import (
 // save (decode what it got, encode it back) keeps it.
 
 func TestRefuseUnconfirmedReadsDefaultsToOff(t *testing.T) {
-	if LoadConfig().RefuseUnconfirmedReads {
+	if loadCfg(t).RefuseUnconfirmedReads {
 		t.Fatal("refuse_unconfirmed_reads is on by default: it refuses reads")
 	}
 }

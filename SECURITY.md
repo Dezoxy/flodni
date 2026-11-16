@@ -39,7 +39,9 @@ token, so a hand-hashed short password is outside the model. The loader is
 strict and every defect (unreadable or unparsable file, unknown field, trailing
 data, over 64 KiB, no tokens, an unknown scope, a repeated name or hash, the
 hash of the empty string) stops the start; it never degrades to an open port.
-`api_token` together with a tokens file also stops the start, and so does a
+`api_token` together with a tokens file also stops the start, and so do
+`auth_jwt` without a tokens file and a `config.json` that cannot be read or parsed
+(the pointer to the tokens file lives there); so does a
 non-loopback `gostorm_url`, because the engine is called without a credential. A
 file writable by group or others logs a warning. The startup report's `auth`
 section shows the mode, the token count and the scopes in use, never a name, hash
@@ -165,6 +167,28 @@ The engine's `Client config:` line is redacted too (`BlockListURL` can hold a ke
 The tracker scrape has its own cleaner for what a tracker sends back. Not covered: lines
 of code that does not go through these paths, such as a new `log` call that
 prints a link directly; the redactor is a net, not a license to log URLs.
+
+The API token is kept out of the logs the same way. The redactor masks the
+value of a `token=` query parameter, including `access_token=`, `api_token=`
+and `id_token=`, anywhere in a string (`token=<redacted>`), and the value of an
+`Authorization`, `Cookie` or `Set-Cookie` header line, also inside an escaped
+`\r\n` dump. The engine router no longer uses `gin.Recovery`: in gin 1.12 under
+`ReleaseMode` it dumps the request line and every header except
+`Authorization` for a broken-pipe or `http.ErrAbortHandler` panic, which would
+print the cookie, a proxy header and a `/stream` link. The replacement logs the
+panic value, the method, the path quoted with `%q` and the stack, never a
+header or a query, answers 500, and re-panics `http.ErrAbortHandler` for
+net/http. Both servers set `ErrorLog` to a redacting logger, so a panic outside
+that recovery (the gate, the control mux) prints no raw URL. The gate's refusal
+lines quote the path with `%q`, and the Flodni logger quotes any attribute
+holding a control character, so a path cannot forge a line. The engine's request
+log line (`WebLogger`, which writes nothing unless a web log is configured) goes
+through the redactor too.
+
+Not covered: `%74oken=` (an encoded key; it needs the gate to strip the token
+after authenticating, ADR 0004 step 3), a JSON `"token":"..."` value, a bare token
+with no `token=` or `Authorization` around it, and the proxy JWT header. What a
+reverse proxy in front logs is outside Flodni.
 
 The repository holds no secrets; `config.json` is ignored by git and
 `config.json.example` carries placeholders. `config.json` holds `api_token` and the Plex token in clear text (with `auth_tokens_file` the credentials are hashes in that file instead): a save from the panel keeps the file's existing permission bits (a new file is created 0600), so keep it unreadable to other users. `GET /api/config` returns neither secret; the panel shows only whether a Plex token is set and where it comes from, and a save with the field empty keeps the stored one (the environment's is never written to the file). Changing `plex.url` needs the token typed again, and on an open port neither `plex.url` nor `plex.token` can be changed through the API, because the stored token is sent to whatever host the URL names. Or pass the secrets as `FLODNI_API_TOKEN` and `FLODNI_PLEX_TOKEN` instead. CI runs gitleaks on the full

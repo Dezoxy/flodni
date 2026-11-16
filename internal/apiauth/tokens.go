@@ -23,21 +23,10 @@ import (
 // This file is the token store of ADR 0004: the scopes, the tokens file and its
 // loader, and Lookup. It enforces nothing; the gate that consumes it is a later step.
 
-// Scope is one capability a token can hold.
-type Scope string
+// The scope names are declared in scopes.go with the route table. A token holds the
+// eight real scopes, never ScopeOpen.
 
-const (
-	ScopeWebhook Scope = "webhook"
-	ScopeMetrics Scope = "metrics"
-	ScopeRead    Scope = "read"
-	ScopeLibrary Scope = "library"
-	ScopeScrape  Scope = "scrape"
-	ScopeEngine  Scope = "engine"
-	ScopeUpload  Scope = "upload"
-	ScopeAdmin   Scope = "admin"
-)
-
-// AllScopes is every scope, sorted by name.
+// AllScopes is every scope a token can hold, sorted by name.
 var AllScopes = []Scope{ScopeAdmin, ScopeEngine, ScopeLibrary, ScopeMetrics, ScopeRead, ScopeScrape, ScopeUpload, ScopeWebhook}
 
 // ScopeSet is a set of scopes.
@@ -253,10 +242,8 @@ type LoadOptions struct {
 	APIToken   string // api_token, after the environment override
 	TokensFile string // auth_tokens_file, after the environment override
 	GoStormURL string // gostorm_url, checked in scoped mode
-	// JWTConfigured is true when an auth_jwt block is set. The block itself is parsed
-	// by a later step (ADR 0004 step 5); until the daemon passes the real value the
-	// refusal below (auth_jwt without a tokens file) cannot fire in a running daemon,
-	// and only the tests exercise it.
+	// JWTConfigured is true when an auth_jwt block is set. auth_jwt without a tokens
+	// file refuses to start (ADR 0004): the proxy sign-in needs scoped mode.
 	JWTConfigured bool
 	Logger        *slog.Logger // for the one warning; nil logs nothing
 }

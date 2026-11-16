@@ -123,14 +123,13 @@ or repeats a JSON key, or is not a regular file, or holds no token, more than
 64, an unknown scope, an entry without scopes, a repeated name or hash, a hash
 that is not 64 lower-case hex characters or is the hash of the empty string, or
 a bad or reserved name; when `api_token` is also set (remove it: there is no
-alias); and when `gostorm_url` is not a loopback address. The loader also
-refuses `auth_jwt` without a tokens file, but that check takes effect only once
-the `auth_jwt` setting exists (a later step of this release); today the key is
-not read. A file writable by group or others only logs a warning. `GET
-/api/startup` and the `[Startup] report` line gain an `auth` section (`mode` of
-`open`, `legacy_token` or `scoped`, the token count, the scopes in use, and
-`jwt`) with no name, hash or path. With only `api_token` set, behaviour is as
-before.
+alias); when `auth_jwt` is set without a tokens file; and when `gostorm_url` is
+not a loopback address. A `config.json` that cannot be read or parsed also stops
+the start in every mode, because the pointer to the tokens file lives there. A
+file writable by group or others only logs a warning. `GET /api/startup` and the
+`[Startup] report` line gain an `auth` section (`mode` of `open`, `legacy_token`
+or `scoped`, the token count, the scopes in use, and `jwt`) with no name, hash
+or path. With only `api_token` set, behaviour is as before.
 
 `auth_tokens_file` is startup-only: `POST /api/config` answers 403 (and writes
 nothing) to a different path in every mode, and a save always writes back the
@@ -176,8 +175,9 @@ otherwise take the service over: `POST /api/config` when the body carries a non-
 `api_token` (whatever its value; a body without it, or with it empty, saves as
 before and keeps the token `config.json` holds now, one added by hand since the
 start included; nothing is written on a refusal), `POST /api/config` while
-`config.json` does not parse (409, so a file being edited is not replaced by
-defaults), and `POST /api/restart` altogether. Each refusal is logged with
+`config.json` cannot be read or parsed (409, so a file being edited is not replaced
+by defaults; with a token set this answers 409 too), and `POST /api/restart`
+altogether. Each refusal is logged with
 method, path and address. Set the token through `FLODNI_API_TOKEN` or by editing
 `config.json` and restart the service yourself; from then on an authenticated
 caller can change the token and restart through the API. The Control Panel's
@@ -260,7 +260,7 @@ and a missing header pass, so the panel's own fetches pass, behind a TLS tunnel
 too. A browser sends the header only over https or to `localhost`, so a page
 fetching a plain-http LAN address sends none and only the `Origin` check and the
 allowlist apply: it is a second signal, not a replacement. The routes that hold
-no data and are open anyway (`/control`, `/api/health`, the engine's `/echo`)
+no data and are open anyway (`/control`, `/api/health`, `/api/live`, the engine's `/echo`)
 are exempt, so a link from another site still opens the panel; a cross-site
 navigation to any other route is refused without a token.
 
@@ -271,7 +271,25 @@ state database, each as `{"ok": ..., "reason": "..."}`, with an overall
 is set and returns status words only. The image's health check runs
 `flodni healthcheck`, which requests it on `127.0.0.1:<metrics_port>` and
 exits 0 on HTTP 200 and 1 otherwise; run it with
-`docker exec <container> flodni healthcheck`.
+`docker exec <container> flodni healthcheck`. If `config.json` cannot be read or
+parsed at that moment (an edit in progress), it asks the port the file
+names if that key still decoded, else the default 9080, rather than report
+the daemon unhealthy.
+
+`GET /api/live` on the control port answers `200` and `ok` and checks nothing, so
+a container or load balancer that only needs to know the process serves can poll
+it cheaply. Unlike `/api/health` it runs no mount, engine or database check and
+returns no `warnings`. It is open even when a token is set, for `GET` only
+(other methods are refused like any other route).
+
+**An unreadable `config.json` refuses to start.** A `config.json` that exists but
+cannot be read, or does not parse (comments are stripped first; a value of the
+wrong type counts), stops flodni at start with a line on stderr naming the file
+and the cause, in every mode, token or not. Starting on defaults would open both
+servers whatever the file said about auth. A missing file is still valid: defaults.
+Fix the file (or remove it on purpose) and start again. Before upgrading from
+v0.2.6, check `GET /api/startup` for the `config_parse_failed` alarm and clear it:
+v0.2.6 started on the defaults and raised the alarm, and this version refuses.
 
 The body also carries `warnings`, an array that is always present and is `[]`
 when nothing is wrong. Its one value today is `no_play_webhook`, an advisory:
@@ -409,6 +427,64 @@ over), `head_density_check` (the one-shot head check ran; see Cache disk),
 `state_not_on_mounted_volume` (the container entrypoint's warning) and
 `auth_not_enforced` (a tokens file is loaded but this build does not enforce it yet). The report
 is taken once, so a `corrupt_cache` removal after it is not in it.
+
+## Proxy-signed identity (IdP mode)
+
+`internal/apiauth/jwt` verifies an identity assertion that an identity-aware
+proxy puts in a request header (ADR 0004). It is the library half only: the
+control gate does not call it yet, so setting `auth_jwt` verifies nothing until
+the scoped-token gate lands; it already needs `auth_tokens_file` (without one
+the daemon refuses to start). The block, when you add it to
+`config.json`:
+
+```json
+"auth_jwt": {
+  "issuer":   "https://<team>.cloudflareaccess.com",
+  "audience": "<application audience tag>",
+  "jwks_url": "https://<team>.cloudflareaccess.com/cdn-cgi/access/certs",
+  "header":   "Cf-Access-Jwt-Assertion",
+  "allowed_emails": []
+}
+```
+
+The values show Cloudflare Access; `<team>` and the audience tag are your own.
+Any proxy that signs an RS256 or ES256 assertion and publishes a JWKS fits,
+such as oauth2-proxy. The mode is off when the block is absent, and
+`allowed_emails` (optional; ASCII only, matched case-insensitively for A-Z; a
+token with `email_verified` false is refused when it is set) is off while
+empty. `issuer`, `audience`, `jwks_url` and `header` are required; `header`
+may not be `Authorization`, and `jwks_url` must be `https`. Those refusals
+(and an incomplete block) are enforced at start once the gate lands (ADR 0004
+step 3); until then only the verifier's constructor applies them. `auth_jwt`
+is startup-only: `POST /api/config` never writes it, and a post that carries a
+block that equals neither the file's nor the running one is refused with 403
+(a post without one keeps the file's). The audience must be this application's
+own, or anyone the proxy admits to another application passes.
+
+What a token must satisfy: exactly one header value (at most 16 KiB) of three
+strict unpadded base64url segments; `alg` `RS256` or `ES256`, matching the
+key's type (the key decides, never the token); a `kid` that names a key in the
+JWKS; no `crit` (`jwk`, `jku`, `x5c` and `x5u` are ignored); a valid signature
+(an ES256 signature is exactly 64 bytes); `iss` equal to `issuer`; `aud`
+(string or array, not null or empty) holding `audience`; `exp` not past and
+`nbf` not ahead, with 60 seconds of skew; a `sub`; and an `email` in
+`allowed_emails` when that list is set. An `email` claim with any non-ASCII
+byte is refused whether or not the list is set (Unicode case folding would
+otherwise let a look-alike match). Failures carry a reason: `missing` (no
+header) or `jwt_malformed`, `jwt_alg`, `jwt_unknown_kid`,
+`jwt_keys_unavailable`, `jwt_signature`, `jwt_issuer`, `jwt_audience`,
+`jwt_expired`, `jwt_not_yet_valid`, `jwt_claims`.
+
+The keys come from `jwks_url` over https with a 5-second timeout, a 64 KiB cap
+and no redirects. Only RSA keys of 2048 bits or more and P-256 EC keys on the
+curve are kept, honouring each key's `use` (`sig`) and `alg`; a key without a
+`kid`, or a repeated `kid`, fails the fetch, as does an empty set. Keys are
+cached for 24 hours; an unknown `kid` triggers one refresh, at most once a
+minute (after failures the wait grows 1, 2, 4 up to 15 minutes), with one
+fetch in flight; a failed fetch is logged once, by cause class only (never the
+URL). If the provider is down the last good set keeps working until it is 24
+hours old, then verification fails closed. A key the provider revokes stays
+trusted until the next successful fetch.
 
 ## Play webhook
 

@@ -15,7 +15,7 @@ import (
 
 func TestAllowedHostsDefaultsToOff(t *testing.T) {
 	t.Setenv("MKV_PROXY_ALLOWED_HOSTS", "")
-	if got := LoadConfig().AllowedHosts; len(got) != 0 {
+	if got := loadCfg(t).AllowedHosts; len(got) != 0 {
 		t.Fatalf("allowed_hosts = %v, want empty", got)
 	}
 }
@@ -104,12 +104,12 @@ func TestAllInvalidAllowedHostsFailsClosed(t *testing.T) {
 // both keep the check on instead of turning it off.
 func TestMistypedAllowedHostsFailsClosed(t *testing.T) {
 	t.Setenv("MKV_PROXY_ALLOWED_HOSTS", "")
-	c := loadWith(t, `{"allowed_hosts": "flodni.example"}`)
-	if got := c.EffectiveAllowedHosts(); len(got) == 0 {
-		t.Fatal("a string allowed_hosts turned the check off")
+	// A string where the list belongs no longer loads at all: the start refuses.
+	if _, err := loadWithErr(t, `{"allowed_hosts": "flodni.example"}`); err == nil {
+		t.Fatal("a string allowed_hosts loaded without an error")
 	}
 	t.Setenv("MKV_PROXY_ALLOWED_HOSTS", ",")
-	c = loadWith(t, `{"allowed_hosts": ["x.example"]}`)
+	c := loadWith(t, `{"allowed_hosts": ["x.example"]}`)
 	if got := c.EffectiveAllowedHosts(); !reflect.DeepEqual(got, []string{"localhost"}) {
 		t.Fatalf("env %q over a file list: %v, want only the always-allowed hosts", ",", got)
 	}

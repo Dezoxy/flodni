@@ -1,8 +1,10 @@
 package redact
 
 import (
+	"bytes"
 	"context"
 	"errors"
+	stdlog "log"
 	"net"
 	"net/http"
 	"net/url"
@@ -119,4 +121,81 @@ func dialClosed(ctx context.Context, network string) (net.Conn, error) {
 	_ = l.Close()
 	var d net.Dialer
 	return d.DialContext(ctx, network, addr)
+}
+
+func TestStringQueryToken(t *testing.T) {
+	for _, in := range []string{
+		"GET /stream?link=x&token=SECRET&index=1",
+		`400 | 1.2.3.4 | GET "/webhook?token=SECRET"`,
+		`line with \"/webhook?token=SECRET\" quoted`,
+		"token=SECRET",
+		"/x?access_token=SECRET#frag",
+		"/x?token%3DSECRET",
+		"/x?TOKEN=SECRET&token=SECRET",
+		`Get "http://host:8090/stream?token=SECRET": dial tcp: refused`,
+	} {
+		out := String(in)
+		assertClean(t, in, out, "SECRET")
+	}
+	if got, want := String("/p?a=1&token=SECRET&b=2"), "/p?a=1&token=<redacted>&b=2"; got != want {
+		t.Errorf("got %q, want %q", got, want)
+	}
+	if got, want := String("/p?token=A&token=B"), "/p?token=<redacted>&token=<redacted>"; got != want {
+		t.Errorf("got %q, want %q", got, want)
+	}
+	// Unrelated text and words that merely end in "token" are left alone.
+	for _, in := range []string{"no secrets here", "/p?csrftoken=1", "tokens=3", "token missing"} {
+		if got := String(in); got != in {
+			t.Errorf("%q changed to %q", in, got)
+		}
+	}
+	// Idempotent.
+	once := String("/p?token=SECRET")
+	if String(once) != once {
+		t.Errorf("not idempotent: %q", String(once))
+	}
+}
+
+func TestStringHeaders(t *testing.T) {
+	for _, tc := range []struct{ in, want string }{
+		{"Authorization: Bearer SECRET", "Authorization: Bearer <redacted>"},
+		{"authorization:bearer SECRET", "authorization:bearer <redacted>"},
+		{"Authorization: Basic SECRET", "Authorization: Basic <redacted>"},
+		{"Authorization: SECRET", "Authorization: <redacted>"},
+		{"Cookie: flodni_session=SECRET; other=SECRET", "Cookie: <redacted>"},
+		{"Set-Cookie: s=SECRET; HttpOnly", "Set-Cookie: <redacted>"},
+		{"GET / HTTP/1.1\r\nCookie: a=SECRET\r\nHost: x", "GET / HTTP/1.1\r\nCookie: <redacted>\r\nHost: x"},
+	} {
+		got := String(tc.in)
+		assertClean(t, tc.in, got, "SECRET")
+		if got != tc.want {
+			t.Errorf("%q: got %q, want %q", tc.in, got, tc.want)
+		}
+	}
+}
+
+func TestStringQueryTokenVariants(t *testing.T) {
+	for _, in := range []string{
+		"/x?api_token=SECRET", "FLODNI_API_TOKEN=SECRET", "/x?id_token=SECRET",
+		"token=SEC'RET", "token=SEC<RET",
+		`Cookie: a="x"; flodni_session=SECRET`,
+		`GET / HTTP/1.1\r\nAuthorization: Bearer SECRET\r\nCookie: a=SECRET\r\nHost: x`,
+		`map[Authorization:[Bearer SECRET]]`,
+	} {
+		assertClean(t, in, String(in), "SECRET", "RET")
+	}
+	if got := String(`x\r\nHost: h`); got != `x\r\nHost: h` {
+		t.Errorf("unrelated escaped text changed: %q", got)
+	}
+}
+
+func TestErrorLogRedacts(t *testing.T) {
+	var buf bytes.Buffer
+	prev := stdlog.Writer()
+	stdlog.SetOutput(&buf)
+	t.Cleanup(func() { stdlog.SetOutput(prev) })
+	ErrorLog().Printf("http: panic serving 1.2.3.4: bad /x?token=SECRET\ngoroutine 1")
+	if !strings.Contains(buf.String(), "http: panic serving") || strings.Contains(buf.String(), "SECRET") {
+		t.Errorf("got %q", buf.String())
+	}
 }

@@ -28,20 +28,43 @@ func TestAuthTokensFileKeyAndEnv(t *testing.T) {
 	}
 }
 
-// A file with a type error elsewhere still keeps its auth_tokens_file for a save, as
-// allowed_hosts does.
-func TestFileAuthTokensFileSurvivesAParseError(t *testing.T) {
-	p := filepath.Join(t.TempDir(), "config.json")
-	if err := os.WriteFile(p, []byte(`{"auth_tokens_file":"/etc/flodni/t.json","metrics_port":"nope"}`), 0o600); err != nil {
-		t.Fatal(err)
+// The pointer to the tokens file lives in config.json, so a file that does not load
+// must stop the start in every mode: a wrong type, an array, a trailing comma, a file
+// that cannot be read. Open mode and legacy mode (FLODNI_API_TOKEN set) both.
+func TestUnusableConfigRefusesWhereTheTokensFileIsNamed(t *testing.T) {
+	bodies := map[string]string{
+		"number":         `{"auth_tokens_file": 5}`,
+		"array":          `{"auth_tokens_file": ["/etc/flodni/t.json"]}`,
+		"trailing comma": `{"auth_tokens_file": "/etc/flodni/t.json",}`,
 	}
-	t.Setenv("MKV_PROXY_CONFIG_PATH", p)
-	t.Setenv("FLODNI_AUTH_TOKENS_FILE", "/env.json")
-	c := LoadConfig()
-	if got := c.FileAuthTokensFile(); got != "/etc/flodni/t.json" {
-		t.Fatalf("file value = %q", got)
-	}
-	if c.AuthTokensFile != "/env.json" {
-		t.Fatalf("running value = %q", c.AuthTokensFile)
+	for _, apiToken := range []string{"", "legacy-token"} {
+		for name, body := range bodies {
+			t.Run(name+"/api_token="+apiToken, func(t *testing.T) {
+				p := filepath.Join(t.TempDir(), "config.json")
+				if err := os.WriteFile(p, []byte(body), 0o600); err != nil {
+					t.Fatal(err)
+				}
+				t.Setenv("MKV_PROXY_CONFIG_PATH", p)
+				t.Setenv("FLODNI_API_TOKEN", apiToken)
+				t.Setenv("FLODNI_AUTH_TOKENS_FILE", "")
+				if _, err := LoadConfig(); err == nil {
+					t.Fatal("loaded; the start must refuse")
+				}
+			})
+		}
+		t.Run("unreadable/api_token="+apiToken, func(t *testing.T) {
+			if os.Geteuid() == 0 {
+				t.Skip("root reads a mode-000 file")
+			}
+			p := filepath.Join(t.TempDir(), "config.json")
+			if err := os.WriteFile(p, []byte(`{"auth_tokens_file":"/etc/flodni/t.json"}`), 0o000); err != nil {
+				t.Fatal(err)
+			}
+			t.Setenv("MKV_PROXY_CONFIG_PATH", p)
+			t.Setenv("FLODNI_API_TOKEN", apiToken)
+			if _, err := LoadConfig(); err == nil {
+				t.Fatal("loaded; the start must refuse")
+			}
+		})
 	}
 }

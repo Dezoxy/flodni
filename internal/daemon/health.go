@@ -207,8 +207,17 @@ func checkStateDB() checkResult {
 // config for the port only; it starts nothing and touches no mount.
 func healthcheckMain() int {
 	log.SetOutput(io.Discard) // LoadConfig logs through the standard logger
-	cfg := config.LoadConfig()
-	return runHealthcheck(fmt.Sprintf("http://127.0.0.1:%d/api/health", cfg.MetricsPort))
+	return runHealthcheck(healthcheckURL())
+}
+
+// healthcheckURL is the daemon's /api/health on the configured control port. A
+// config file that cannot be read or parsed (an owner mid-edit) is not an
+// unhealthy daemon. LoadConfig leaves the default port when nothing decoded and
+// the file's metrics_port when it did (a type error in another key), so the probe
+// asks the port the file names if it can be read, and 9080 otherwise.
+func healthcheckURL() string {
+	cfg, _ := config.LoadConfig() // an error leaves the default, or the port that decoded
+	return fmt.Sprintf("http://127.0.0.1:%d/api/health", cfg.MetricsPort)
 }
 
 // runHealthcheck GETs url within 5 s, prints one line and returns 0 on HTTP

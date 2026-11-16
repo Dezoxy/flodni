@@ -159,3 +159,28 @@ func TestStartAuthRefusesAndReports(t *testing.T) {
 		t.Fatalf("open: %v %v", tok, err)
 	}
 }
+
+// auth_jwt without a tokens file refuses to start (ADR 0004); with one it is accepted
+// and the report says jwt is on.
+func TestStartAuthWiresAuthJWT(t *testing.T) {
+	good := filepath.Join(t.TempDir(), "tokens.json")
+	if err := os.WriteFile(good, []byte(`{"tokens":[{"name":"a","scopes":["read"],"sha256":"`+authHash(fakeAuthToken('a'))+`"}]}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	loop := "http://127.0.0.1:8090"
+	for name, cfg := range map[string]config.Config{
+		"no api_token":   {AuthJWT: &config.AuthJWT{}, GoStormBaseURL: loop},
+		"with api_token": {AuthJWT: &config.AuthJWT{}, APIToken: "x", GoStormBaseURL: loop},
+	} {
+		t.Run(name, func(t *testing.T) {
+			tok, err := startAuth(&cfg, nil)
+			if err == nil || tok != nil || !strings.Contains(err.Error(), "auth_jwt") {
+				t.Fatalf("started: %v %v", tok, err)
+			}
+		})
+	}
+	tok, err := startAuth(&config.Config{AuthJWT: &config.AuthJWT{}, AuthTokensFile: good, GoStormBaseURL: loop}, nil)
+	if err != nil || !tok.Report().JWT {
+		t.Fatalf("with a tokens file: %v %+v", err, tok.Report())
+	}
+}

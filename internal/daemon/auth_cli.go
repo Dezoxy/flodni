@@ -68,12 +68,11 @@ func authMain(args []string, out, errOut io.Writer) int {
 // refusal to start and Run exits on it; the token and the hashes are never logged.
 func startAuth(cfg *config.Config, log *slog.Logger) (*apiauth.Tokens, error) {
 	auth, err := apiauth.Load(apiauth.LoadOptions{
-		APIToken:   cfg.APIToken,
-		TokensFile: cfg.AuthTokensFile,
-		GoStormURL: cfg.GoStormBaseURL,
-		Logger:     log,
-		// auth_jwt is parsed by a later step (ADR 0004 step 5); false until then.
-		JWTConfigured: false,
+		APIToken:      cfg.APIToken,
+		TokensFile:    cfg.AuthTokensFile,
+		GoStormURL:    cfg.GoStormBaseURL,
+		Logger:        log,
+		JWTConfigured: cfg.AuthJWT != nil,
 	})
 	if err != nil {
 		return nil, err

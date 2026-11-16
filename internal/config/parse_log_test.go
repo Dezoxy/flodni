@@ -21,7 +21,7 @@ func TestUnparsableConfigIsLoggedAndFlagged(t *testing.T) {
 	log.SetOutput(&buf)
 	t.Cleanup(func() { log.SetOutput(os.Stderr); ParseFailed.Store(false) })
 
-	LoadConfig()
+	_, _ = LoadConfig()
 
 	if !strings.Contains(buf.String(), "[Config] WARNING: Failed to parse "+path+": ") {
 		t.Fatalf("log = %q", buf.String())
@@ -33,8 +33,19 @@ func TestUnparsableConfigIsLoggedAndFlagged(t *testing.T) {
 	if err := os.WriteFile(path, []byte(`{}`), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	LoadConfig()
+	_, _ = LoadConfig()
 	if ParseFailed.Load() {
 		t.Fatal("ParseFailed must clear after a good load")
 	}
+}
+
+// loadCfg is LoadConfig for the tests that read a default or a valid file: any
+// error fails the test.
+func loadCfg(t *testing.T) Config {
+	t.Helper()
+	c, err := LoadConfig()
+	if err != nil {
+		t.Fatalf("LoadConfig: %v", err)
+	}
+	return c
 }
