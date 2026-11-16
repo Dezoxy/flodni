@@ -1,6 +1,7 @@
 package config
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"flodni/internal/flog"
@@ -12,13 +13,12 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"reflect"
 	"sort"
 	"strconv"
 	"strings"
 	"sync/atomic"
 	"time"
-
-	"flodni/internal/atomicfile"
 )
 
 // ParseFailed is true when the latest LoadConfig found a config file it could not parse
@@ -70,15 +70,17 @@ type Config struct {
 	// FLODNI_API_TOKEN overrides it. GET /api/config never returns it.
 	APIToken string `json:"api_token"`
 	// AuthTokensFile is the path of the scoped-token file (ADR 0004, see
-	// internal/apiauth). Set, both servers use scoped mode; api_token must then be
-	// unset or the daemon refuses to start. FLODNI_AUTH_TOKENS_FILE overrides it.
-	// Read once at start; Flodni never writes the file.
+	// internal/apiauth). Set, both servers enforce the scopes in it; api_token must
+	// then be unset or the daemon refuses to start. FLODNI_AUTH_TOKENS_FILE
+	// overrides it. Read once at start; Flodni never writes the file.
 	AuthTokensFile string `json:"auth_tokens_file"`
 	// AuthJWT, when set, is the proxy-signed identity (ADR 0004); nil: off. Its
 	// Validate refusals (incomplete block, a non-https jwks_url, header Authorization)
-	// are enforced at start once the gate lands (ADR 0004 step 3); until then only
-	// jwt.New applies them.
+	// stop the start: jwt.New applies them when the daemon builds the verifier.
 	AuthJWT *AuthJWT `json:"auth_jwt,omitempty"`
+	// AuthPanelHTTPS says the panel is served over https behind a TLS tunnel: the
+	// CSRF check then needs an https Origin (ADR 0004). Startup-only.
+	AuthPanelHTTPS bool `json:"auth_panel_https,omitempty"`
 	// AllowedHosts, when non-empty, makes both servers refuse (403) a request whose
 	// Host hostname is not listed: the defence against DNS rebinding (see
 	// internal/apiauth). IP literals, localhost and the machine's own hostname are
@@ -101,6 +103,8 @@ type Config struct {
 	// fileAuthTokensFile is AuthTokensFile as config.json holds it, before the
 	// environment override: a panel save writes this, never the environment's path.
 	fileAuthTokensFile string
+	// unknownKeys are the top-level keys of config.json no setting names exactly.
+	unknownKeys []string
 
 	// filePlexToken is Plex.Token as read from config.json, and plexTokenFromEnv says
 	// the environment supplied the one in use. A panel save writes the file's token,
@@ -295,17 +299,10 @@ type Config struct {
 	StateDBPath   string `json:"state_db_path"`   // default: <STATE>/tiramisu.db
 }
 
-// Save persists the current configuration to config.json
-func (c *Config) Save() error {
-	// 1. Marshal config to JSON
-	data, err := json.MarshalIndent(c, "", "  ")
-	if err != nil {
-		return err
-	}
-
-	// 2. Write to file
-	return atomicfile.WriteFileKeepMode(c.ConfigPath, data, 0600)
-}
+// UnknownKeys lists, by name and sorted, the top-level keys of config.json that are
+// not the exact name of a setting (a removed setting, a typo, another letter case).
+// Names only, never a value. Run logs them once at start; they do not stop it.
+func (c *Config) UnknownKeys() []string { return append([]string(nil), c.unknownKeys...) }
 
 // Redacted returns a copy that is safe to send to the control panel: the API
 // token and the Plex token are blanked.
@@ -454,8 +451,13 @@ func LoadConfig() (Config, error) {
 			ParseFailed.Store(true)
 			flog.Printf(flog.Std, parseFailedFmt, cfg.ConfigPath, err)
 			loadErr = fmt.Errorf("config file %s does not parse: %w", cfg.ConfigPath, err)
+		} else if unknown, err := checkTopLevelKeys(cleanData); err != nil {
+			// An auth key that is mistyped, repeated or null would leave auth off or
+			// pointed at the wrong place without a word: the start is refused.
+			loadErr = fmt.Errorf("config file %s: %w", cfg.ConfigPath, err)
 		} else {
 			ParseFailed.Store(false)
+			cfg.unknownKeys = unknown
 			flog.Std.Info(fmt.Sprintf("[Config] Loaded settings from %s", cfg.ConfigPath), "config_path", cfg.ConfigPath)
 			cfg.fileAPIToken = cfg.APIToken
 			cfg.fileAuthTokensFile = cfg.AuthTokensFile
@@ -484,6 +486,129 @@ func LoadConfig() (Config, error) {
 	cfg.finalize()
 
 	return cfg, loadErr
+}
+
+// authKeys are the exact names of the auth settings.
+var authKeys = map[string]bool{"auth_tokens_file": true, "auth_jwt": true, "auth_panel_https": true}
+
+// knownKeys are the exact json names of the settings, and the one legacy name
+// LoadConfig still reads (torrserver_url).
+var knownKeys = func() map[string]bool {
+	set := map[string]bool{"torrserver_url": true}
+	var walk func(t reflect.Type)
+	walk = func(t reflect.Type) {
+		for i := 0; i < t.NumField(); i++ {
+			f := t.Field(i)
+			if f.Anonymous && f.Type.Kind() == reflect.Struct {
+				walk(f.Type)
+				continue
+			}
+			if !f.IsExported() {
+				continue
+			}
+			// encoding/json names an untagged exported field by its Go name.
+			name, _, _ := strings.Cut(f.Tag.Get("json"), ",")
+			switch name {
+			case "-":
+			case "":
+				set[f.Name] = true
+			default:
+				set[name] = true
+			}
+		}
+	}
+	walk(reflect.TypeOf(Config{}))
+	return set
+}()
+
+// mentionsAuth reports whether a key, folded the way encoding/json folds keys, contains
+// "auth": a key like auth-tokens-file or authTokensFile is a mistyped auth setting, and
+// would otherwise only warn and leave the daemon open. (Neither letter of "auth" has a
+// special fold partner, so a lower-casing is the fold.)
+func mentionsAuth(key string) bool { return strings.Contains(strings.ToLower(key), "auth") }
+
+// jwtKeys are the exact keys of the auth_jwt block.
+var jwtKeys = map[string]bool{"issuer": true, "audience": true, "jwks_url": true, "header": true, "allowed_emails": true}
+
+// checkExactKeys refuses an object that repeats a key or uses one that is not one of
+// allowed, byte for byte: encoding/json keeps the last duplicate and matches keys
+// without regard to case, so a repeated key could swap a setting silently.
+func checkExactKeys(raw json.RawMessage, allowed map[string]bool) error {
+	dec := json.NewDecoder(bytes.NewReader(raw))
+	if tok, err := dec.Token(); err != nil || tok != json.Delim('{') {
+		return nil // not an object: the typed decode has already refused or accepted it
+	}
+	seen := map[string]bool{}
+	for dec.More() {
+		tok, err := dec.Token()
+		if err != nil {
+			return nil
+		}
+		key, _ := tok.(string)
+		if !allowed[key] {
+			return fmt.Errorf("the key %q is not one of the block's exact keys", key)
+		}
+		if seen[key] {
+			return fmt.Errorf("the key %q is given twice", key)
+		}
+		seen[key] = true
+		var skip json.RawMessage
+		if err := dec.Decode(&skip); err != nil {
+			return nil
+		}
+	}
+	return nil
+}
+
+// checkTopLevelKeys reads the keys of the top-level object byte for byte. It refuses a
+// key that mentions auth (or is api_token in another spelling) but is not the exact
+// setting, an auth key or api_token given twice, a null auth_tokens_file or api_token
+// (null decodes as the empty string, which reads as "no credential"), and an auth_jwt
+// block with a repeated or re-cased key. Any other key no setting names is returned
+// for one warning. The data has already decoded, so the syntax is valid; it is read
+// without regard to case or folding, which is the point.
+func checkTopLevelKeys(data []byte) ([]string, error) {
+	dec := json.NewDecoder(bytes.NewReader(data))
+	if tok, err := dec.Token(); err != nil || tok != json.Delim('{') {
+		return nil, nil
+	}
+	seen := map[string]bool{}
+	var unknown []string
+	for dec.More() {
+		tok, err := dec.Token()
+		if err != nil {
+			return nil, nil
+		}
+		key, _ := tok.(string)
+		var raw json.RawMessage
+		if err := dec.Decode(&raw); err != nil {
+			return nil, nil
+		}
+		isNull := string(bytes.TrimSpace(raw)) == "null"
+		switch {
+		case authKeys[key] || key == "api_token":
+			if seen[key] {
+				return nil, fmt.Errorf("the credential key %q is given twice", key)
+			}
+			seen[key] = true
+			if isNull && (key == "auth_tokens_file" || key == "api_token") {
+				return nil, fmt.Errorf("%s is null: write a value, or remove the key", key)
+			}
+			if key == "auth_jwt" && !isNull {
+				if err := checkExactKeys(raw, jwtKeys); err != nil {
+					return nil, fmt.Errorf("auth_jwt: %w", err)
+				}
+			}
+		case mentionsAuth(key):
+			return nil, fmt.Errorf("the key %q looks like an auth setting but is not one (known: auth_tokens_file, auth_jwt, auth_panel_https)", key)
+		case strings.EqualFold(key, "api_token"):
+			return nil, fmt.Errorf("the key %q is api_token in another spelling: use the exact key", key)
+		case !knownKeys[key]:
+			unknown = append(unknown, key)
+		}
+	}
+	sort.Strings(unknown)
+	return unknown, nil
 }
 
 // stripJSONComments removes // comments from JSON data. It is string-aware: a //

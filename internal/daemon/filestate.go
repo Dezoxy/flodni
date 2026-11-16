@@ -359,10 +359,11 @@ func confirmPlayByHand(hash string, fileIdx int) {
 	recordPlay(k, playSourceManual)
 }
 
-// apiTokenSet reports whether the control server enforces a bearer token: the start-up
-// value the middleware was built with (controlToken), not the live config, which a
-// POST /api/config can change on an open port without any enforcement following.
-func apiTokenSet() bool { return app.controlToken != "" }
+// apiTokenSet reports whether the control server enforces any credential (an api_token
+// or a tokens file): the start-up value the middleware was built with, not the live
+// config, which a POST /api/config can change on an open port without any
+// enforcement following.
+func apiTokenSet() bool { return app.authOn() }
 
 // libraryFileFacts is library.Config.FileState: the per-file facts GET /api/library/file
 // reports, read from the process-wide index and the live sessions.

@@ -37,6 +37,9 @@ func settings(c *gin.Context) {
 		return
 	}
 
+	if refuseActionMismatch(c, req.Action) {
+		return
+	}
 	if req.Action == "get" {
 		c.JSON(200, sets.BTsets)
 		return

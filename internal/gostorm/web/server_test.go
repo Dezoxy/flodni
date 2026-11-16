@@ -2,6 +2,7 @@ package web
 
 import (
 	"bytes"
+	"flodni/internal/apiauth"
 	"flodni/internal/gostorm/web/api"
 	"fmt"
 	"github.com/gin-gonic/gin"
@@ -59,17 +60,25 @@ func TestServerLogsCrossOriginRefusal(t *testing.T) {
 	}
 }
 
-// The router marks requests as token-enforced exactly when APIToken is set; the
-// handlers read the mark to allow an add by GET.
+// The router marks a request as token-enforced when the gate authenticated it as a
+// caller holding admin (the legacy token holds every scope); the handlers read the
+// mark to allow an add by GET. With no token configured nothing is marked.
 func TestNewRouteSetsTokenEnforcedKey(t *testing.T) {
-	prev := APIToken
-	t.Cleanup(func() { APIToken = prev })
+	prev, prevAuth := APIToken, Auth
+	t.Cleanup(func() { APIToken, Auth = prev, prevAuth })
+	Auth = nil
 	for _, tok := range []string{"", "secret"} {
 		APIToken = tok
 		route := newRoute()
 		route.GET("/probe", func(c *gin.Context) { c.String(200, "%v", c.GetBool(api.TokenEnforcedKey)) })
+		req := httptest.NewRequest(http.MethodGet, "/probe", nil)
+		if tok != "" {
+			legacy, _ := apiauth.Load(apiauth.LoadOptions{APIToken: tok})
+			_, scopes, _ := legacy.Lookup(tok)
+			req = req.WithContext(apiauth.WithIdentity(req.Context(), apiauth.Identity{Name: "legacy", Scopes: scopes}))
+		}
 		rec := httptest.NewRecorder()
-		route.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/probe", nil))
+		route.ServeHTTP(rec, req)
 		if want := tok != ""; rec.Body.String() != fmt.Sprint(want) {
 			t.Errorf("token %q: key = %s, want %v", tok, rec.Body.String(), want)
 		}

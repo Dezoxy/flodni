@@ -39,6 +39,16 @@ func NewGoStormClient(baseURL, token string) *GoStormClient {
 	}
 }
 
+// NewGoStormClientTransport is the client of Flodni's own calls to its engine in scoped
+// mode: rt hands each request to the engine in-process, so no URL, socket or credential
+// is involved (the base is a placeholder the transport ignores).
+func NewGoStormClientTransport(rt http.RoundTripper) *GoStormClient {
+	return &GoStormClient{
+		baseURL:    "http://engine.internal",
+		httpClient: &http.Client{Timeout: 30 * time.Second, Transport: rt},
+	}
+}
+
 // AddTorrent adds a magnet URL to GoStorm via POST /torrents {"action":"add"}
 // and returns its hash. It hides whether the engine
 // echoed the hash back; callers that must not mistake an unacknowledged add for a

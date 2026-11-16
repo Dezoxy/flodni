@@ -48,6 +48,9 @@ func torrents(c *gin.Context) {
 		c.AbortWithError(http.StatusBadRequest, err)
 		return
 	}
+	if refuseActionMismatch(c, req.Action) {
+		return
+	}
 	c.Status(http.StatusBadRequest)
 	switch req.Action {
 	case "add":

@@ -434,9 +434,9 @@ func TestStartupReportAuthDefaultsToOpen(t *testing.T) {
 	}
 }
 
-// Until the gate lands, a scoped start says so in the report: the mode alone would read
-// as protected while the ports are open.
-func TestStartupReportAlarmsAScopedStartNotEnforced(t *testing.T) {
+// The gate enforces scoped mode, so the auth_not_enforced alarm of the earlier steps is
+// gone: no mode raises it.
+func TestStartupReportRaisesNoAuthNotEnforcedAlarm(t *testing.T) {
 	file := filepath.Join(t.TempDir(), "t.json")
 	if err := os.WriteFile(file, []byte(`{"tokens":[{"name":"a","scopes":["read"],"sha256":"`+authHash(fakeAuthToken('a'))+`"}]}`), 0o600); err != nil {
 		t.Fatal(err)
@@ -454,10 +454,7 @@ func TestStartupReportAlarmsAScopedStartNotEnforced(t *testing.T) {
 		}
 		return false
 	}
-	if !has(scoped) {
-		t.Error("scoped mode must raise auth_not_enforced")
-	}
-	if has(legacy) || has(nil) {
-		t.Error("open and legacy_token must not raise it")
+	if has(scoped) || has(legacy) || has(nil) {
+		t.Error("no mode may raise auth_not_enforced: the gate enforces them all")
 	}
 }
