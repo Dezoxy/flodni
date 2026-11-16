@@ -351,3 +351,82 @@ func TestTokenSaveKeepsTheListWhenAnotherKeyIsMistyped(t *testing.T) {
 		t.Fatalf("list dropped by the save: %s", data)
 	}
 }
+
+func fileAuthTokensFile(t *testing.T, path string) string {
+	t.Helper()
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var c struct {
+		V string `json:"auth_tokens_file"`
+	}
+	if err := json.Unmarshal(data, &c); err != nil {
+		t.Fatal(err)
+	}
+	return c.V
+}
+
+// auth_tokens_file is startup-only in every mode: a posted value that differs from the
+// file's is refused with a JSON 403 and nothing is written.
+func TestAuthTokensFileIsStartupOnly(t *testing.T) {
+	for _, mode := range []struct{ name, startTok, fileTok, bearer string }{
+		{"open port", "", "", ""},
+		{"token mode", "tok", "tok", "tok"},
+	} {
+		t.Run(mode.name, func(t *testing.T) {
+			h, path, _ := controlAPIServer(t, mode.startTok, mode.fileTok)
+			before, _ := os.ReadFile(path)
+			code, resp := doControl(h, "/api/config", `{"log_level":"debug","auth_tokens_file":"/attacker/tokens.json"}`, mode.bearer)
+			if code != http.StatusForbidden {
+				t.Fatalf("status %d (%s), want 403", code, resp)
+			}
+			if !json.Valid([]byte(resp)) || !strings.Contains(resp, "auth_tokens_file is startup-only") {
+				t.Fatalf("refusal must be JSON saying startup-only, got %q", resp)
+			}
+			after, _ := os.ReadFile(path)
+			if string(before) != string(after) {
+				t.Fatalf("file changed on refusal:\n%s\n->\n%s", before, after)
+			}
+		})
+	}
+}
+
+// With the path supplied by the environment only, a panel save (which posts back what
+// GET returned, the environment's path included) never writes it to the file.
+func TestSaveNeverPersistsTheEnvironmentsTokensFile(t *testing.T) {
+	t.Setenv("FLODNI_AUTH_TOKENS_FILE", "/run/secrets/tokens.json")
+	h, path, _ := controlAPIServer(t, "", "")
+	for _, body := range []string{
+		`{"log_level":"debug"}`,
+		`{"log_level":"debug","auth_tokens_file":"/run/secrets/tokens.json"}`,
+		`{"log_level":"debug","auth_tokens_file":""}`,
+	} {
+		if code, resp := doControl(h, "/api/config", body, ""); code != http.StatusOK {
+			t.Fatalf("%s: status %d (%s), want 200", body, code, resp)
+		}
+		if got := fileAuthTokensFile(t, path); got != "" {
+			t.Fatalf("%s: the environment's path was written to config.json: %q", body, got)
+		}
+	}
+}
+
+// A post that omits the key (or echoes the file's value) keeps what the file holds.
+func TestSaveKeepsTheFilesTokensFile(t *testing.T) {
+	h, path, _ := controlAPIServer(t, "", "")
+	if err := os.WriteFile(path, []byte(`{"log_level":"info","auth_tokens_file":"/etc/flodni/tokens.json"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for _, body := range []string{
+		`{"log_level":"debug"}`,
+		`{"log_level":"debug","auth_tokens_file":"/etc/flodni/tokens.json"}`,
+		`{"log_level":"debug","auth_tokens_file":""}`,
+	} {
+		if code, resp := doControl(h, "/api/config", body, ""); code != http.StatusOK {
+			t.Fatalf("%s: status %d (%s), want 200", body, code, resp)
+		}
+		if got := fileAuthTokensFile(t, path); got != "/etc/flodni/tokens.json" {
+			t.Fatalf("%s: the file's value became %q", body, got)
+		}
+	}
+}

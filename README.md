@@ -129,6 +129,10 @@ only logs a warning. `GET /api/startup` and the `[Startup] report` line gain an
 scopes in use, and `jwt`) with no name, hash or path. With only `api_token` set,
 behaviour is as before.
 
+`auth_tokens_file` is startup-only: `POST /api/config` answers 403 (and writes
+nothing) to a different path in every mode, and a save always writes back the
+path `config.json` holds, never the environment's.
+
 **Status:** this release loads, validates and reports the file. The gate that
 enforces the scopes on both ports is a following step of the same release, so
 until it lands a start with `auth_tokens_file` logs a warning that it is not

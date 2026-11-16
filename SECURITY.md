@@ -45,7 +45,8 @@ file writable by group or others logs a warning. The startup report's `auth`
 section shows the mode, the token count and the scopes in use, never a name, hash
 or path. Enforcement of the scopes on the two ports is the next step of the same
 release; until then a start with a tokens file logs a warning and the ports are
-not closed by it. The CI secret scan has a rule for the token shape
+not closed by it. `POST /api/config` cannot change `auth_tokens_file` in any mode (403), so a
+caller of the API cannot swap the credential store that survives a restart. The CI secret scan has a rule for the token shape
 (`fl_[A-Za-z0-9_-]{43}`).
 
 The same token also covers GoStorm's own server on port 8090 (torrent
