@@ -12,6 +12,7 @@ import (
 	"net"
 	"net/netip"
 	"net/url"
+	neturl "net/url"
 	"runtime"
 	"sort"
 	"strings"
@@ -639,7 +640,9 @@ func (t *Torrent) setMetadataSize(size int) (err error) {
 		// We already know the correct metadata size.
 		return
 	}
-	if uint32(size) > maxMetadataSize {
+	// Compare on the wide type: uint32(size) truncates a peer-supplied negative or 33-bit value
+	// to a small one that then passes.
+	if size < 0 || int64(size) > int64(maxMetadataSize) {
 		return log.WithLevel(log.Warning, errors.New("bad size"))
 	}
 	if len(t.metadataBytes) == size {
@@ -3533,6 +3536,11 @@ func (t *Torrent) addWebSeed(url string, opts ...AddWebSeedsOpt) {
 		return
 	}
 	if _, ok := t.webSeeds[url]; ok {
+		return
+	}
+	// Validate once here: an unparsable URL would otherwise fail every request made to it.
+	if _, err := neturl.Parse(url); err != nil {
+		t.logger.Levelf(log.Warning, "dropping unparsable webseed URL: %v", err)
 		return
 	}
 	// I don't think Go http supports pipelining requests. However, we can have more ready to go

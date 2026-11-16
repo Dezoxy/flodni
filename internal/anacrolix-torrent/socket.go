@@ -182,6 +182,7 @@ func listenAllRetry(
 		s, err = listen(nah.Network, net.JoinHostPort(nah.Host, portStr), f, logger)
 		if err != nil {
 			if isUnsupportedNetworkError(err) {
+				logger.Levelf(log.Info, "skipping network %q: %v", nah.Network, err)
 				err = nil
 				continue
 			}

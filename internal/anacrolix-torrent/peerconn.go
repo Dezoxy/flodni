@@ -802,6 +802,10 @@ func (c *PeerConn) onPeerSentPort(port uint16) {
 	if c.sentDhtPing {
 		return
 	}
+	// BEP 27: a private torrent's peers must not make us talk to the DHT.
+	if c.t.isPrivate() {
+		return
+	}
 	ipa, ok := tryIpPortFromNetAddr(c.RemoteAddr)
 	if !ok {
 		return

@@ -106,13 +106,15 @@ func TestMalformedInfoIsRefused(t *testing.T) {
 		name string
 		info metainfo.Info
 	}{
-		{"negative piece length", metainfo.Info{Name: "x", Length: 16384, PieceLength: -16384, Pieces: pieces(1)}},
+		// Zero length and one hash: the piece-count check below alone accepts this.
+		{"negative piece length", metainfo.Info{Name: "x", Length: 0, PieceLength: -16384, Pieces: pieces(1)}},
 		{"oversized piece length", metainfo.Info{Name: "x", Length: 1 << 20, PieceLength: 1 << 40, Pieces: pieces(1)}},
 		{"zero piece length with hashes", metainfo.Info{Name: "x", Length: 0, PieceLength: 0, Pieces: pieces(1)}},
 		{"negative file length", metainfo.Info{Name: "x", PieceLength: 16384, Pieces: pieces(1), Files: []metainfo.FileInfo{
 			{Length: 16384, Path: []string{"a"}}, {Length: -1, Path: []string{"b"}},
 		}}},
-		{"file lengths overflow", metainfo.Info{Name: "x", PieceLength: 16384, Pieces: pieces(1), Files: []metainfo.FileInfo{
+		// The sum wraps to -2, which the piece-count check below alone accepts for no pieces.
+		{"file lengths overflow", metainfo.Info{Name: "x", PieceLength: 16384, Files: []metainfo.FileInfo{
 			{Length: math.MaxInt64, Path: []string{"a"}}, {Length: math.MaxInt64, Path: []string{"b"}},
 		}}},
 	} {
@@ -208,5 +210,49 @@ func TestMalformedUnsupportedNetworkErrors(t *testing.T) {
 				t.Fatalf("isUnsupportedNetworkError = %v, want %v", got, tc.skip)
 			}
 		})
+	}
+}
+
+// A peer-supplied metadata_size must be bounded on the wide type: uint32(-4294967291) is 5.
+func TestMalformedMetadataSizeIsRefused(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		size int
+		ok   bool
+	}{
+		{"negative that truncates to a small size", -4294967291, false},
+		{"negative", -1, false},
+		{"above 32 bits", 1<<32 + 5, false},
+		{"just over the maximum", int(maxMetadataSize) + 1, false},
+		{"valid", 1 << 15, true},
+		{"the maximum", int(maxMetadataSize), true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			tor := &Torrent{logger: log.Default}
+			err := tor.setMetadataSize(tc.size)
+			if tc.ok && (err != nil || len(tor.metadataBytes) != tc.size) {
+				t.Fatalf("size %d refused or not applied: err=%v len=%d", tc.size, err, len(tor.metadataBytes))
+			}
+			if !tc.ok && (err == nil || len(tor.metadataBytes) != 0) {
+				t.Fatalf("size %d accepted: err=%v len=%d", tc.size, err, len(tor.metadataBytes))
+			}
+		})
+	}
+}
+
+// An unparsable webseed URL is dropped once, when added, not retried by every request.
+func TestMalformedWebseedURLIsDroppedWhenAdded(t *testing.T) {
+	cl, tor := newMalformedTestTorrent(t, metainfo.Info{
+		Name: "ws", Length: 16384, PieceLength: 16384, Pieces: make([]byte, 20),
+	})
+	cl.lock()
+	defer cl.unlock()
+	tor.addWebSeed("http://bad host/")
+	if n := len(tor.webSeeds); n != 0 {
+		t.Fatalf("%d webseed(s) kept for an unparsable URL", n)
+	}
+	tor.addWebSeed("http://127.0.0.1:1/")
+	if n := len(tor.webSeeds); n != 1 {
+		t.Fatalf("a good webseed URL was dropped: %d kept", n)
 	}
 }
