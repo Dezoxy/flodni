@@ -146,6 +146,7 @@ day to day.
 | a media bridge that files titles | `library`, `upload` |
 | a health job that retries dead swarms | `read`, `scrape`, `engine`, `library` |
 | a removal job | `library` |
+| a playback guard that checks sessions and torrent health (`GET /api/sessions`, `GET /api/torrents/health`; `GET /api/health` is open and needs no token) | `read` |
 | an operator CLI | `library`, `upload`, `engine`, `metrics` |
 | a webhook sender that cannot set headers (the `?token=` form) | `webhook` |
 | a metrics scraper | `metrics` |
