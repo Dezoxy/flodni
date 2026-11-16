@@ -893,8 +893,17 @@
             document.getElementById('btn-signout').style.display = '';
         }
 
-        // Asks for a token and posts it to /control/login. Resolves true once signed in.
+        // One sign-in at a time: the panel fires several requests at load and a restart
+        // kills the session under the polling one, so concurrent 401s share one dialog
+        // and all wait for it. Resolves true once signed in.
+        let signInInFlight = null;
         function signIn() {
+            if (!signInInFlight) signInInFlight = askAndSignIn().finally(() => { signInInFlight = null; });
+            return signInInFlight;
+        }
+
+        // Asks for a token and posts it to /control/login.
+        function askAndSignIn() {
             const dlg = document.getElementById('signin-dialog');
             const form = document.getElementById('signin-form');
             const input = document.getElementById('signin-token');
@@ -927,7 +936,9 @@
         }
 
         async function signOut() {
-            try { await api('/control/logout', { method: 'POST' }); } catch (_) { }
+            // A plain fetch: through api() an already expired session would open the
+            // sign-in dialog in the middle of signing out.
+            try { await fetch('/control/logout', { method: 'POST', headers: { 'Content-Type': 'application/json' } }); } catch (_) { }
             localStorage.removeItem(COOKIE_KEY);
             location.reload();
         }
@@ -945,9 +956,16 @@
             let res = await send();
             if (res.status !== 401 || tokenDeclined) return res;
             if (res.headers.get('Flodni-Auth') === 'login') {
-                localStorage.removeItem(TOKEN_KEY); // a stale bearer would be refused before the cookie is read
                 localStorage.setItem(COOKIE_KEY, '1');
                 showSignOut();
+                if (localStorage.getItem(TOKEN_KEY)) {
+                    // A stale bearer is refused before the cookie is read. Drop it and try
+                    // once without the header: a valid session needs no prompt.
+                    localStorage.removeItem(TOKEN_KEY);
+                    const again = await send();
+                    if (again.status !== 401) return again;
+                    res = again;
+                }
                 if (!(await signIn())) { tokenDeclined = true; return res; }
                 return send();
             }

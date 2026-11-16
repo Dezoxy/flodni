@@ -4,6 +4,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -297,4 +298,63 @@ func TestConcurrentIssueVerifyRevoke(t *testing.T) {
 		}()
 	}
 	wg.Wait()
+}
+
+// The tag covers the expiry and the generation, not only the name: a payload
+// re-encoded with a later expiry or another generation, keeping the old tag, is
+// refused. This is what bounds a stolen cookie and makes logout revoke.
+func TestTagCoversExpiryAndGeneration(t *testing.T) {
+	m, c := newMgr(t, Options{})
+	good := issue(t, m, plainReq(), "owner").Value
+	tag := good[strings.IndexByte(good, '.'):]
+	raw, err := enc.DecodeString(good[:strings.IndexByte(good, '.')])
+	if err != nil {
+		t.Fatal(err)
+	}
+	parts := strings.Split(string(raw), "|")
+	if len(parts) != 3 {
+		t.Fatalf("payload %q", raw)
+	}
+	exp, _ := strconv.ParseInt(parts[1], 10, 64)
+	for name, p := range map[string]string{
+		"a later expiry":     parts[0] + "|" + strconv.FormatInt(exp+3600, 10) + "|" + parts[2],
+		"another generation": parts[0] + "|" + parts[1] + "|7",
+		"another name":       "guest|" + parts[1] + "|" + parts[2],
+	} {
+		v := enc.EncodeToString([]byte(p)) + tag
+		if _, present, err := m.Verify(withCookie(&http.Cookie{Name: CookieName, Value: v})); !present || !errors.Is(err, ErrSession) {
+			t.Errorf("%s with the old tag: present=%v err=%v, want refused", name, present, err)
+		}
+	}
+	// The unaltered payload with its own tag still verifies (the harness is sound).
+	if _, _, err := m.Verify(withCookie(&http.Cookie{Name: CookieName, Value: good})); err != nil {
+		t.Fatal(err)
+	}
+	// An expired cookie whose expiry is extended without re-signing stays refused.
+	c.add(13 * time.Hour)
+	ext := enc.EncodeToString([]byte(parts[0]+"|"+strconv.FormatInt(exp+86400, 10)+"|"+parts[2])) + tag
+	if _, _, err := m.Verify(withCookie(&http.Cookie{Name: CookieName, Value: ext})); err == nil {
+		t.Error("an expired cookie with an extended expiry and its old tag verified")
+	}
+}
+
+// Two cookies of the name are ambiguous whatever their order: junk then good, good
+// then junk, and the same good value twice are all refused.
+func TestDuplicateCookiesRefusedInEveryOrder(t *testing.T) {
+	m, _ := newMgr(t, Options{})
+	good := issue(t, m, plainReq(), "owner")
+	junk := &http.Cookie{Name: CookieName, Value: "junk"}
+	for name, cs := range map[string][]*http.Cookie{
+		"junk then good": {junk, good},
+		"good then junk": {good, junk},
+		"good twice":     {good, good},
+	} {
+		r := httptest.NewRequest(http.MethodGet, "/", nil)
+		for _, c := range cs {
+			r.AddCookie(c)
+		}
+		if got, present, err := m.Verify(r); !present || !errors.Is(err, ErrSession) || got != "" {
+			t.Errorf("%s: %q %v %v, want refused", name, got, present, err)
+		}
+	}
 }

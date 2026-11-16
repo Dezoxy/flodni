@@ -19,8 +19,9 @@ import (
 //
 // It returns the refusal reason, or "" when the request passes.
 //
-// CheckAmbient is the one implementation of these rules: the session cookie of
-// internal/apiauth/session calls it too (that package imports apiauth, never the reverse).
+// CheckAmbient is the one implementation of these rules: the gate applies it to a
+// cookie or assertion, and the session package's login calls it (that package imports
+// apiauth, never the reverse).
 func CheckAmbient(r *http.Request, panelHTTPS bool) error {
 	if reason := ambientRefusal(r, panelHTTPS); reason != "" {
 		return errors.New("ambient credential refused: " + reason)
@@ -30,8 +31,10 @@ func CheckAmbient(r *http.Request, panelHTTPS bool) error {
 
 func ambientRefusal(r *http.Request, panelHTTPS bool) string {
 	if r.Method == http.MethodGet {
-		if crossSite(r) {
-			return ReasonCrossSite
+		for _, v := range r.Header.Values("Sec-Fetch-Site") { // every value counts, not the first only
+			if strings.EqualFold(strings.TrimSpace(v), "cross-site") {
+				return ReasonCrossSite
+			}
 		}
 		return ""
 	}
@@ -43,8 +46,11 @@ func ambientRefusal(r *http.Request, panelHTTPS bool) string {
 			return ReasonCSRF
 		}
 	}
-	mt, _, err := mime.ParseMediaType(r.Header.Get("Content-Type"))
-	if err != nil || mt != "application/json" {
+	cts := r.Header.Values("Content-Type")
+	if len(cts) != 1 {
+		return ReasonCSRF
+	}
+	if mt, _, err := mime.ParseMediaType(cts[0]); err != nil || mt != "application/json" {
 		return ReasonCSRF
 	}
 	return ""
@@ -68,6 +74,10 @@ func originMatchesHost(r *http.Request, panelHTTPS bool) bool {
 	}
 	scheme := strings.ToLower(u.Scheme)
 	if scheme != "http" && scheme != "https" {
+		return false
+	}
+	// Exactly scheme://host[:port]: no bare "?" or "#", which url.Parse drops silently.
+	if vals[0] != u.Scheme+"://"+u.Host {
 		return false
 	}
 	fwd, _, _ := strings.Cut(r.Header.Get("X-Forwarded-Proto"), ",") // the first hop's word

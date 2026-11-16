@@ -72,6 +72,41 @@ func TestPanelPostsAreJSON(t *testing.T) {
 	}
 }
 
+// The sign-in dialog is single-flight, sign-out is a plain fetch, and a stale stored
+// bearer is dropped and retried once before the dialog opens.
+func TestPanelSignInIsSingleFlightAndSignOutIsPlain(t *testing.T) {
+	html := string(settingsHTML)
+	i := strings.Index(html, "function signIn()")
+	j := strings.Index(html, "function askAndSignIn()")
+	if i < 0 || j < i {
+		t.Fatal("signIn() or askAndSignIn() not found")
+	}
+	if body := html[i:j]; !strings.Contains(body, "signInInFlight") || !strings.Contains(body, "askAndSignIn()") || strings.Contains(body, "showModal") {
+		t.Error("signIn() must hand every caller the one in-flight promise and not open a dialog itself")
+	}
+	k := strings.Index(html, "async function signOut")
+	l := strings.Index(html, "async function api(")
+	if k < 0 || l < k {
+		t.Fatal("signOut() not found")
+	}
+	out := html[k:l]
+	if !strings.Contains(out, "fetch('/control/logout'") || strings.Contains(out, "await api(") {
+		t.Error("signOut() must use a plain fetch, not api()")
+	}
+	body := html[l:]
+	m := strings.Index(body, "Flodni-Auth")
+	if m < 0 {
+		t.Fatal("api() does not read Flodni-Auth")
+	}
+	seg := body[m:]
+	rm := strings.Index(seg, "localStorage.removeItem(TOKEN_KEY)")
+	retry := strings.Index(seg, "await send()")
+	ask := strings.Index(seg, "await signIn()")
+	if rm < 0 || retry < rm || ask < retry {
+		t.Error("api() must drop a stale bearer and retry once without it before it asks to sign in")
+	}
+}
+
 func scopedAuthForTest(t *testing.T) (*apiauth.Tokens, string) {
 	t.Helper()
 	tok, hash, err := apiauth.GenerateToken()

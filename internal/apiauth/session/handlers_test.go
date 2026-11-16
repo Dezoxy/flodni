@@ -3,6 +3,7 @@ package session
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
@@ -249,16 +250,24 @@ func TestLogoutRevokesAndClears(t *testing.T) {
 	}
 }
 
-// A cookie-authenticated logout is a forged-form target like any ambient request.
-// A request that carries a bearer is not: a page cannot set that header.
-func TestLogoutCSRF(t *testing.T) {
+// Logout takes the gate's verdict on which credential authenticated. Standalone, with
+// no identity in the context, the handler fails closed and applies the CSRF rules, so
+// an empty bearer or another scheme's header is no exemption. The gate's own cases
+// are in the daemon's cookie gate tests.
+func TestLogoutCSRFWithoutAnIdentity(t *testing.T) {
 	f := newFixture(t)
 	ck := do(f.h.Login, loginReq(tokenBody(f.admin))).Result().Cookies()[0]
 	for name, mod := range map[string]func(*http.Request){
-		"no Origin":    func(r *http.Request) { r.Header.Del("Origin") },
-		"text/plain":   func(r *http.Request) { r.Header.Set("Content-Type", "text/plain") },
-		"another port": func(r *http.Request) { r.Header.Set("Origin", "http://panel.lan:1") },
-		"same-site":    func(r *http.Request) { r.Header.Set("Sec-Fetch-Site", "same-site") },
+		"no Origin":       func(r *http.Request) { r.Header.Del("Origin") },
+		"text/plain":      func(r *http.Request) { r.Header.Set("Content-Type", "text/plain") },
+		"another port":    func(r *http.Request) { r.Header.Set("Origin", "http://panel.lan:1") },
+		"same-site":       func(r *http.Request) { r.Header.Set("Sec-Fetch-Site", "same-site") },
+		"an empty bearer": func(r *http.Request) { r.Header.Del("Origin"); r.Header.Set("Authorization", "Bearer ") },
+		"Basic":           func(r *http.Request) { r.Header.Del("Origin"); r.Header.Set("Authorization", "Basic x") },
+		"a bearer, no identity": func(r *http.Request) {
+			r.Header.Del("Origin")
+			r.Header.Set("Authorization", "Bearer "+f.admin)
+		},
 	} {
 		r := logoutReq()
 		r.AddCookie(ck)
@@ -271,19 +280,51 @@ func TestLogoutCSRF(t *testing.T) {
 		}
 	}
 	r := logoutReq()
-	r.Header.Del("Origin")
-	r.Header.Del("Content-Type")
-	r.Header.Set("Authorization", "Bearer "+f.admin)
-	if rec := do(f.h.Logout, r); rec.Code != http.StatusNoContent {
-		t.Errorf("a bearer-authenticated logout: %d, want 204", rec.Code)
-	}
-	if _, _, err := f.h.Verify(withCookie(ck)); err == nil {
-		t.Error("the bearer logout did not revoke")
-	}
-	r = logoutReq()
 	r.Method = http.MethodGet
 	if rec := do(f.h.Logout, r); rec.Code != http.StatusMethodNotAllowed {
 		t.Errorf("GET logout: %d", rec.Code)
+	}
+}
+
+// With an identity from the gate the handler does not look at credentials again: a
+// bearer-authenticated caller (no Origin, no JSON) and an ambient one (the gate
+// already applied the CSRF rules) both log out.
+func TestLogoutTakesTheGatesVerdict(t *testing.T) {
+	for name, id := range map[string]apiauth.Identity{
+		"bearer":  {Name: "owner"},
+		"ambient": {Name: "owner", Ambient: true},
+	} {
+		f := newFixture(t)
+		ck := do(f.h.Login, loginReq(tokenBody(f.admin))).Result().Cookies()[0]
+		r := logoutReq()
+		r.Header.Del("Origin")
+		r.Header.Del("Content-Type")
+		r = r.WithContext(apiauth.WithIdentity(r.Context(), id))
+		if rec := do(f.h.Logout, r); rec.Code != http.StatusNoContent {
+			t.Errorf("%s: logout %d, want 204", name, rec.Code)
+		}
+		if _, _, err := f.h.Verify(withCookie(ck)); err == nil {
+			t.Errorf("%s: the logout did not revoke", name)
+		}
+	}
+}
+
+// The cookie is bound to the real store: a cookie naming an entry without admin, or
+// no entry at all, is refused through Handlers (not through a fake Active).
+func TestHandlersBindTheCookieToTheRealStore(t *testing.T) {
+	f := newFixture(t)
+	for _, name := range []string{"viewer", "nobody", ""} {
+		rec := httptest.NewRecorder()
+		f.h.m.Issue(rec, plainReq(), name)
+		ck := rec.Result().Cookies()[0]
+		if got, present, err := f.h.Verify(withCookie(ck)); !present || !errors.Is(err, ErrSession) || got != "" {
+			t.Errorf("a cookie for %q: %q %v %v, want refused", name, got, present, err)
+		}
+	}
+	rec := httptest.NewRecorder()
+	f.h.m.Issue(rec, plainReq(), "owner")
+	if got, present, err := f.h.Verify(withCookie(rec.Result().Cookies()[0])); got != "owner" || !present || err != nil {
+		t.Errorf("a cookie for the admin entry: %q %v %v", got, present, err)
 	}
 }
 

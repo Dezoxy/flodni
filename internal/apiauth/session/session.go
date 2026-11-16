@@ -17,6 +17,7 @@ import (
 	"encoding/base64"
 	"errors"
 	"net/http"
+	"net/url"
 	"strconv"
 	"strings"
 	"sync/atomic"
@@ -188,4 +189,17 @@ func (m *Manager) open(value string) (string, error) {
 		return "", ErrSession
 	}
 	return parts[0], nil
+}
+
+// originScheme is the scheme of a single, parsable Origin header, "" otherwise.
+func originScheme(r *http.Request) string {
+	vals := r.Header["Origin"]
+	if len(vals) != 1 {
+		return ""
+	}
+	u, err := url.Parse(vals[0])
+	if err != nil {
+		return ""
+	}
+	return strings.ToLower(u.Scheme)
 }

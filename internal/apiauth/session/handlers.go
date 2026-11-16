@@ -7,7 +7,6 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
-	"strings"
 
 	"flodni/internal/apiauth"
 )
@@ -36,10 +35,16 @@ type HandlerOptions struct {
 // exist only in scoped mode: in open and api_token-only mode they answer 404, which is
 // what tells the panel to keep its bearer prompt.
 type Handlers struct {
-	*Manager
-	tokens *apiauth.Tokens
-	log    *slog.Logger
-	refuse func(route, reason string)
+	m          *Manager // unexported: Issue would mint an admin cookie for any name
+	tokens     *apiauth.Tokens
+	log        *slog.Logger
+	refuse     func(route, reason string)
+	panelHTTPS bool
+}
+
+// Verify is the gate's cookie hook (apiauth.WithCookie): see Manager.Verify.
+func (h *Handlers) Verify(r *http.Request) (name string, present bool, err error) {
+	return h.m.Verify(r)
 }
 
 // NewHandlers builds the manager (a fresh random key) and the two handlers. The cookie
@@ -56,7 +61,7 @@ func NewHandlers(tokens *apiauth.Tokens, o HandlerOptions) *Handlers {
 	if err != nil { // crypto/rand failed: nothing safe to do
 		panic("session: " + err.Error())
 	}
-	return &Handlers{Manager: m, tokens: tokens, log: o.Logger, refuse: o.Refused}
+	return &Handlers{m: m, tokens: tokens, log: o.Logger, refuse: o.Refused, panelHTTPS: o.PanelHTTPS}
 }
 
 // Login handles POST /control/login with {"token":"..."}. The token must hold admin: one
@@ -67,7 +72,7 @@ func (h *Handlers) Login(w http.ResponseWriter, r *http.Request) {
 	if !h.allowed(w, r) {
 		return
 	}
-	if err := h.CheckAmbient(r); err != nil {
+	if err := apiauth.CheckAmbient(r, h.panelHTTPS); err != nil {
 		h.refused(w, r, loginRoute, http.StatusForbidden, "csrf", "cross-site request refused")
 		return
 	}
@@ -100,7 +105,7 @@ func (h *Handlers) Login(w http.ResponseWriter, r *http.Request) {
 		h.refused(w, r, loginRoute, http.StatusForbidden, "scope", "this token cannot sign in to the panel")
 		return
 	}
-	h.Issue(w, r, name)
+	h.m.Issue(w, r, name)
 	w.Header().Set("Cache-Control", "no-store")
 	if h.log != nil {
 		h.log.Info(fmt.Sprintf("[Control] panel sign-in by token %q from %s", name, r.RemoteAddr), "name", name, "remote_addr", r.RemoteAddr)
@@ -110,19 +115,22 @@ func (h *Handlers) Login(w http.ResponseWriter, r *http.Request) {
 
 // Logout handles POST /control/logout: it revokes every session at once (a process-wide
 // generation counter, so a stolen cookie dies too) and clears the caller's cookie.
-// Who may call it is the gate's decision (admin); here a request that carries no bearer
-// is also held to the ambient-credential rules, since then its credential is the cookie.
+// The gate decides who may call it (admin) and which credential authenticated: a
+// bearer needs no CSRF check (a page cannot set that header), and a cookie or an
+// assertion has already had the ambient-credential rules applied. With no identity in
+// the context (the handler reached without the gate) it fails closed and applies the
+// rules itself, so no header of its own can exempt a request.
 func (h *Handlers) Logout(w http.ResponseWriter, r *http.Request) {
 	if !h.allowed(w, r) {
 		return
 	}
-	if !hasBearer(r) {
-		if err := h.CheckAmbient(r); err != nil {
+	if _, ok := apiauth.IdentityFrom(r.Context()); !ok {
+		if err := apiauth.CheckAmbient(r, h.panelHTTPS); err != nil {
 			h.refused(w, r, logoutRoute, http.StatusForbidden, "csrf", "cross-site request refused")
 			return
 		}
 	}
-	h.Revoke(w)
+	h.m.Revoke(w)
 	w.Header().Set("Cache-Control", "no-store")
 	if h.log != nil {
 		h.log.Info(fmt.Sprintf("[Control] panel sessions revoked from %s", r.RemoteAddr), "remote_addr", r.RemoteAddr)
@@ -153,11 +161,6 @@ func (h *Handlers) refused(w http.ResponseWriter, r *http.Request, route string,
 			"method", r.Method, "path", r.URL.Path, "remote_addr", r.RemoteAddr, "reason", reason)
 	}
 	writeError(w, code, msg)
-}
-
-func hasBearer(r *http.Request) bool {
-	v, ok := strings.CutPrefix(r.Header.Get("Authorization"), "Bearer ")
-	return ok && v != ""
 }
 
 func writeError(w http.ResponseWriter, code int, msg string) {

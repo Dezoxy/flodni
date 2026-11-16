@@ -1025,3 +1025,153 @@ func TestCheckAmbientDetails(t *testing.T) {
 		t.Errorf("the first X-Forwarded-Proto element is http: %v", err)
 	}
 }
+
+// The one CSRF table (the session package has none of its own): what CheckAmbient
+// accepts for a POST with an ambient credential, and the methods that need the same.
+func TestCheckAmbientTable(t *testing.T) {
+	type c struct {
+		name  string
+		host  string
+		hdr   map[string]string // an empty value sets an empty header; "-" removes one
+		https bool              // panelHTTPS
+		tls   bool
+		ok    bool
+	}
+	const j = "application/json"
+	o := func(origin string, kv ...string) map[string]string {
+		m := map[string]string{"Origin": origin}
+		for i := 0; i+1 < len(kv); i += 2 {
+			m[kv[i]] = kv[i+1]
+		}
+		return m
+	}
+	for _, tc := range []c{
+		{name: "same host and port", host: "panel.lan:9080", hdr: o("http://panel.lan:9080"), ok: true},
+		{name: "host case differs", host: "Panel.LAN:9080", hdr: o("http://panel.lan:9080"), ok: true},
+		{name: "another port of the same host", host: "panel.lan:9080", hdr: o("http://panel.lan:8080")},
+		{name: "another host", host: "panel.lan:9080", hdr: o("http://evil.example:9080")},
+		{name: "no Origin", host: "panel.lan:9080", hdr: map[string]string{}},
+		{name: "null Origin", host: "panel.lan:9080", hdr: o("null")},
+		{name: "unparsable Origin", host: "panel.lan:9080", hdr: o("://")},
+		{name: "Origin with a path", host: "panel.lan:9080", hdr: o("http://panel.lan:9080/x")},
+		{name: "Origin with a bare query mark", host: "panel.lan:9080", hdr: o("http://panel.lan:9080?")},
+		{name: "Origin with a bare fragment mark", host: "panel.lan:9080", hdr: o("http://panel.lan:9080#")},
+		{name: "Origin with userinfo", host: "panel.lan:9080", hdr: o("http://u@panel.lan:9080")},
+		{name: "Origin with a scheme that is not http", host: "panel.lan:9080", hdr: o("ftp://panel.lan:9080")},
+		{name: "text/plain", host: "panel.lan:9080", hdr: o("http://panel.lan:9080", "Content-Type", "text/plain")},
+		{name: "form post", host: "panel.lan:9080", hdr: o("http://panel.lan:9080", "Content-Type", "application/x-www-form-urlencoded")},
+		{name: "no content type", host: "panel.lan:9080", hdr: o("http://panel.lan:9080", "Content-Type", "-")},
+		{name: "json with a charset", host: "panel.lan:9080", hdr: o("http://panel.lan:9080", "Content-Type", "application/json; charset=utf-8"), ok: true},
+		{name: "json look-alike", host: "panel.lan:9080", hdr: o("http://panel.lan:9080", "Content-Type", "application/jsonp")},
+		{name: "json suffix type", host: "panel.lan:9080", hdr: o("http://panel.lan:9080", "Content-Type", "application/vnd.x+json")},
+		{name: "same-origin fetch metadata", host: "panel.lan:9080", hdr: o("http://panel.lan:9080", "Sec-Fetch-Site", "same-origin"), ok: true},
+		{name: "same-site fetch metadata", host: "panel.lan:9080", hdr: o("http://panel.lan:9080", "Sec-Fetch-Site", "same-site")},
+		{name: "cross-site fetch metadata", host: "panel.lan:9080", hdr: o("http://panel.lan:9080", "Sec-Fetch-Site", "cross-site")},
+		{name: "none fetch metadata", host: "panel.lan:9080", hdr: o("http://panel.lan:9080", "Sec-Fetch-Site", "none")},
+		{name: "unknown fetch metadata value", host: "panel.lan:9080", hdr: o("http://panel.lan:9080", "Sec-Fetch-Site", "bogus")},
+		{name: "empty fetch metadata value", host: "panel.lan:9080", hdr: o("http://panel.lan:9080", "Sec-Fetch-Site", "")},
+		// The TLS tunnel: Flodni sees plain http with the original Host.
+		{name: "tunnel, no port on either side", host: "panel.example", hdr: o("https://panel.example"), ok: true},
+		{name: "tunnel, explicit matching port", host: "panel.example:8443", hdr: o("https://panel.example:8443"), ok: true},
+		{name: "tunnel, Host without a port, Origin on 8443", host: "panel.example", hdr: o("https://panel.example:8443")},
+		{name: "tunnel, Host on 8443, Origin without a port", host: "panel.example:8443", hdr: o("https://panel.example")},
+		{name: "default port spelt out on the Host", host: "panel.example:443", hdr: o("https://panel.example"), ok: true},
+		{name: "http default port spelt out", host: "panel.example:80", hdr: o("http://panel.example"), ok: true},
+		{name: "http host on 80, https origin", host: "panel.example:80", hdr: o("https://panel.example")},
+		// The scheme is not compared, so the other scheme on default ports is only
+		// separated by fetch metadata.
+		{name: "http origin, no ports, no fetch metadata", host: "panel.example", hdr: o("http://panel.example"), ok: true},
+		{name: "http origin, no ports, same-site", host: "panel.example", hdr: o("http://panel.example", "Sec-Fetch-Site", "same-site")},
+		// Known https: the Origin scheme must be https too.
+		{name: "panel known https by config, http origin", host: "panel.example", hdr: o("http://panel.example"), https: true},
+		{name: "panel known https by config, https origin", host: "panel.example", hdr: o("https://panel.example"), https: true, ok: true},
+		{name: "known https by header, http origin", host: "panel.example", hdr: o("http://panel.example", "X-Forwarded-Proto", "https")},
+		{name: "known https by header, https origin", host: "panel.example", hdr: o("https://panel.example", "X-Forwarded-Proto", "https"), ok: true},
+		{name: "known https by TLS, http origin", host: "panel.example", hdr: o("http://panel.example"), tls: true},
+		{name: "known https by TLS, https origin", host: "panel.example", hdr: o("https://panel.example"), tls: true, ok: true},
+		{name: "trailing dot on the Host only", host: "panel.example.", hdr: o("https://panel.example"), ok: true},
+		{name: "trailing dot on the Origin only", host: "panel.example", hdr: o("https://panel.example."), ok: true},
+		{name: "ipv6 host", host: "[::1]:9080", hdr: o("http://[::1]:9080"), ok: true},
+		{name: "ipv6 other port", host: "[::1]:9080", hdr: o("http://[::1]:9081")},
+		{name: "empty host", host: "", hdr: o("http://panel.lan")},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			r := httptest.NewRequest(http.MethodPost, "/control/login", nil)
+			r.Host = tc.host
+			r.Header.Set("Content-Type", j)
+			for k, v := range tc.hdr {
+				if v == "-" {
+					r.Header.Del(k)
+				} else {
+					r.Header.Set(k, v)
+				}
+			}
+			if tc.tls {
+				r.TLS = &tls.ConnectionState{}
+			}
+			err := apiauth.CheckAmbient(r, tc.https)
+			if tc.ok && err != nil {
+				t.Errorf("refused: %v", err)
+			}
+			if !tc.ok && err == nil {
+				t.Error("accepted, want refused")
+			}
+		})
+	}
+}
+
+// Every method but GET needs the full rule, not only POST: HEAD, PUT, DELETE and
+// OPTIONS with no Origin are refused, and a repeated header is refused whichever
+// value comes first.
+func TestCheckAmbientEveryNonGetMethodNeedsTheFullRule(t *testing.T) {
+	for _, m := range []string{"HEAD", "PUT", "DELETE", "PATCH", "OPTIONS", "POST"} {
+		r := httptest.NewRequest(m, "/x", nil)
+		r.Host = "p.example"
+		r.Header.Set("Content-Type", "application/json")
+		if apiauth.CheckAmbient(r, false) == nil {
+			t.Errorf("%s with no Origin accepted", m)
+		}
+		r.Header.Set("Origin", "http://p.example")
+		if err := apiauth.CheckAmbient(r, false); err != nil {
+			t.Errorf("%s with the full rule refused: %v", m, err)
+		}
+		r.Header.Set("Content-Type", "text/plain")
+		if apiauth.CheckAmbient(r, false) == nil {
+			t.Errorf("%s with text/plain accepted", m)
+		}
+	}
+	mk := func() *http.Request {
+		r := httptest.NewRequest("POST", "/x", nil)
+		r.Host = "p.example"
+		r.Header.Set("Origin", "http://p.example")
+		r.Header.Set("Content-Type", "application/json")
+		return r
+	}
+	r := mk()
+	r.Header.Add("Content-Type", "text/plain")
+	if apiauth.CheckAmbient(r, false) == nil {
+		t.Error("a second, text/plain Content-Type accepted behind a JSON one")
+	}
+	r = mk()
+	r.Header.Set("Sec-Fetch-Site", "same-origin")
+	r.Header.Add("Sec-Fetch-Site", "cross-site")
+	if apiauth.CheckAmbient(r, false) == nil {
+		t.Error("a repeated Sec-Fetch-Site accepted")
+	}
+	// GET reads the header the same way: every value counts.
+	g := httptest.NewRequest("GET", "/x", nil)
+	g.Header.Add("Sec-Fetch-Site", "same-origin")
+	g.Header.Add("Sec-Fetch-Site", "cross-site")
+	if apiauth.CheckAmbient(g, false) == nil {
+		t.Error("a GET with a repeated Sec-Fetch-Site, one of them cross-site, accepted")
+	}
+	for site, ok := range map[string]bool{"": true, "same-origin": true, "none": true, "same-site": true, "cross-site": false} {
+		g := httptest.NewRequest("GET", "/api/sessions", nil)
+		if site != "" {
+			g.Header.Set("Sec-Fetch-Site", site)
+		}
+		if got := apiauth.CheckAmbient(g, false) == nil; got != ok {
+			t.Errorf("GET with Sec-Fetch-Site %q: accepted=%v, want %v", site, got, ok)
+		}
+	}
+}
