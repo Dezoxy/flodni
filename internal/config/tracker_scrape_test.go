@@ -6,7 +6,7 @@ import "testing"
 // default; 0 hours turns the schedule off; a value out of range is replaced by
 // the default with a warning.
 func TestTrackerScrapeSettings(t *testing.T) {
-	c := LoadConfig()
+	c := loadCfg(t)
 	if c.TrackerScrapeHours != 24 || c.TrackerScrapeBatch != 100 || c.TrackerScrapePaceMs != 1000 {
 		t.Fatalf("defaults = %d %d %d", c.TrackerScrapeHours, c.TrackerScrapeBatch, c.TrackerScrapePaceMs)
 	}
@@ -20,12 +20,15 @@ func TestTrackerScrapeSettings(t *testing.T) {
 		`{"tracker_scrape_batch": 5000}`:  {24, 100, 1000},
 		`{"tracker_scrape_pace_ms": 250}`: {24, 100, 250},
 		`{"tracker_scrape_pace_ms": 5}`:   {24, 100, 1000},
-		`{"tracker_scrape_pace_ms": 9e9}`: {24, 100, 1000},
 		`{"played_protection_days": 5}`:   {24, 100, 1000},
 	} {
 		c := loadWith(t, body)
 		if got := [3]int{c.TrackerScrapeHours, c.TrackerScrapeBatch, c.TrackerScrapePaceMs}; got != want {
 			t.Errorf("%s -> %v, want %v", body, got, want)
 		}
+	}
+	// A number the int cannot hold is a type error: the file is refused.
+	if _, err := loadWithErr(t, `{"tracker_scrape_pace_ms": 9e9}`); err == nil {
+		t.Error("9e9 loaded without an error")
 	}
 }

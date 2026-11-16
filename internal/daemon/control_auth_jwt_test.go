@@ -93,7 +93,10 @@ func TestSaveAfterAHandEditEchoingTheRunningBlockKeepsTheEdit(t *testing.T) {
 	if err := os.WriteFile(path, []byte(`{"log_level":"info","auth_jwt":`+jwtBlock+`}`), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	cfg := config.LoadConfig()
+	cfg, err := config.LoadConfig()
+	if err != nil {
+		t.Fatal(err)
+	}
 	globalConfig.Store(&cfg) // the running block is jwtBlock
 	if err := os.WriteFile(path, []byte(`{"log_level":"info","auth_jwt":`+jwtBlockEdited+`}`), 0o600); err != nil {
 		t.Fatal(err)

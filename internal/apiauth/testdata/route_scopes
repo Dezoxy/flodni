@@ -1,0 +1,50 @@
+# Hand-written golden copy of the route-to-scope table (ADR 0004).
+# Columns: server method pattern action scope. An action of "-" means none.
+# Editing scopes.go without editing this file fails TestRouteTableMatchesGolden:
+# change both in the same PR so a reviewer sees every widening.
+control POST /plex/webhook - webhook
+control POST /webhook - webhook
+control GET /metrics - metrics
+control GET /metrics/profiling - metrics
+control GET /metrics/prometheus - metrics
+control GET /metrics/ttff - metrics
+control GET /api/sessions - read
+control GET /api/torrents/health - read
+control GET /api/startup - read
+control GET /api/library/list - read
+control GET /api/library/file - read
+control GET /api/library/audit - read
+control POST /api/library/add - library
+control POST /api/library/remove - library
+control POST /api/library/confirm - library
+control POST /api/library/inspect - library
+control POST /api/torrents/scrape - scrape
+control GET /api/torrents/scrape/status - scrape
+control POST /api/warmup/evict - admin
+control GET /api/config - admin
+control POST /api/config - admin
+control POST /api/gostorm/settings - admin
+control POST /api/restart - admin
+control GET /api/health - open
+control GET /api/live - open
+control GET /control - open
+engine GET /echo - open
+engine POST /settings get engine
+engine POST /settings * admin
+engine POST /torrents list engine
+engine POST /torrents active engine
+engine POST /torrents get engine
+engine POST /torrents * admin
+engine POST /torrent/upload - upload
+engine POST /cache - engine
+engine GET /stream - engine
+engine HEAD /stream - engine
+engine GET /stream/*fname - engine
+engine HEAD /stream/*fname - engine
+engine GET /play/:hash/:id - engine
+engine HEAD /play/:hash/:id - engine
+engine GET /download/:size - engine
+engine GET /storage/settings - engine
+engine POST /storage/settings - admin
+engine POST /shutdown - admin
+engine POST /shutdown/*reason - admin

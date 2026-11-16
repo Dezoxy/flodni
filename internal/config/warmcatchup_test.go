@@ -13,6 +13,16 @@ import (
 
 func loadWith(t *testing.T, body string) Config {
 	t.Helper()
+	c, err := loadWithErr(t, body)
+	if err != nil {
+		t.Fatalf("LoadConfig: %v", err)
+	}
+	return c
+}
+
+// loadWithErr is loadWith for the tests that expect the file to be refused.
+func loadWithErr(t *testing.T, body string) (Config, error) {
+	t.Helper()
 	dir := t.TempDir()
 	p := filepath.Join(dir, "config.json")
 	if err := os.WriteFile(p, []byte(body), 0o600); err != nil {
@@ -23,7 +33,7 @@ func loadWith(t *testing.T, body string) Config {
 }
 
 func TestWarmCatchupPerHourDefaultsToTwenty(t *testing.T) {
-	if got := LoadConfig().WarmCatchupPerHour; got != 20 {
+	if got := loadCfg(t).WarmCatchupPerHour; got != 20 {
 		t.Fatalf("warm_catchup_per_hour = %d, want 20", got)
 	}
 }
@@ -77,7 +87,7 @@ func TestConfigExampleCarriesTheCatchupPace(t *testing.T) {
 // unknown value falls back to "all".
 
 func TestWarmCatchupScopeDefaultsToAll(t *testing.T) {
-	if got := LoadConfig().WarmCatchupScope; got != "all" {
+	if got := loadCfg(t).WarmCatchupScope; got != "all" {
 		t.Fatalf("warm_catchup_scope = %q, want all", got)
 	}
 	if got := loadWith(t, `{"warm_on_add": true}`).WarmCatchupScope; got != "all" {
@@ -136,7 +146,7 @@ func TestConfigExampleCarriesTheCatchupScope(t *testing.T) {
 // unknown value falls back to "written".
 
 func TestWarmupEvictionOrderDefaultsToWritten(t *testing.T) {
-	if got := LoadConfig().WarmupEvictionOrder; got != "written" {
+	if got := loadCfg(t).WarmupEvictionOrder; got != "written" {
 		t.Fatalf("warmup_eviction_order = %q, want written", got)
 	}
 	if got := loadWith(t, `{"disk_warmup_quota_gb": 5}`).WarmupEvictionOrder; got != "written" {
@@ -158,7 +168,7 @@ func TestWarmupEvictionOrderAcceptsReadAndRefusesTheRest(t *testing.T) {
 // warm_next_episode (roadmap step 23) and its same-torrent switch are off by default.
 
 func TestWarmNextEpisodeIsOffByDefault(t *testing.T) {
-	c := LoadConfig()
+	c := loadCfg(t)
 	if c.WarmNextEpisode || c.WarmNextEpisodeSameTorrent {
 		t.Fatalf("warm_next_episode = %v, same_torrent = %v, want both false", c.WarmNextEpisode, c.WarmNextEpisodeSameTorrent)
 	}

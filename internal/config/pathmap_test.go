@@ -13,7 +13,7 @@ import (
 // is off; an entry that is not absolute on both sides is dropped with one warning.
 
 func TestPlexPathMapDefaultsToOff(t *testing.T) {
-	if got := LoadConfig().PlexPathMap; len(got) != 0 {
+	if got := loadCfg(t).PlexPathMap; len(got) != 0 {
 		t.Fatalf("plex_path_map = %v, want empty", got)
 	}
 }

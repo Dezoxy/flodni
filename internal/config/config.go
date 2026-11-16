@@ -2,8 +2,10 @@ package config
 
 import (
 	"encoding/json"
+	"errors"
 	"flodni/internal/flog"
 	"fmt"
+	"io/fs"
 	"log/slog"
 	"net"
 	"net/netip"
@@ -337,8 +339,17 @@ func (c *Config) ResolveAPIToken(posted string) string {
 	return posted
 }
 
-// LoadConfig loads configuration from environment variables with defaults
-func LoadConfig() Config {
+// LoadConfig loads configuration from environment variables with defaults.
+//
+// A config file that does not exist is valid: defaults. One that exists but
+// cannot be read, or does not parse after stripJSONComments (a type error
+// counts), returns an error naming the path and the cause (never file
+// content). Beside the error the Config holds the defaults and whatever keys
+// json decoded before it failed; only the healthcheck uses that, to keep a
+// metrics_port that did decode. Nothing else acts on it: the daemon's start
+// refuses, because a start that cannot read its configuration cannot know
+// whether the file names auth settings, and a save answers 409.
+func LoadConfig() (Config, error) {
 	// 1. Initial Defaults (V138 Gold Standard)
 	cfg := Config{
 		MasterConcurrencyLimit: 25,
@@ -411,21 +422,26 @@ func LoadConfig() Config {
 	}
 
 	// 3. Try to load JSON
-	if data, err := os.ReadFile(cfg.ConfigPath); err == nil {
+	var loadErr error
+	data, readErr := os.ReadFile(cfg.ConfigPath)
+	missing := errors.Is(readErr, fs.ErrNotExist)
+	if missing {
+		// A dangling symlink reads as not-exist but is a file that is there.
+		if _, err := os.Lstat(cfg.ConfigPath); err == nil {
+			missing = false
+			readErr = errors.New("a symlink that points nowhere")
+		}
+	}
+	if readErr != nil && !missing {
+		loadErr = fmt.Errorf("config file %s exists but cannot be read: %w", cfg.ConfigPath, readErr)
+	}
+	if readErr == nil {
 		// V138: Support comments in JSON by stripping them before unmarshaling
 		cleanData := stripJSONComments(data)
 		if err := json.Unmarshal(cleanData, &cfg); err != nil {
-			// json fills every key it can before it reports a type error, so the list is
-			// still enforced; keep its text so a save does not write null over it.
-			cfg.fileAllowedHosts = append([]string(nil), cfg.AllowedHosts...)
-			var raw map[string]json.RawMessage
-			if json.Unmarshal(cleanData, &raw) == nil {
-				if v, ok := raw["allowed_hosts"]; ok && string(v) != "null" && json.Unmarshal(v, new([]string)) != nil {
-					cfg.hostsForce = true
-				}
-			}
 			ParseFailed.Store(true)
 			flog.Printf(flog.Std, parseFailedFmt, cfg.ConfigPath, err)
+			loadErr = fmt.Errorf("config file %s does not parse: %w", cfg.ConfigPath, err)
 		} else {
 			ParseFailed.Store(false)
 			flog.Std.Info(fmt.Sprintf("[Config] Loaded settings from %s", cfg.ConfigPath), "config_path", cfg.ConfigPath)
@@ -454,34 +470,52 @@ func LoadConfig() Config {
 	// 5. Finalize and map derived fields
 	cfg.finalize()
 
-	return cfg
+	return cfg, loadErr
 }
 
-// stripJSONComments removes // comments from JSON data and preserves valid syntax.
-// It is careful not to strip // when part of a URL (e.g., http://).
+// stripJSONComments removes // comments from JSON data. It is string-aware: a //
+// inside a JSON string (a URL, "/mnt//media", a token) is data, escapes included,
+// and only a // outside a string starts a comment that runs to the end of the
+// line. The newline is kept, so offsets and line numbers stay as in the file.
+// Block comments were never supported and are not.
 func stripJSONComments(data []byte) []byte {
-	lines := strings.Split(string(data), "\n")
-	var result []string
-	for _, line := range lines {
-		// Find // but only if not preceded by : (simple check for http://)
-		idx := strings.Index(line, "//")
-		if idx != -1 {
-			if idx > 0 && line[idx-1] == ':' {
-				// It's likely a URL, look for another // later in the line
-				secondIdx := strings.Index(line[idx+2:], "//")
-				if secondIdx != -1 {
-					line = line[:idx+2+secondIdx]
-				}
-			} else {
-				line = line[:idx]
+	out := make([]byte, 0, len(data))
+	inString, escaped := false, false
+	for i := 0; i < len(data); i++ {
+		c := data[i]
+		switch {
+		case inString:
+			switch {
+			case escaped:
+				escaped = false
+			case c == '\\':
+				escaped = true
+			case c == '"':
+				inString = false
 			}
+		case c == '"':
+			inString = true
+		case c == '/' && i+1 < len(data) && data[i+1] == '/':
+			for i < len(data) && data[i] != '\n' {
+				i++
+			}
+			if i < len(data) {
+				out = append(out, '\n')
+			}
+			continue
 		}
-		trimmed := strings.TrimSpace(line)
-		if trimmed != "" {
-			result = append(result, trimmed)
-		}
+		out = append(out, c)
 	}
-	return []byte(strings.Join(result, " "))
+	return out
+}
+
+// CheckLoadable reports whether data, as written to config.json, would load:
+// the same strip and unmarshal LoadConfig runs. The save path runs it on the
+// bytes it is about to write, so a save can never produce a file the next start
+// refuses.
+func CheckLoadable(data []byte) error {
+	var c Config
+	return json.Unmarshal(stripJSONComments(data), &c)
 }
 
 func (c *Config) applyEnvOverrides() {

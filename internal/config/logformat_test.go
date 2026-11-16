@@ -39,7 +39,7 @@ func TestFailedToParseLineKeepsItsText(t *testing.T) {
 	var buf bytes.Buffer
 	log.SetOutput(&buf)
 	t.Cleanup(func() { log.SetOutput(os.Stderr) })
-	loadWith(t, `{not json`)
+	_, _ = loadWithErr(t, `{not json`)
 	if !strings.Contains(buf.String(), "[Config] WARNING: Failed to parse ") {
 		t.Fatalf("default output lost the stable line: %q", buf.String())
 	}
