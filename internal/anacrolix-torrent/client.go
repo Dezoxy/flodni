@@ -1383,6 +1383,9 @@ func (cl *Client) gotMetadataExtensionMsg(payload []byte, t *Torrent, c *PeerCon
 		return fmt.Errorf("error unmarshalling bencode: %s", err)
 	}
 	piece := d.Piece
+	if piece < 0 {
+		return fmt.Errorf("invalid metadata piece index %d", piece)
+	}
 	switch d.Type {
 	case pp.DataMetadataExtensionMsgType:
 		c.allStats(add(1, func(cs *ConnStats) *Count { return &cs.MetadataChunksRead }))
