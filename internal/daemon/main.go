@@ -871,6 +871,7 @@ func Run() {
 
 	flog.Printf(logger, fuseMountedFmt, mount)
 	app.startup.markMounted(mount)
+	go observeMountBDI(mount)
 
 	go ttffCleanupLoop()
 
