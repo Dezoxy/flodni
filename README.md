@@ -274,10 +274,36 @@ engine go in-process, with no credential and no URL.
 
 #### Panel sign-in (session cookie)
 
-<!-- PLACEHOLDER (ADR 0004 step 6): filled when the panel session cookie merges. -->
-Not documented here yet: the panel's own sign-in (`POST /control/login`, the
-session cookie and its attributes, logout, and the same-origin rules for a cookie
-request) arrives with the session cookie step of ADR 0004.
+A person signs in to the panel with an `admin` token, so the browser keeps no
+token. `POST /control/login` with `{"token": "..."}` answers 204 and sets the
+`flodni_session` cookie; a token without `admin` gets 403, an unknown one 401
+(counted as `scope` and `invalid`). `POST /control/logout` revokes every
+session. Both routes exist only in scoped mode (404 in open and `api_token`-only
+mode) and only the control port reads the cookie, never the engine's.
+
+- The cookie holds the token entry's name, an expiry and a generation, with an
+  HMAC-SHA256 tag. It is `HttpOnly`, `SameSite=Strict`, `Path=/`, with no
+  `Domain`, and expires 12 hours after login (absolute: use never extends it).
+- `Secure` is set when the request arrived over TLS, when the login's `Origin`
+  is https, when a proxy said `X-Forwarded-Proto: https`, or when
+  `auth_panel_https` is true. Logout clears the cookie with the same rule.
+- The HMAC key is 32 random bytes made at each start and kept in memory, so a
+  restart signs everyone out. Logout increments a process-wide generation, so
+  every cookie issued before it stops verifying, a stolen copy included. The
+  cookie also names its token entry, which must still exist and hold `admin` on
+  every request.
+- A cookie request is an ambient-credential request: a non-GET needs the same
+  `Origin` host and port, `Sec-Fetch-Site: same-origin` when present, and
+  `Content-Type: application/json`, as `auth_jwt` requests do (refusals count as
+  `csrf`; a bad or revoked cookie counts as `session` and is not retried as
+  another credential).
+- A 401 in scoped mode on the control port carries `Flodni-Auth: login`, which
+  makes the panel show its sign-in form; without that header (open and
+  `api_token`-only mode) the panel keeps its bearer prompt.
+- Cookies ignore ports: the browser sends `flodni_session` to every port of
+  the panel's hostname, so run no other service you do not trust on it.
+- The panel page answers `Content-Security-Policy: frame-ancestors 'none'` and
+  `X-Frame-Options: DENY`.
 
 #### Upgrading from v0.2.x to v0.3.0
 

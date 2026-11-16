@@ -75,7 +75,7 @@ hours. The audience must be the application's own. A request authenticated by a
 cookie or the proxy's header, not by a bearer token, needs an `Origin` of the
 same host and port, `Sec-Fetch-Site: same-origin` when present and a JSON content
 type, and the engine port never reads either. The panel's session cookie
-(`flodni_session`) is `HttpOnly` and `SameSite=Strict`, but cookies ignore ports:
+(`flodni_session`) is `HttpOnly`, `SameSite=Strict`, host-only and good for 12 hours; a logout or a restart revokes every session (logout clears the cookie with the same `Secure` rule as login), but cookies ignore ports:
 the browser sends it to every port of the hostname, so run no other service you do
 not trust on the panel's hostname. `GET /control` answers
 `Content-Security-Policy: frame-ancestors 'none'` and `X-Frame-Options: DENY`, so
