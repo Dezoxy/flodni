@@ -40,7 +40,10 @@ jobs:
           languages: go
           build-mode: manual
       # The cgo FUSE layer needs the headers above, so the autobuilder is not used.
+      # Newer runner compilers default to C23, which go-libutp's C does not build under (upstream Tiramisu a5c2859).
       - name: Build
+        env:
+          CGO_CFLAGS: -std=gnu17
         run: go build ./...
       - uses: github/codeql-action/analyze@33d7b85da1a04171e211befe2c739303b9a4c066 # v4.39.3
         with:
