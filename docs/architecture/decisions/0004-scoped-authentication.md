@@ -4,8 +4,20 @@ Date: 2026-11-16
 
 ## Status
 
-Proposed on 2026-11-16, for v0.3.0, and revised the same day after a
-security review of the first draft. Nothing in this record is built.
+Accepted on 2026-11-16, for v0.3.0, after two rounds of security review.
+Nothing in this record is built yet; the migration steps below build it.
+
+The owner decided the five open points that mattered:
+
+1. `api_token` and a tokens file both set: **refuse to start**. There is no
+   legacy alias. `api_token` alone, with no tokens file, works as today.
+2. Flodni's own engine calls use an **in-process `RoundTripper`** with no
+   network secret. A loopback secret is a rejected alternative.
+3. A `config.json` that exists but cannot be read or parsed **refuses to
+   start in every mode**.
+4. `allowed_emails` for the proxy JWT: **yes**, optional, off by default.
+5. One `admin` token is kept offline as the break-glass credential; the
+   deployment decides where (a vault).
 
 Builds on the gate described in the Auth section of
 [3. Make the file lifecycle explicit in the library API](0003-file-lifecycle-api.md):
@@ -57,8 +69,8 @@ runs where the pattern is known.
 | Today | In this record |
 |---|---|
 | Open routes: `GET /control`, `GET /api/health` on control; `GET /echo` on the engine (`controlOpen`, `gostormOpen`) | Same, plus a cheap `GET /api/live`, which joins the same open set (including the cross-site exemption) |
-| `?token=` on `/plex/webhook` and `/webhook` by exact path (`controlWebhook`) | Same two routes; a file token must be webhook-only to use it; stripped before any handler or log sees it |
-| Constant-time compare of the raw token, length checked first (the length leaks) | SHA-256 of the presented token, constant-time compare against every stored hash, the legacy token included |
+| `?token=` on `/plex/webhook` and `/webhook` by exact path (`controlWebhook`) | Same two routes; in scoped mode a token must be webhook-only to use it; stripped before any handler or log sees it |
+| Constant-time compare of the raw token, length checked first (the length leaks) | SHA-256 of the presented token, constant-time compare against every stored hash |
 | With a token set the Origin and Sec-Fetch-Site checks are off, because the bearer header is the gate | Still off for a bearer request; a stricter set **on** for a request authenticated by a cookie or a proxy header, because a browser attaches those by itself |
 | The engine's handlers know only `api_token_enforced` (`TokenEnforcedKey`), which lets `/stream` add and fetch | Set per request, only for a caller holding `admin` (see "Scopes") |
 | `app.controlToken` decides the fail-closed routes (`restart`, `confirm`, `api_token` writes) | Same switch, now "any auth enforced" |
@@ -292,11 +304,31 @@ Rules that make it hold:
   pattern: Host allowlist, extracting and **authenticating** the bearer
   token (which is the only credential this port reads), and refusing a bad or
   missing one. It stores the identity (scopes, token name) in the request
-  context. The first middleware in `newRoute` (before `WebLogger`, so before
-  anything reads a body) does the pattern-dependent part: the scope check
+  context. It keeps today's exact-match exemption for `GET /echo`. The scope
+  middleware in `newRoute` does the pattern-dependent part: the scope check
   from `c.FullPath()`, the body-action peek, and setting `TokenEnforcedKey`
   for an `admin` caller. Both listeners (plain and TLS) share `newServer`, so
   both are covered.
+
+Pinned so the split cannot leak:
+
+- **The middleware is `Use`d before every route registration.** gin freezes
+  each route's handler chain at registration (`server.go:66` and `:68`, and
+  the group at `route.go:14`), so a route registered before the `Use` would
+  skip it. The scope matrix therefore drives the **real `newRoute()`**, not a
+  copy, and a route registered ahead of the middleware fails it. gin rebuilds
+  the 404 and 405 chains on every `Use`, so an unmatched path runs the
+  middleware too, with `FullPath()` empty: `unmatched`, so `admin`.
+- **The router flags are fixed.** `HandleMethodNotAllowed`,
+  `RedirectTrailingSlash`, `RedirectFixedPath`, `UseRawPath`,
+  `UseEscapedPath` and `RemoveExtraSlash` are set off explicitly, in every
+  mode, so no response (a redirect, an `Allow` header) is produced before the
+  middleware runs, and the pattern the middleware sees is the one that is
+  served. This changes one open-mode behaviour: `POST /torrents/` answers 404
+  where gin's default answered a 307 redirect (see Compatibility).
+- **The mode is fixed at construction.** The middleware is built knowing
+  whether auth is enforced. A request that reaches it with no identity on a
+  row that is not open is **refused**, never read as "open mode".
 
 **The engine port never reads the cookie or the proxy header.** Browsers send
 a cookie to every port on a hostname, so reading it on 8090 would give any
@@ -364,12 +396,14 @@ JSON, because the config already is:
   `auth_jwt` and `auth_panel_https` are read at start and never changed
   through the API. A `POST /api/config` whose body would change any of them
   answers 403 and writes nothing; a save that does not touch them keeps the
-  file's values, as a save keeps `api_token` today. This closes a persistence
+  values of the copy **read at start**, not a re-read of the file at save
+  time, as a save keeps `api_token` today. This closes a persistence
   path the existing gate has: with a token enforced, a posted `api_token` is
   written to `config.json`, and a restart (which an `admin` may also request)
   then activates it, so a leaked admin token, a 12-hour cookie or an admitted
   proxy user could install a credential, or their own issuer and JWKS, that
-  survives the owner's rotation. Legacy mode keeps today's behaviour.
+  survives the owner's rotation. `api_token` alone (no tokens file) keeps
+  today's behaviour.
 - **Hash.** SHA-256 of the token, hex. Tokens are generated, 256 bits of
   randomness; at that entropy the hash only has to be one-way and fast. A
   slow KDF (argon2, bcrypt) exists to make guessing a low-entropy human
@@ -387,7 +421,7 @@ JSON, because the config already is:
   `fl_[A-Za-z0-9_-]{43}`.
 - **Loader.** Strict. Each of these is a refusal to start: unknown JSON
   fields, trailing data after the object, a file over 64 KiB, an empty,
-  repeated or reserved name (`legacy`, `internal`), a name outside
+  repeated or reserved name (`internal`), a name outside
   `[a-z0-9][a-z0-9_-]{0,31}` (names are logged and ride in the cookie), a
   repeated `sha256`, a `sha256` that is not 64 lower-case hex characters or is
   the hash of the empty string, a scope not in the list, an entry with no
@@ -413,10 +447,10 @@ stored hash with `subtle.ConstantTimeCompare`, with no early exit, keeping
 the matched entry through `subtle.ConstantTimeSelect`. The compared values
 are fixed-length hashes, so no length check leaks anything, and the cost does
 not depend on which entry matched. With at most 64 entries the loop is
-negligible. **The legacy `api_token` is hashed at load and is one more entry
-in the same loop** (named `legacy`, all scopes, exempt from the shape rule
-because an owner chose it); today's code compares raw bytes after a length
-check, which leaks the token's length.
+negligible. In `api_token`-only mode the token is hashed at load and goes
+through the same loop as the only entry, exempt from the shape rule because
+an owner chose it; today's code compares raw bytes after a length check,
+which leaks the token's length.
 
 ### Transport
 
@@ -426,16 +460,18 @@ check, which leaks the token's length.
   A file token is accepted in the query only when its scopes are exactly
   `["webhook"]`; an `admin` or multi-scope token in a URL is refused
   (`query_not_allowed`), because a URL is the place credentials leak from
-  (T-05) and only a credential that can do little should live there. The
-  legacy token keeps the query form on the two webhook routes during
-  migration (it is how the media server's URL works today), with one WARN
-  per start naming it.
+  (T-05) and only a credential that can do little should live there. There
+  is no exception: the migration is one restart from `api_token` to the file
+  (see "Compatibility"), so a media server's webhook URL moves to a
+  webhook-only token at that time. `api_token`-only mode keeps today's query
+  form unchanged.
 - **No validity oracle off the webhook routes.** On any other route in
   scoped mode a request that carries a `token` query parameter is refused with
   `query_not_allowed` **without hashing or comparing the value**, even when it
   also carries a valid header. The response is the same whether or not the
-  value was a real token, so the refusal tells a prober nothing. (Legacy mode
-  keeps today's behaviour: the parameter is ignored off the webhook routes.)
+  value was a real token, so the refusal tells a prober nothing. (`api_token`-only
+  mode keeps today's behaviour: the parameter is ignored off the webhook
+  routes.)
 - **Stripped before anything sees it.** After authentication the gate removes
   `token` from `r.URL.RawQuery` and `r.RequestURI` before it calls the
   handler, so no downstream log, error text or handler reads it.
@@ -453,32 +489,46 @@ No proxy is needed.
 engine-settings proxy (both in `main.go`) send `gc().APIToken` today, to
 `gc().GoStormBaseURL`, which the settings proxy re-reads on every request and
 which a config save changes live. In scoped mode the file holds hashes, so
-Flodni has nothing stored to send. A secret it invents for itself must not be
-able to leave the machine; as the code stands a redirect or a changed
-`gostorm_url` would carry it to an address an `admin` chose. Two designs, and
-a recommendation:
+Flodni has nothing stored to send. Decided: an **in-process `RoundTripper`**.
+The two self-callers use an `http.Client` whose `Transport` hands the request
+straight to the engine's handler (below the gate), in the same process. There
+is no credential, no socket, no redirect and no `gostorm_url` involved: the
+request cannot go anywhere else. Cost: `web` exposes its handler and the
+library client takes an injected client.
 
-- **Recommended: an in-process `RoundTripper`.** The two self-callers use an
-  `http.Client` whose `Transport` hands the request straight to the engine's
-  handler (below the gate), in the same process. There is no credential, no
-  socket, no redirect and no `gostorm_url` involved: the request cannot go
-  anywhere else. The handler is given an identity that sets `TokenEnforcedKey`
-  (it is Flodni's own add). Cost: `web` exposes its handler, and the library
-  client takes an injected client. This removes the secret entirely, which is
-  better than guarding it.
-- **Fallback if the handler cannot be exposed cleanly: a loopback secret.** A
-  random 256-bit secret per start, in memory only, never a `Config` field
-  (`Redacted` blanks only two fields, so anything on `Config` can leak
-  through `GET /api/config` or a save). Self-calls dial a fixed loopback
-  address, never `gostorm_url`, with redirects disabled. The engine gate
-  accepts the secret only from a loopback peer, with `engine` and `admin`,
-  on 8090 only; the control gate never accepts it. It is never logged,
-  written or returned.
+The transport is a value, not a listener, so a network client cannot reach it.
+Three rules: it **overwrites any identity already in the request context**
+(the settings proxy passes the inbound `r.Context()`, which carries the
+caller's identity) with the in-process one, which holds `admin` and sets
+`TokenEnforcedKey`; it **ignores the URL host**; and it **never falls back to
+a real transport** (an unset handler is an error, not a dial).
 
-Either way, scoped mode **refuses to start when `gostorm_url` is not a
-loopback host**: an embedded engine is always local, and a remote engine would
-need a credential Flodni can send, which a hash file cannot supply (the legacy
-token keeps working against a remote engine in legacy mode).
+**The in-process identity is a confused deputy, and the boundary is the
+control route's input.** Any control route that calls the engine lends its
+caller `admin` on the engine. `POST /api/library/add` and `/inspect` pass the
+request's `magnet` to the engine as a link, and `ParseLink` fetches `http(s)`
+and opens `file:` links by scheme. A `library` token must not be able to
+reach that. So **both routes accept only the `magnet:` scheme with an
+anchored hash** (`xt=urn:btih:` followed by exactly 40 hex or 32 base32
+characters, ending at `&` or the end of the string), checked **before any
+engine call**; `http(s)`, `file:`, a `magnet:` with no anchored hash, and
+anything else answer 400. Today's checks are unanchored regexps, so
+`http://host/x?xt=urn:btih:<40 hex>` passes them. This is part of step 3, with
+its own test.
+
+*Rejected alternative: a loopback secret.* A random per-start secret in
+memory, never a `Config` field (`Redacted` blanks only two fields), dialled at
+a fixed loopback address and accepted from the TCP peer (`r.RemoteAddr`,
+never a forwarded header) only. It works, but it is a credential on a socket
+that the `RoundTripper` does not need, and a fixed loopback dial fails when
+the engine is bound to a specific address.
+
+Scoped mode **refuses to start when `gostorm_url` is not a loopback host**:
+an embedded engine is always local, and a remote engine would need a
+credential Flodni can send, which a hash file cannot supply (`api_token`-only
+mode keeps working against a remote engine). The check is made at start;
+**a live save that would set a non-loopback `gostorm_url` in scoped mode is
+refused too** (403), so a save cannot write a value that stops the next start.
 
 `GET /echo` stays open: `checkEngine` in the health route calls it without a
 header, and the container healthcheck depends on that chain.
@@ -518,8 +568,15 @@ browser attaches the cookie and the proxy attaches the assertion to a forged
 form post alike. For a non-GET request (every state-changing control route
 takes POST) the gate requires all three of:
 
-- an `Origin` whose **host and port** equal the request's `Host`, scheme
-  ignored. Port normalisation: a `Host` or `Origin` with no port means the
+- an `Origin` whose **host and port** equal the request's `Host`. The scheme
+  is not compared, because a TLS tunnel hands Flodni plain http with the
+  original `Host`; **except** that when the panel is known to be https (the
+  request arrived over TLS, `X-Forwarded-Proto` says https, or
+  `auth_panel_https` is true) the `Origin` scheme must be `https`. Where the
+  scheme is not compared, `http://host` against `https://host` on the default
+  ports is still separated by `Sec-Fetch-Site`: a page on the other scheme is
+  same-site, not same-origin, and is refused by the next rule. Port
+  normalisation: a `Host` or `Origin` with no port means the
   scheme's default for that side, so a TLS tunnel (Host `panel.example`,
   Origin `https://panel.example`) matches, and `https://panel.example:8443`
   against Host `panel.example:8443` matches, but another port on the same
@@ -669,23 +726,25 @@ scoped mode:
   token in this mode: a 401 shows a sign-in prompt that posts to
   `/control/login`; the browser's same-origin fetches carry the cookie.
 - **Which prompt.** `/control/login` and `/control/logout` exist only in
-  scoped mode (404 in legacy and open mode). A 401 in scoped mode carries the
+  scoped mode (404 in `api_token`-only and open mode). A 401 in scoped mode carries the
   response header `Flodni-Auth: login`; the panel shows the sign-in form when
   it sees it and the existing bearer prompt (token in local storage) when it
-  does not, which is how legacy mode keeps working unchanged. The header names
+  does not, which is how `api_token`-only mode keeps working unchanged. The header names
   no path and no secret.
 - No lockout or rate limit on `/control/login`: with the token shape enforced
   a generated token cannot be guessed, and the refusal counter is the alert.
-  An owner-chosen legacy token is the weakness (T-08, unchanged).
+  An owner-chosen `api_token` is the weakness (T-08, unchanged).
 
 ### Metrics and logs
 
 - `flodni_auth_refusals_total{route,scope,reason}`. `route` is the route
   **pattern** from the table, not the raw path (`/play/:hash/:id`, never a
-  hash), and `unmatched` for a path in no row, so cardinality is bounded by
-  the 52 rows plus one. `scope` is the scope the route requires, not the
-  presented token's, so no token name or identity can reach a label. `reason`
-  is one of:
+  hash), and `unmatched` for a path in no row; a refusal by the engine's outer
+  gate happens before routing and has no pattern, so it uses the fixed label
+  `route="pre_route"` with an **empty `scope`**, never the raw path. So
+  cardinality is bounded by the 52 rows plus two. `scope` is the scope the
+  route requires, not the presented token's, so no token name or identity can
+  reach a label. `reason` is one of:
   - `missing`: no credential of any kind was presented on a route that needs
     one (this includes an absent JWT header);
   - `invalid`: a credential was presented and is wrong (unknown token,
@@ -705,10 +764,6 @@ scoped mode:
   Emitted by the daemon's Prometheus text writer (`metrics_prom.go`);
   `apiauth` reports each refusal through an observer option so it imports no
   metrics code.
-- `flodni_auth_legacy_requests_total`, no labels: requests authenticated by
-  the legacy token while a tokens file is configured (and in `legacy_token`
-  mode). "Remove `api_token` last" becomes observable: when it stays at zero
-  for a while, the legacy token is unused.
 - A refusal is logged as today: method, path **quoted with `%q`** (a path can
   carry control characters, and token names now make log integrity matter),
   remote address, and the reason. Never the query, a token, a cookie or a
@@ -733,9 +788,11 @@ scoped mode:
 | `config.json` exists but cannot be read or parsed | **Refuses to start, in every mode.** The one deliberate departure from v0.2.6. |
 | `api_token` only | Today's behaviour: one token, every scope, `?token=` on the two webhook routes. Reported as `legacy_token`. |
 | `auth_tokens_file` only | Scoped mode: deny by default. |
-| Both | Scoped mode; `api_token` is a token named `legacy` with every scope, a WARN at start and `legacy_admin: true`. |
+| `api_token` **and** `auth_tokens_file` | **Refuses to start**, naming both settings. There is no alias that keeps the old token alive beside scoped ones. |
 | `auth_jwt` without `auth_tokens_file` (with or without `api_token`) | Refuses to start. |
 | `auth_tokens_file` set and the file missing, unreadable or invalid | Refuses to start. |
+| Scoped mode and a live save of a non-loopback `gostorm_url` | 403, nothing written. |
+| Engine `POST /torrents/` (trailing slash), any mode | 404; gin's default answered a 307 redirect. The one open-mode change besides the config rule, from the pinned router flags. |
 | Scoped mode and a `gostorm_url` that is not loopback | Refuses to start. |
 | `auth_jwt` with `header: Authorization`, a non-https `jwks_url`, or an incomplete block | Refuses to start. |
 
@@ -753,23 +810,45 @@ which shows the intent. The environment variable `FLODNI_AUTH_TOKENS_FILE`
 is read independently, so a set variable with an unreadable `config.json`
 still refuses (the file may name `auth_jwt`).
 
-On the both-set case, recommended over refusing to start: the point of a
-migration is that the existing callers (the media server's webhook URL, the
-bridge, automation) keep working while each gets its own scoped token, one at
-a time. A refusal forces every caller to change in the same restart. Treating
-`api_token` as `admin` adds no privilege (it already had everything), keeps
-the `?token=` webhook URL working, and the cost is that an owner who forgets
-to remove it keeps a plaintext all-power token; the WARN, the report's
-`legacy_admin` (which also joins the report's existing alarms), the legacy
-request counter and the roadmap's last step ("remove it") are the guard.
-Refusal is the other defensible choice and the owner may take it (open
-question 1).
+**Config loading, precisely.** The refusal keys on the parse **after
+`stripJSONComments`**, so a commented file is fine. `LoadConfig` returns an
+error; **only `main` exits**. The other callers do not die with it: a save
+(`POST /api/config`) over a broken file answers 409 in every mode (today only
+on an open port), and `flodni healthcheck` falls back to the default port
+rather than reporting a file mid-edit as an unhealthy daemon. Two hazards to
+know: the comment stripper is line-based and cuts a line holding two `://` at
+the second, so a one-line array of two URLs fails to parse (roadmap
+"Durable records" step 20 is the fix); and v0.2.6 tolerated a type error on
+purpose, filling the other keys and raising a config-parse alarm. **Release
+note:** a v0.2.6 deployment that starts with that alarm in `GET /api/startup`
+will refuse to start on v0.3.0, so clear the alarm before upgrading.
 
-**Migration is one switch, then a clean-up.** Create the file with
-`flodni auth new-token`, set `auth_tokens_file`, restart. Callers are then
-moved to scoped tokens at leisure; the last step removes `api_token`. Rolling
-back is deleting the setting and restarting. A mistake in the file stops the
-start and names the line, which is the failure mode the owner wants.
+**Migration is one restart.** Create the file with `flodni auth new-token`
+(one entry per caller), set `auth_tokens_file`, **remove `api_token`** from
+`config.json` and from `FLODNI_API_TOKEN`, move each caller to its own token
+(the media server's webhook URL to a webhook-only token, a scraper to a
+metrics one), and restart. Both settings present is a refusal that names
+them, so a half-finished migration cannot start with an all-power token beside
+the scoped ones. Rolling back is restoring `api_token` and removing the
+file setting. A mistake in the file stops the start and names the line, which
+is the failure mode the owner wants.
+
+**Caller sizing.** No caller needs `admin` day to day:
+
+| Caller | Scopes |
+|---|---|
+| an ingest bridge | `library`, `upload` |
+| a dead-swarm job | `read`, `scrape`, `engine`, `library` |
+| a removal job | `library` |
+| an operator CLI | `library`, `upload`, `engine`, `metrics` (`admin` only through the break-glass token) |
+| a webhook sender that cannot set headers (query form) | `webhook` |
+| the metrics scraper | `metrics` |
+| the panel | the IdP JWT (`admin`), or the cookie login with the break-glass token |
+
+That is five scoped tokens plus the break-glass `admin` token, about the
+seven the owner sized for. The break-glass token is kept offline by the
+deployment (a vault); it is also the way into the panel when the identity
+provider is down.
 
 **The startup report.** `[Startup] report` stays byte-identical to
 `GET /api/startup`; the report is built once and both are that one body. A new
@@ -780,14 +859,13 @@ top-level key is additive and `schema` stays at 1:
   "mode": "scoped",
   "tokens": 6,
   "scopes": ["admin", "engine", "library", "metrics", "read", "upload", "webhook"],
-  "jwt": false,
-  "legacy_admin": false
+  "jwt": false
 }
 ```
 
-`mode` is `open`, `legacy_token` or `scoped`; `tokens` counts entries
-(`legacy_token`: 1; `open`: 0; a legacy token beside a file counts); `scopes`
-is the sorted union in use (all eight for the legacy token); `jwt` is whether
+`mode` is `open`, `legacy_token` (`api_token` alone) or `scoped`; `tokens` counts entries
+(`legacy_token`: 1; `open`: 0); `scopes` is the sorted union in use (all
+eight for the `api_token`); `jwt` is whether
 the mode is configured. It carries no name, no hash, no path and no key. A
 contract test pins that every key the v0.2.6 report had is still present with
 the same type, and that the line and the endpoint body are the same bytes in
@@ -808,7 +886,7 @@ Positive:
 
 - A leaked webhook URL or metrics scraper credential can no longer write
   configuration, restart or shut down the daemon.
-- No credential in plaintext on disk (except an owner-kept legacy token), and
+- No credential in plaintext on disk (except an owner-kept `api_token`), and
   the token file is safe to mount read-only and to back up.
 - The panel in a browser holds no bearer token in script-readable storage.
 - A new route cannot go public by omission, and the table makes the whole
@@ -861,10 +939,10 @@ Rows that change in the implementing PR (this record edits none of them):
 
 | Row | Change |
 |---|---|
-| T-01 | Spoofing: the compare is over hashes of every entry, the legacy token included; a token is bound to scopes. A 403 for insufficient scope joins the 401. |
+| T-01 | Spoofing: the compare is over hashes of every entry; a token is bound to scopes. A 403 for insufficient scope joins the 401. |
 | T-02 | The default is still open, and still documented. The gap "no mitigation other than a token" gains the scoped mode; the open-port refusals remain for the unconfigured case. The GoStorm `POST /shutdown` gap closes in scoped mode (it needs `admin`). |
 | T-03 | A stored token is no longer plaintext in the new file. A passive reader on the wire still sees a bearer token (T-04). |
-| T-05 | Rewritten: a file token is accepted in `?token=` only if its scopes are exactly `webhook`, so the credential in a URL can forge a play event and do nothing else; the legacy token keeps the query form during migration, with a WARN. Stripped from every Flodni log. A proxy's own log is still out of scope. |
+| T-05 | Rewritten: a file token is accepted in `?token=` only if its scopes are exactly `webhook`, so the credential in a URL can forge a play event and do nothing else; the `api_token`-only mode is unchanged. Stripped from every Flodni log. A proxy's own log is still out of scope. |
 | T-06 | A separate webhook credential now exists, and it is the only kind that rides in a URL; a forged event needs it. |
 | T-10, T-11 | Config and library writes need `admin` and `library`; a `webhook`, `metrics`, `read`, `scrape` or `upload` token can do neither. In scoped mode the auth settings cannot be changed through the API at all. |
 | T-12 | Health stays open; `GET /api/live` is the cheap probe that leaks no warning. |
@@ -886,9 +964,10 @@ Residuals that remain after this change, to be written into the threat model:
 - A JWT can be replayed until `exp`, and a revoked JWKS key is trusted for up
   to 24 hours.
 - The JWKS URL is a blind fetch to an address the owner named.
-- The in-process secret, if the fallback design is built instead of the
-  `RoundTripper`.
-- No TLS (T-04), no rate limit (T-08), a legacy token that is a
+- The in-process identity is `admin` on the engine: the input checks of the
+  control routes that call it (the library `magnet` scheme check) are the
+  boundary, not the scope.
+- No TLS (T-04), no rate limit (T-08), an `api_token` that is a
   human-chosen secret if the owner keeps it, and an `admin` token or an
   admitted proxy user being able to do everything `admin` does.
 
@@ -907,10 +986,15 @@ tests (test first, shown red, then green).
    `new-token` round trip; report contract in all three modes.
 3. **Scoped gate on both ports.** Lookup, shape check, scope check on both
    halves, the body peek and its handler cross-check, query tokens, the
-   refusal metric, legacy-as-admin, per-request `TokenEnforcedKey`, the
-   startup-only settings, the self-call path. Tests: the matrix, 8090
-   enforcing the same tokens, `/stream` refusals for `engine`, the body
-   mismatch cases, bounded metric labels.
+   refusal metric (`pre_route` for the engine's outer gate), per-request
+   `TokenEnforcedKey`, the startup-only settings, the in-process
+   `RoundTripper` for self-calls, refusal to start when `api_token` and a
+   tokens file are both set, and the **library `magnet` scheme check**: add
+   and inspect accept only `magnet:` with an anchored 40-hex or 32-base32
+   hash, before any engine call. Tests: the matrix on the real `newRoute()`,
+   8090 enforcing the same tokens, `/stream` refusals for `engine`, the body
+   mismatch cases, bounded metric labels, and `http://host/x?xt=urn:btih:<hash>`
+   answering 400 with no engine call (recording fake).
 4. **Logs and redaction.** `token=` in `internal/redact`, `WebLogger` through
    it, the replaced recovery middleware, quoted paths, a guard that the
    control server logs no query. Tests: no log, metric or refusal line holds a
@@ -930,17 +1014,18 @@ tests (test first, shown red, then green).
 
 - **Scope matrix.** For every row of the route table on both ports (the
   engine's TLS listener included), against each of: no credential, a wrong
-  token, each of the eight scopes alone, a two-scope token, the legacy token,
-  and a cookie (which the engine must ignore). The expected result is written
-  by hand in the golden file, not computed from the table under test.
-  Handlers are stubs that record being reached, so a refused request is shown
-  never to reach one.
+  token, each of the eight scopes alone, a two-scope token, and a cookie
+  (which the engine must ignore). The expected result is written by hand in
+  the golden file, not computed from the table under test. It drives the
+  **real `newRoute()`**, so a route registered before the scope middleware
+  fails it, and it pins the router flags. Handlers are stubs that record being
+  reached, so a refused request is shown never to reach one.
 - **Completeness and routing.** gin `Routes()` and the mux registrar each
   against the table; differential cases (trailing slash, `//`, case, dot
   segments, unlisted methods) classified by the router's own pattern.
 - **Query tokens.** A webhook-only token accepted on the two webhook routes
   and stripped from what the handler sees; an `admin` or multi-scope file
-  token refused there; the legacy token accepted with a WARN; refused with
+  token refused there; refused with
   `query_not_allowed` everywhere else and on 8090, and shown to do no hashing
   (a counter on the lookup); a captured log buffer, the engine log, the
   refusal and success logs, the redactor output and the metrics text never
@@ -972,10 +1057,13 @@ tests (test first, shown red, then green).
   short or non-hex hash, the hash of the empty string, zero tokens,
   unreadable path, over 64 tokens, over 64 KiB. An unreadable or unparsable
   `config.json` refuses; an absent one starts. `auth_jwt` without a file
-  refuses. A non-loopback `gostorm_url` in scoped mode refuses.
-- **Lookup.** The loop visits every entry regardless of the match; an empty
-  or wrongly shaped bearer never matches; the legacy token goes through the
-  same loop.
+  refuses. `api_token` plus a tokens file refuses. A non-loopback
+  `gostorm_url` in scoped mode refuses at start, and a live save of one is
+  403. A save over a broken file is 409 in every mode, and `flodni
+  healthcheck` falls back to the default port.
+- **Lookup.** The loop visits every entry regardless of the match; an empty or
+  wrongly shaped bearer never matches; the `api_token` of `api_token`-only
+  mode goes through the same loop.
 - **Self-calls.** The library client and the settings proxy reach the engine
   with no credential in any request, log or `GET /api/config`; a changed
   `gostorm_url` or a redirect cannot carry anything off the machine.
@@ -991,40 +1079,32 @@ tests (test first, shown red, then green).
 - **Race.** `go test -race` over the gate with concurrent requests, a JWKS
   refresh and a logout in flight.
 
-## Open questions
+## Decisions on the open questions
 
-Recommendations in bold; the owner may override any. Questions 1 to 3, 6 and
-12 need an owner decision; the rest are defaults the owner may leave.
+All settled by the owner, or accepted as the recommended default.
 
-1. **`api_token` and a tokens file together.** **Treat `api_token` as an
-   `admin` token named `legacy`, with a WARN, `legacy_admin: true` and a use
-   counter.** Alternative: refuse to start. Staged migration versus a forced
-   flag day.
-2. **Self-calls.** **An in-process `RoundTripper`**, no secret. Alternative:
-   the loopback secret with the constraints above. Needs the engine's
-   handler exposed from `web`.
-3. **An unreadable `config.json` refuses to start in every mode.**
-   **Yes.** Alternative: only when the environment or a readable part names
-   auth, which cannot be known for a file that is unreadable.
-4. **Is `/control` open?** **Yes, static page only.**
-5. **`GET /echo` and a liveness route.** **Keep `/echo` open and add
-   `/api/live`.**
-6. **Email allow-list for the JWT.** **Optional, off by default.** The
-   proxy's policy is the primary list; this is insurance if it is ever wide.
-7. **Cookie signing key from the file?** **No: random at start**, plus a
+1. **`api_token` and a tokens file together: refuse to start.** No legacy
+   alias; the migration is one restart (see "Compatibility").
+2. **Self-calls: the in-process `RoundTripper`**, no network secret. The
+   loopback secret is a rejected alternative.
+3. **An unreadable or unparsable `config.json` refuses to start in every
+   mode.** The rule cannot be conditional on content that was not read.
+4. **Email allow-list for the JWT: yes**, optional, off by default.
+5. **Break-glass `admin` token: one, kept offline** by the deployment (a
+   vault), listed in the file like any other.
+6. **Is `/control` open?** Yes, static page only.
+7. **`GET /echo` and a liveness route.** `/echo` stays open; `/api/live` is
+   added.
+8. **Cookie signing key from the file?** No: random at start, plus a
    generation counter so logout revokes everywhere.
-8. **An engine on another host.** **Not supported in scoped mode** (refuses
-   to start); legacy mode keeps working with it.
-9. **`POST /torrents` actions for the bridge.** **`list`, `active` and `get`
-   are `engine`; `add`, `set`, `rem`, `drop` are `admin`; upload is its own
-   scope.**
-10. **Log the token name on mutating successes.** **Yes**, names only.
-11. **Count Host, Origin and cross-site refusals in the same metric.**
-    **Yes**, in every mode.
-12. **A break-glass `admin` token.** **Yes, one, stored offline**, listed in
-    the file like any other; it is the way in when the identity provider is
-    down. The owner decides where it is kept.
-13. **Reload on a signal.** **No.** One read at start; restart to rotate.
+9. **An engine on another host.** Not supported in scoped mode (refuses to
+   start); `api_token`-only mode keeps working with it.
+10. **`POST /torrents` actions.** `list`, `active` and `get` are `engine`;
+    `add`, `set`, `rem`, `drop` are `admin`; upload is its own scope.
+11. **Log the token name on mutating successes.** Yes, names only.
+12. **Count Host, Origin and cross-site refusals in the same metric.** Yes,
+    in every mode.
+13. **Reload on a signal.** No. One read at start; restart to rotate.
 
 ## Related
 

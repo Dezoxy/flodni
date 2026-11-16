@@ -767,27 +767,30 @@ Scoped tokens, a hashed token file and a panel sign-in that needs no token in
 the browser. Design: [ADR 0004](architecture/decisions/0004-scoped-authentication.md).
 With no token configured, behaviour stays as v0.2.6, except that a
 `config.json` that exists but cannot be read now stops the start. All steps are
-designed, not built.
+designed, not built; ADR 0004 is Accepted.
 
 1. **One route-to-scope table, a registrar, and no silent open mode.** Every
    route on both servers gets a scope in one table (unknown routes and methods
-   mean `admin`), the control mux is built through a registrar that records its
-   patterns, `GET /api/live` is added, and an unreadable or unparsable
-   `config.json` refuses to start. A test fails on any route without a scope,
-   and a hand-written golden file catches a silent change. No enforcement yet;
-   ADR 0004. Designed, not built.
+   mean `admin`), the control mux is built through a registrar that records
+   its patterns, `GET /api/live` is added, and an unreadable or unparsable
+   `config.json` refuses to start (only `main` exits; a save over it is 409).
+   A test fails on any route without a scope, and a hand-written golden file
+   catches a silent change. No enforcement yet; ADR 0004. Designed, not built.
 2. **The token file, its loader and `flodni auth new-token`.** JSON with names,
    scopes and SHA-256 hashes, read once at start and refused if anything is
    wrong (never open mode; `auth_jwt` without a file, a non-loopback
-   `gostorm_url` and duplicate or reserved entries refuse too); the CLI prints
+   `gostorm_url`, `api_token` together with a tokens file, and duplicate or
+   reserved entries refuse too); the CLI prints
    a token once and the entry to add; the `[Startup] report` gains an additive
    `auth` section. ADR 0004. Designed, not built.
 3. **Enforce scopes on both ports.** Hash lookup in constant time with the
    token shape checked first, deny by default, `?token=` on the webhook routes
-   for webhook-only tokens (and the legacy token), the engine's body `action`
+   for webhook-only tokens, the engine's body `action`
    read after authentication with a handler cross-check, `/stream` adds only
-   for `admin`, auth settings startup-only, Flodni's own engine calls without
-   a credential, `api_token` kept as an `admin` token, and
+   for `admin`, auth settings startup-only, Flodni's own engine calls through
+   an in-process `RoundTripper` with no credential, the library add and
+   inspect accepting only an anchored `magnet:` hash before any engine call,
+   `api_token` plus a tokens file refusing to start, and
    `flodni_auth_refusals_total{route,scope,reason}`. The scope matrix runs on
    both ports. ADR 0004. Designed, not built.
 4. **Keep tokens out of every log.** A `token=` rule in the redactor, the
@@ -807,10 +810,11 @@ designed, not built.
    `Origin` (host and port), `Sec-Fetch-Site` and a JSON content type. ADR
    0004. Designed, not built.
 7. **Documentation and the threat model.** README, `SECURITY.md`, the changed
-   threat-model rows and three new ones, a gitleaks rule for the token shape,
-   an end-to-end scoped start, and the ADR moved to Accepted. The owner then
-   moves each caller to its own token and removes `api_token`. ADR 0004.
-   Designed, not built.
+   threat-model rows and three new ones, the release note about the
+   config-parse alarm, a gitleaks rule for the token shape, and an end-to-end
+   scoped start. A deployment then moves from `api_token` to the tokens file
+   in one restart, each caller on its own token. ADR 0004. Designed, not
+   built.
 
 ## Done
 
