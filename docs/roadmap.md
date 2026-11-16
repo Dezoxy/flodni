@@ -811,7 +811,7 @@ built in v0.3.0; ADR 0004 is Accepted and implemented.
    alarm, the stricter keys), a gitleaks rule for the token shape (it arrived
    with step 2), the panel's `frame-ancestors` header, and an end-to-end
    scoped start on both ports. A deployment then moves from `api_token` to the tokens file
-   in one restart, each caller on its own token. Done, THISPR.
+   in one restart, each caller on its own token. Done, #228.
 
 ## Done
 
