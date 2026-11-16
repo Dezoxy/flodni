@@ -63,6 +63,16 @@ func handleConfig(w http.ResponseWriter, r *http.Request) {
 				"config.json cannot be read or parsed; fix it before saving through the API")
 			return
 		}
+		// auth_jwt names who counts as an admin at the next start: startup-only in every
+		// mode. A post that carries a block is refused unless it equals the file's or the
+		// running one (the panel echoes the running block, which a hand edit not yet
+		// picked up makes differ from the file's). Either way the file's block is kept
+		// as it is, so a post without one must not drop it and a hand edit survives.
+		if newCfg.AuthJWT != nil && !newCfg.AuthJWT.Same(onDisk.AuthJWT) && !newCfg.AuthJWT.Same(gc().AuthJWT) {
+			refuseOpenPort(w, r, http.StatusForbidden, "auth_jwt is startup-only; edit config.json")
+			return
+		}
+		newCfg.AuthJWT = onDisk.AuthJWT
 		if app.controlToken == "" {
 			// allowed_hosts is the same kind of setting, and gostorm_url feeds the engine's
 			// list, so the derived list is gated, not each field: a client could clear or

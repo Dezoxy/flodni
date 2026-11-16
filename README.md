@@ -374,6 +374,63 @@ over), `head_density_check` (the one-shot head check ran; see Cache disk),
 `state_not_on_mounted_volume` (the container entrypoint's warning). The report
 is taken once, so a `corrupt_cache` removal after it is not in it.
 
+## Proxy-signed identity (IdP mode)
+
+`internal/apiauth/jwt` verifies an identity assertion that an identity-aware
+proxy puts in a request header (ADR 0004). It is the library half only: the
+control gate does not call it yet, so setting `auth_jwt` changes nothing at
+runtime until the scoped-token gate lands. The block, when you add it to
+`config.json`:
+
+```json
+"auth_jwt": {
+  "issuer":   "https://<team>.cloudflareaccess.com",
+  "audience": "<application audience tag>",
+  "jwks_url": "https://<team>.cloudflareaccess.com/cdn-cgi/access/certs",
+  "header":   "Cf-Access-Jwt-Assertion",
+  "allowed_emails": []
+}
+```
+
+The values show Cloudflare Access; `<team>` and the audience tag are your own.
+Any proxy that signs an RS256 or ES256 assertion and publishes a JWKS fits,
+such as oauth2-proxy. The mode is off when the block is absent, and
+`allowed_emails` (optional; ASCII only, matched case-insensitively for A-Z; a
+token with `email_verified` false is refused when it is set) is off while
+empty. `issuer`, `audience`, `jwks_url` and `header` are required; `header`
+may not be `Authorization`, and `jwks_url` must be `https`. Those refusals
+(and an incomplete block) are enforced at start once the gate lands (ADR 0004
+step 3); until then only the verifier's constructor applies them. `auth_jwt`
+is startup-only: `POST /api/config` never writes it, and a post that carries a
+block that equals neither the file's nor the running one is refused with 403
+(a post without one keeps the file's). The audience must be this application's
+own, or anyone the proxy admits to another application passes.
+
+What a token must satisfy: exactly one header value (at most 16 KiB) of three
+strict unpadded base64url segments; `alg` `RS256` or `ES256`, matching the
+key's type (the key decides, never the token); a `kid` that names a key in the
+JWKS; no `crit` (`jwk`, `jku`, `x5c` and `x5u` are ignored); a valid signature
+(an ES256 signature is exactly 64 bytes); `iss` equal to `issuer`; `aud`
+(string or array, not null or empty) holding `audience`; `exp` not past and
+`nbf` not ahead, with 60 seconds of skew; a `sub`; and an `email` in
+`allowed_emails` when that list is set. An `email` claim with any non-ASCII
+byte is refused whether or not the list is set (Unicode case folding would
+otherwise let a look-alike match). Failures carry a reason: `missing` (no
+header) or `jwt_malformed`, `jwt_alg`, `jwt_unknown_kid`,
+`jwt_keys_unavailable`, `jwt_signature`, `jwt_issuer`, `jwt_audience`,
+`jwt_expired`, `jwt_not_yet_valid`, `jwt_claims`.
+
+The keys come from `jwks_url` over https with a 5-second timeout, a 64 KiB cap
+and no redirects. Only RSA keys of 2048 bits or more and P-256 EC keys on the
+curve are kept, honouring each key's `use` (`sig`) and `alg`; a key without a
+`kid`, or a repeated `kid`, fails the fetch, as does an empty set. Keys are
+cached for 24 hours; an unknown `kid` triggers one refresh, at most once a
+minute (after failures the wait grows 1, 2, 4 up to 15 minutes), with one
+fetch in flight; a failed fetch is logged once, by cause class only (never the
+URL). If the provider is down the last good set keeps working until it is 24
+hours old, then verification fails closed. A key the provider revokes stays
+trusted until the next successful fetch.
+
 ## Play webhook
 
 Some features act on a play that the media server reports by webhook, and do

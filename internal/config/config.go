@@ -69,6 +69,11 @@ type Config struct {
 	// except the static panel page (see internal/apiauth). Empty: no auth.
 	// FLODNI_API_TOKEN overrides it. GET /api/config never returns it.
 	APIToken string `json:"api_token"`
+	// AuthJWT, when set, is the proxy-signed identity (ADR 0004); nil: off. Its
+	// Validate refusals (incomplete block, a non-https jwks_url, header Authorization)
+	// are enforced at start once the gate lands (ADR 0004 step 3); until then only
+	// jwt.New applies them.
+	AuthJWT *AuthJWT `json:"auth_jwt,omitempty"`
 	// AllowedHosts, when non-empty, makes both servers refuse (403) a request whose
 	// Host hostname is not listed: the defence against DNS rebinding (see
 	// internal/apiauth). IP literals, localhost and the machine's own hostname are
