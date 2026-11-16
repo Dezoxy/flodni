@@ -69,6 +69,11 @@ type Config struct {
 	// except the static panel page (see internal/apiauth). Empty: no auth.
 	// FLODNI_API_TOKEN overrides it. GET /api/config never returns it.
 	APIToken string `json:"api_token"`
+	// AuthTokensFile is the path of the scoped-token file (ADR 0004, see
+	// internal/apiauth). Set, both servers use scoped mode; api_token must then be
+	// unset or the daemon refuses to start. FLODNI_AUTH_TOKENS_FILE overrides it.
+	// Read once at start; Flodni never writes the file.
+	AuthTokensFile string `json:"auth_tokens_file"`
 	// AuthJWT, when set, is the proxy-signed identity (ADR 0004); nil: off. Its
 	// Validate refusals (incomplete block, a non-https jwks_url, header Authorization)
 	// are enforced at start once the gate lands (ADR 0004 step 3); until then only
@@ -93,6 +98,9 @@ type Config struct {
 	// fileAPIToken is APIToken as read from config.json, before the environment
 	// override, so a panel save never writes the environment's token to disk.
 	fileAPIToken string
+	// fileAuthTokensFile is AuthTokensFile as config.json holds it, before the
+	// environment override: a panel save writes this, never the environment's path.
+	fileAuthTokensFile string
 
 	// filePlexToken is Plex.Token as read from config.json, and plexTokenFromEnv says
 	// the environment supplied the one in use. A panel save writes the file's token,
@@ -329,6 +337,10 @@ func (c *Config) ResolvePlexToken(posted string) string {
 	return posted
 }
 
+// FileAuthTokensFile is auth_tokens_file as config.json holds it, without the
+// environment's override. It is startup-only: a save writes this value.
+func (c *Config) FileAuthTokensFile() string { return c.fileAuthTokensFile }
+
 // ResolveAPIToken returns the token to persist when the panel posts a config.
 // The panel never sees the token, so an empty value (what GET returns) keeps
 // the one in config.json; anything else is taken as given.
@@ -446,6 +458,7 @@ func LoadConfig() (Config, error) {
 			ParseFailed.Store(false)
 			flog.Std.Info(fmt.Sprintf("[Config] Loaded settings from %s", cfg.ConfigPath), "config_path", cfg.ConfigPath)
 			cfg.fileAPIToken = cfg.APIToken
+			cfg.fileAuthTokensFile = cfg.AuthTokensFile
 			cfg.fileAllowedHosts = append([]string(nil), cfg.AllowedHosts...)
 			cfg.filePlexToken = cfg.Plex.Token
 			// Backward compat: if gostorm_url was not present in config, fall back to legacy torrserver_url key
@@ -541,6 +554,9 @@ func (c *Config) applyEnvOverrides() {
 	}
 	if v := os.Getenv("FLODNI_API_TOKEN"); v != "" {
 		c.APIToken = v
+	}
+	if v := os.Getenv("FLODNI_AUTH_TOKENS_FILE"); v != "" {
+		c.AuthTokensFile = v
 	}
 	if v := os.Getenv("MKV_PROXY_ALLOWED_HOSTS"); v != "" {
 		c.AllowedHosts = strings.Split(v, ",")

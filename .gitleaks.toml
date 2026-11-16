@@ -1,0 +1,16 @@
+# The default rules, plus the shape of a Flodni API token (ADR 0004): "fl_" and 43
+# base64url characters. A leading boundary keeps it from firing inside a longer
+# identifier; there is no trailing one, because a token may end in "-". The entropy
+# floor skips obvious placeholders; a real token (32 random bytes) is far above it.
+# Test fixtures build their tokens at run time, so no literal reaches the scan.
+title = "flodni"
+
+[extend]
+useDefault = true
+
+[[rules]]
+id = "flodni-api-token"
+description = "A Flodni API token"
+regex = '''(?:^|[^A-Za-z0-9_-])fl_[A-Za-z0-9_-]{43}'''
+entropy = 3.5
+keywords = ["fl_"]

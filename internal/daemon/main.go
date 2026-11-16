@@ -206,6 +206,11 @@ func Run() {
 		os.Exit(trackersMain(os.Args[2:], os.Stdout, os.Stderr))
 	}
 
+	// `flodni auth new-token` makes a token and its file entry, offline.
+	if len(os.Args) > 1 && os.Args[1] == "auth" {
+		os.Exit(authMain(os.Args[2:], os.Stdout, os.Stderr))
+	}
+
 	checkHardwareSupport()
 
 	var dbPath string
@@ -285,6 +290,17 @@ func Run() {
 	globalConfig.Store(&effCfg)
 
 	gc().LogConfig(logger)
+
+	// Decide the auth mode before anything listens. Any refusal stops the start: a
+	// bad token file never degrades to open mode (ADR 0004).
+	auth, authErr := startAuth(gc(), logger)
+	if authErr != nil {
+		logger.Error("[Auth] refusing to start: " + authErr.Error())
+		fmt.Fprintln(os.Stderr, "refusing to start: "+authErr.Error())
+		os.Exit(1)
+	}
+	app.auth = auth
+	app.startup.noteAuth(auth)
 
 	// Before the engine starts serving streams (Dezoxy fork, see torrstor.BoundedReadahead).
 	torrstor.BoundedReadahead = !gc().PumpOnOpen

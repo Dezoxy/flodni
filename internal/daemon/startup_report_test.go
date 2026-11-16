@@ -104,6 +104,8 @@ func TestStartupReportAfterASimulatedStartup(t *testing.T) {
 		},
 		"invalid_stubs": float64(1),
 		"alarms":        []any{"statedb_migrated", "ghost_inodes_pruned"},
+		// No auth configured: open mode, nothing in use.
+		"auth": map[string]any{"mode": "open", "tokens": float64(0), "scopes": []any{}, "jwt": false},
 	}
 	for k, v := range want {
 		if !reflect.DeepEqual(got[k], v) {
@@ -329,5 +331,133 @@ func TestEntrypointWarningIsPinned(t *testing.T) {
 		if !strings.Contains(s, want) {
 			t.Errorf("docker-entrypoint.sh lacks %q", want)
 		}
+	}
+}
+
+// The auth section in all three modes: the line and the endpoint body are the same
+// bytes, every key of the v0.2.6 report is still there with its type, and nothing in
+// it carries a secret, a name, a hash or a path.
+func TestStartupReportAuthSectionInEveryMode(t *testing.T) {
+	good := fakeAuthToken('a')
+	file := filepath.Join(t.TempDir(), "tokens-secret-path.json")
+	body := `{"tokens":[` +
+		`{"name":"hooknamezz","scopes":["webhook"],"sha256":"` + authHash(good) + `"},` +
+		`{"name":"opsnamezz","scopes":["read","admin"],"sha256":"` + authHash(fakeAuthToken('b')) + `"}]}`
+	if err := os.WriteFile(file, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	load := func(o apiauth.LoadOptions) *apiauth.Tokens {
+		o.GoStormURL = "http://127.0.0.1:8090"
+		tok, err := apiauth.Load(o)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return tok
+	}
+	modes := []struct {
+		name string
+		tok  *apiauth.Tokens
+		want map[string]any
+	}{
+		{"open", load(apiauth.LoadOptions{}),
+			map[string]any{"mode": "open", "tokens": float64(0), "scopes": []any{}, "jwt": false}},
+		{"legacy_token", load(apiauth.LoadOptions{APIToken: "legacy-secret-value"}),
+			map[string]any{"mode": "legacy_token", "tokens": float64(1), "jwt": false,
+				"scopes": []any{"admin", "engine", "library", "metrics", "read", "scrape", "upload", "webhook"}}},
+		{"scoped", load(apiauth.LoadOptions{TokensFile: file}),
+			map[string]any{"mode": "scoped", "tokens": float64(2), "jwt": false,
+				"scopes": []any{"admin", "read", "webhook"}}},
+	}
+	// The keys the v0.2.6 report had, with their types.
+	v026 := map[string]string{"schema": "float64", "version": "string", "config_path": "string", "warmup": "map",
+		"state_db": "map", "inode_map": "map", "fuse": "map", "prunes": "map", "invalid_stubs": "float64", "alarms": "slice"}
+	for _, m := range modes {
+		t.Run(m.name, func(t *testing.T) {
+			var logs lockedBuilder
+			r := &startupReporter{logf: flog.Logf(flog.NewText(&logs))}
+			r.noteAuth(m.tok)
+			r.markMounted("/mnt/virtual")
+			r.markScanned(scanResult{})
+			rec := getStartup(t, http.HandlerFunc(r.handler))
+			if rec.Code != http.StatusOK {
+				t.Fatalf("code %d", rec.Code)
+			}
+			if line := strings.TrimSpace(logs.String()); line != "[Startup] report "+rec.Body.String() {
+				t.Fatalf("log line and body differ:\n%q\n%q", line, rec.Body.String())
+			}
+			var got map[string]any
+			if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+				t.Fatal(err)
+			}
+			if got["schema"] != float64(1) {
+				t.Errorf("schema = %v, want 1: the section is additive", got["schema"])
+			}
+			for k, typ := range v026 {
+				v, ok := got[k]
+				if !ok {
+					t.Errorf("v0.2.6 key %q is gone", k)
+					continue
+				}
+				var have string
+				switch v.(type) {
+				case float64:
+					have = "float64"
+				case string:
+					have = "string"
+				case map[string]any:
+					have = "map"
+				case []any:
+					have = "slice"
+				}
+				if have != typ {
+					t.Errorf("key %q is %s, was %s", k, have, typ)
+				}
+			}
+			if !reflect.DeepEqual(got["auth"], m.want) {
+				t.Errorf("auth = %v, want %v", got["auth"], m.want)
+			}
+			for _, secret := range []string{"hooknamezz", "opsnamezz", "legacy-secret-value", good, authHash(good), "tokens-secret-path"} {
+				if strings.Contains(rec.Body.String(), secret) || strings.Contains(logs.String(), secret) {
+					t.Errorf("the report holds %q", secret)
+				}
+			}
+		})
+	}
+}
+
+// A report built before the auth stage noted anything reads as open mode.
+func TestStartupReportAuthDefaultsToOpen(t *testing.T) {
+	rep := buildStartupReport(startupFacts{})
+	b, _ := json.Marshal(rep.Auth)
+	if string(b) != `{"mode":"open","tokens":0,"scopes":[],"jwt":false}` {
+		t.Fatalf("auth = %s", b)
+	}
+}
+
+// Until the gate lands, a scoped start says so in the report: the mode alone would read
+// as protected while the ports are open.
+func TestStartupReportAlarmsAScopedStartNotEnforced(t *testing.T) {
+	file := filepath.Join(t.TempDir(), "t.json")
+	if err := os.WriteFile(file, []byte(`{"tokens":[{"name":"a","scopes":["read"],"sha256":"`+authHash(fakeAuthToken('a'))+`"}]}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	scoped, err := apiauth.Load(apiauth.LoadOptions{TokensFile: file, GoStormURL: "http://127.0.0.1:8090"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	legacy, _ := apiauth.Load(apiauth.LoadOptions{APIToken: "x"})
+	has := func(t *apiauth.Tokens) bool {
+		for _, a := range buildStartupReport(startupFacts{auth: t}).Alarms {
+			if a == "auth_not_enforced" {
+				return true
+			}
+		}
+		return false
+	}
+	if !has(scoped) {
+		t.Error("scoped mode must raise auth_not_enforced")
+	}
+	if has(legacy) || has(nil) {
+		t.Error("open and legacy_token must not raise it")
 	}
 }

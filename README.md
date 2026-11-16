@@ -89,6 +89,58 @@ never affected. The pages stay valid because a file's inode number comes
 from its torrent file (hash and index), so a replacement release has another
 inode and its own cache.
 
+### Scoped tokens (`auth_tokens_file`)
+
+One shared `api_token` opens every route. A tokens file gives each caller its
+own token with only the scopes it needs, so a leaked webhook URL cannot write
+the configuration. The file holds names, scopes and SHA-256 hashes, never a
+token; it is read once at start and Flodni never writes it.
+
+Make a token and its entry, offline (no daemon, no file written):
+
+```sh
+flodni auth new-token --name webhook --scopes webhook
+```
+
+Line 1 of stdout is the token, shown once: give it to the caller. Line 2 is the
+entry; add it to the `tokens` array of the file:
+
+```json
+{"tokens": [{"name": "webhook", "scopes": ["webhook"], "sha256": "<64 hex characters>"}]}
+```
+
+Then set `auth_tokens_file` in `config.json` (or `FLODNI_AUTH_TOKENS_FILE`, which
+wins) to the file's path and restart. A token is `fl_` plus 43 characters. A
+name matches `[a-z0-9][a-z0-9_-]{0,31}` (`internal` is reserved). Scopes are
+`admin`, `engine`, `library`, `metrics`, `read`, `scrape`, `upload` and
+`webhook`; `admin` implies all the others. To rotate, add the new entry, move the
+caller to the new token, remove the old entry and restart. Keep one `admin`
+token offline as a break-glass credential.
+
+Flodni refuses to start, and never falls back to an open port, when: the file
+cannot be read or parsed, has an unknown field or trailing data, is over 64 KiB,
+or repeats a JSON key, or is not a regular file, or holds no token, more than
+64, an unknown scope, an entry without scopes, a repeated name or hash, a hash
+that is not 64 lower-case hex characters or is the hash of the empty string, or
+a bad or reserved name; when `api_token` is also set (remove it: there is no
+alias); when `auth_jwt` is set without a tokens file; and when `gostorm_url` is
+not a loopback address. A `config.json` that cannot be read or parsed also stops
+the start in every mode, because the pointer to the tokens file lives there. A
+file writable by group or others only logs a warning. `GET /api/startup` and the
+`[Startup] report` line gain an `auth` section (`mode` of `open`, `legacy_token`
+or `scoped`, the token count, the scopes in use, and `jwt`) with no name, hash
+or path. With only `api_token` set, behaviour is as before.
+
+`auth_tokens_file` is startup-only: `POST /api/config` answers 403 (and writes
+nothing) to a different path in every mode, and a save always writes back the
+path `config.json` holds, never the environment's.
+
+**Status:** this release loads, validates and reports the file. The gate that
+enforces the scopes on both ports is a following step of the same release, so
+until it lands a start with `auth_tokens_file` logs a warning and raises the
+`auth_not_enforced` alarm in the startup report. Do not remove `api_token` on a
+build that raises it.
+
 The command-line paths (the entrypoint's `FLODNI_SOURCE_PATH` and
 `FLODNI_MOUNT_PATH`) win over `physical_source_path` and `fuse_mount_path` in
 `config.json`; a different value there is logged and overridden.
@@ -365,21 +417,24 @@ raises it.
 | `prunes` | `readability`, `file_state`, `inodes`, each `status` (`ran`, `skipped` or `failed`), a `reason` when not `ran`, and `rows_pruned`. A guarded skip carries the walk's `complete`, `errors` and `stubs`. |
 | `invalid_stubs` | Stubs that parse but declare a size out of range. |
 | `alarms` | Ids of the alarm conditions that fired, `[]` when none. |
+| `auth` | `mode` (`open`, `legacy_token` or `scoped`), `tokens` (count), `scopes` (the sorted union in use) and `jwt`; no name, hash or path. |
 
 Alarm ids: `config_parse_failed`, `config_paths_differ`, `settings_migrated`,
 `settings_corrupt`, `torrents_migrated` (a legacy `torrserver.db` was carried
 over), `head_density_check` (the one-shot head check ran; see Cache disk),
 `corrupt_cache`, `statedb_migrated`, `statedb_open_failed`,
 `statedb_migration_failed`, `prune_skipped`, `ghost_inodes_pruned` and
-`state_not_on_mounted_volume` (the container entrypoint's warning). The report
+`state_not_on_mounted_volume` (the container entrypoint's warning) and
+`auth_not_enforced` (a tokens file is loaded but this build does not enforce it yet). The report
 is taken once, so a `corrupt_cache` removal after it is not in it.
 
 ## Proxy-signed identity (IdP mode)
 
 `internal/apiauth/jwt` verifies an identity assertion that an identity-aware
 proxy puts in a request header (ADR 0004). It is the library half only: the
-control gate does not call it yet, so setting `auth_jwt` changes nothing at
-runtime until the scoped-token gate lands. The block, when you add it to
+control gate does not call it yet, so setting `auth_jwt` verifies nothing until
+the scoped-token gate lands; it already needs `auth_tokens_file` (without one
+the daemon refuses to start). The block, when you add it to
 `config.json`:
 
 ```json

@@ -7,6 +7,7 @@ import (
 	"sync"
 	"sync/atomic"
 
+	"flodni/internal/apiauth"
 	"flodni/internal/config"
 	"flodni/internal/gostorm/settings"
 	"flodni/internal/warmup"
@@ -68,6 +69,7 @@ type startupFacts struct {
 	mounted           bool
 	scanned           bool
 	scan              scanResult
+	auth              *apiauth.Tokens // nil reads as open mode
 }
 
 // The report as served and logged.
@@ -106,6 +108,9 @@ type startupReport struct {
 	} `json:"prunes"`
 	InvalidStubs int      `json:"invalid_stubs"`
 	Alarms       []string `json:"alarms"`
+	// Auth is additive (schema stays 1): the mode, the token count and the scopes in
+	// use. It never holds a name, a hash, a path or a key.
+	Auth apiauth.Report `json:"auth"`
 }
 
 // startupReporter collects the startup stages and emits the report once, when the mount
@@ -193,6 +198,7 @@ func buildStartupReport(f startupFacts) startupReport {
 	rep.Prunes.FileState = f.scan.fileState
 	rep.Prunes.Inodes = f.scan.inodes
 	rep.InvalidStubs = f.scan.invalidStubs
+	rep.Auth = f.auth.Report()
 
 	rep.Alarms = []string{}
 	for _, a := range []struct {
@@ -212,6 +218,9 @@ func buildStartupReport(f startupFacts) startupReport {
 		{"prune_skipped", f.scan.readability.guarded || f.scan.fileState.guarded || f.scan.inodes.guarded},
 		{"ghost_inodes_pruned", f.scan.inodes.RowsPruned > 0},
 		{"state_not_on_mounted_volume", os.Getenv(stateUnmountedEnv) == "1"},
+		// Scoped mode is loaded and reported, but nothing enforces it until ADR 0004
+		// step 3; that step removes this alarm.
+		{"auth_not_enforced", f.auth.Mode() == apiauth.ModeScoped},
 	} {
 		if a.on {
 			rep.Alarms = append(rep.Alarms, a.id)
@@ -234,6 +243,11 @@ func (r *startupReporter) handler(w http.ResponseWriter, req *http.Request) {
 	}
 	w.Header().Set("Content-Type", "application/json")
 	_, _ = w.Write(*body)
+}
+
+// noteAuth records the auth mode the start-up settled on.
+func (r *startupReporter) noteAuth(t *apiauth.Tokens) {
+	r.note(func(f *startupFacts) { f.auth = t })
 }
 
 // noteConfigLoad records what the config load and the path override found.

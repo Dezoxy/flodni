@@ -73,6 +73,16 @@ func handleConfig(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		newCfg.AuthJWT = onDisk.AuthJWT
+		// auth_tokens_file is read at start and never changed through the API, in every
+		// mode. A post that names another path is refused; an absent or equal one (the
+		// file's, or the running one the panel echoes, which may come from the
+		// environment) saves as before. Either way the file's own value is written back,
+		// never a posted one and never the environment's.
+		if p := newCfg.AuthTokensFile; p != "" && p != onDisk.FileAuthTokensFile() && p != gc().AuthTokensFile {
+			refuseOpenPort(w, r, http.StatusForbidden, "auth_tokens_file is startup-only; edit config.json, then restart flodni")
+			return
+		}
+		newCfg.AuthTokensFile = onDisk.FileAuthTokensFile()
 		if app.controlToken == "" {
 			// allowed_hosts is the same kind of setting, and gostorm_url feeds the engine's
 			// list, so the derived list is gated, not each field: a client could clear or
