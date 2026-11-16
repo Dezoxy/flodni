@@ -234,7 +234,14 @@ func Run() {
 
 	source, mount := flag.Arg(0), flag.Arg(1)
 
-	cfg := config.LoadConfig()
+	cfg, loadErr := config.LoadConfig()
+	if loadErr != nil {
+		// A config.json that exists but cannot be read or parsed refuses the start in
+		// every mode: the file may name the auth settings, so the daemon cannot go on
+		// open with defaults (ADR 0004).
+		fmt.Fprintf(os.Stderr, "flodni: refusing to start: %v\n", loadErr)
+		os.Exit(1)
+	}
 
 	if dbPath != "" {
 		// If dbPath is a directory, use it as RootPath; if a file, use its parent.
@@ -486,11 +493,12 @@ func Run() {
 
 	globalTorrentRemover = NewTorrentRemover(logger)
 
-	// Own mux: nothing else in the process (expvar, pprof) can add routes to the control port.
-	mux := http.NewServeMux()
-	mux.HandleFunc("/plex/webhook", handlePlexWebhook)
+	// Own mux (see controlRoutes): every pattern goes through routes.handle so the
+	// route-to-scope test can list them.
+	routes := newControlRoutes()
+	routes.handle("/plex/webhook", handlePlexWebhook)
 
-	mux.HandleFunc("/metrics", func(w http.ResponseWriter, r *http.Request) {
+	routes.handle("/metrics", func(w http.ResponseWriter, r *http.Request) {
 		cacheStats := metaCache.Stats()
 		cleanupStats := globalCleanupManager.Stats()
 		lockStats := globalLockManager.Stats()
@@ -555,9 +563,9 @@ func Run() {
 			g2Stats.Peers, g2Stats.BackingOff, g2Stats.LimitMin, g2Stats.LimitMax)
 	})
 
-	mux.HandleFunc("/webhook", handlePlexWebhook)
+	routes.handle("/webhook", handlePlexWebhook)
 
-	mux.HandleFunc("/metrics/profiling", func(w http.ResponseWriter, r *http.Request) {
+	routes.handle("/metrics/profiling", func(w http.ResponseWriter, r *http.Request) {
 		totalReads, cacheHits, httpFetches, streamingReads, avgHTTPLatency, avgCacheLatency, cacheHitRate := globalProfilingStats.Stats()
 
 		_, _ = fmt.Fprintf(w, `{"version":"%s", "total_reads":%d, "cache_hits":%d, "cache_hit_rate_pct":%.2f, "http_fetches":%d, "streaming_reads":%d, "non_streaming_reads":%d, "avg_http_latency_ms":%.2f, "avg_cache_latency_ms":%.2f, "max_conns_per_host":%d}`,
@@ -573,9 +581,9 @@ func Run() {
 			gc().MaxConnsPerHost)
 	})
 
-	mux.HandleFunc("/metrics/prometheus", handlePrometheus)
+	routes.handle("/metrics/prometheus", handlePrometheus)
 
-	mux.HandleFunc("/metrics/ttff", func(w http.ResponseWriter, r *http.Request) {
+	routes.handle("/metrics/ttff", func(w http.ResponseWriter, r *http.Request) {
 		_, _ = fmt.Fprintf(w, `{"sessions_completed":%d,"sessions_filtered":%d,`+
 			`"open_to_header_ms":%s,"open_to_deep_read_ms":%s,"seek_latency_ms":%s,`+
 			`"read_latency_ms":{"warmup_head":%s,"warmup_tail":%s,"racache_hit":%s,"fetch_block":%s},`+
@@ -587,32 +595,33 @@ func Run() {
 			ttffStats.stallCount.Load(), ttffStats.maxStallMS.Load())
 	})
 
-	mux.HandleFunc("/api/sessions", handleSessions)
+	routes.handle("/api/sessions", handleSessions)
 	// Assigned only when the database is open: a nil *metadb.DB in the interface
 	// would not compare equal to nil and the handler would never answer 503.
 	var healthStore readabilityLister
 	if stateDB != nil {
 		healthStore = stateDB
 	}
-	mux.HandleFunc("/api/torrents/health", newTorrentsHealthHandler(healthStore, fileStates.WarmSnapshot, logger))
-	mux.HandleFunc("/api/torrents/scrape", handleScrapeTrigger)
-	mux.HandleFunc("/api/torrents/scrape/status", handleScrapeStatus)
-	mux.HandleFunc("/api/health", newHealthChecks().handler)
-	mux.HandleFunc("/api/startup", app.startup.handler)
-	mux.HandleFunc("/api/warmup/evict", newWarmupEvictHandler(evictWarmupTo))
+	routes.handle("/api/torrents/health", newTorrentsHealthHandler(healthStore, fileStates.WarmSnapshot, logger))
+	routes.handle("/api/torrents/scrape", handleScrapeTrigger)
+	routes.handle("/api/torrents/scrape/status", handleScrapeStatus)
+	routes.handle("/api/health", newHealthChecks().handler)
+	routes.handle("/api/live", handleLive)
+	routes.handle("/api/startup", app.startup.handler)
+	routes.handle("/api/warmup/evict", newWarmupEvictHandler(evictWarmupTo))
 
-	mux.HandleFunc("/control", func(w http.ResponseWriter, r *http.Request) {
+	routes.handle("/control", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/html")
 		_, _ = w.Write(settingsHTML)
 	})
 
-	mux.HandleFunc("/api/config", handleConfig)
+	routes.handle("/api/config", handleConfig)
 
 	// Same-origin proxy to the GoStorm settings API. The Control Panel must not
 	// build an absolute URL of its own: behind a reverse proxy the GoStorm port is
 	// not exposed, and an http:// call from an https:// page is blocked as mixed
 	// content, which left the whole GoStorm section empty and unsaveable.
-	mux.HandleFunc("/api/gostorm/settings", func(w http.ResponseWriter, r *http.Request) {
+	routes.handle("/api/gostorm/settings", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != "POST" {
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 			return
@@ -648,7 +657,7 @@ func Run() {
 		_, _ = io.Copy(w, resp.Body)
 	})
 
-	mux.HandleFunc("/api/restart", handleRestart)
+	routes.handle("/api/restart", handleRestart)
 
 	// Library API (external clients)
 	// Adds one title without any discovery: register the
@@ -734,13 +743,13 @@ func Run() {
 		// Next episode (idle unless warm_next_episode is on): see warm_next.go.
 		startWarmNext(libMgr)
 		libHandler := library.NewHandler(libMgr)
-		mux.HandleFunc("/api/library/add", libHandler.Add)
-		mux.HandleFunc("/api/library/remove", libHandler.Remove)
-		mux.HandleFunc("/api/library/list", libHandler.List)
-		mux.HandleFunc("/api/library/inspect", libHandler.Inspect)
-		mux.HandleFunc("/api/library/audit", libHandler.Audit)
-		mux.HandleFunc("/api/library/file", libHandler.File)
-		mux.HandleFunc("/api/library/confirm", libHandler.Confirm)
+		routes.handle("/api/library/add", libHandler.Add)
+		routes.handle("/api/library/remove", libHandler.Remove)
+		routes.handle("/api/library/list", libHandler.List)
+		routes.handle("/api/library/inspect", libHandler.Inspect)
+		routes.handle("/api/library/audit", libHandler.Audit)
+		routes.handle("/api/library/file", libHandler.File)
+		routes.handle("/api/library/confirm", libHandler.Confirm)
 	}
 
 	// Control server: metrics, dashboard API and the library API.
@@ -760,7 +769,7 @@ func Run() {
 	}
 	controlSrv := &http.Server{
 		Addr:              fmt.Sprintf(":%d", gc().MetricsPort),
-		Handler:           apiauth.Middleware(app.controlToken, logger, mux, apiauth.WithAllowedHosts(gc().EffectiveAllowedHosts())),
+		Handler:           apiauth.Middleware(app.controlToken, logger, routes.mux, apiauth.WithAllowedHosts(gc().EffectiveAllowedHosts())),
 		ReadHeaderTimeout: 10 * time.Second,
 		ReadTimeout:       60 * time.Second,
 		WriteTimeout:      600 * time.Second,

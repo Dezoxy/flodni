@@ -6,7 +6,7 @@ import "testing"
 // default; 0 hours turns the schedule off; a value out of range is replaced by
 // the default with a warning.
 func TestTrackerScrapeSettings(t *testing.T) {
-	c := LoadConfig()
+	c := loadCfg()
 	if c.TrackerScrapeHours != 24 || c.TrackerScrapeBatch != 100 || c.TrackerScrapePaceMs != 1000 {
 		t.Fatalf("defaults = %d %d %d", c.TrackerScrapeHours, c.TrackerScrapeBatch, c.TrackerScrapePaceMs)
 	}

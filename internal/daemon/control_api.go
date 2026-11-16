@@ -52,15 +52,15 @@ func handleConfig(w http.ResponseWriter, r *http.Request) {
 				"plex.token cannot be set or changed through the API while no token is enforced"+setPlexTokenHint)
 			return
 		}
-		onDisk := config.LoadConfig()
+		// A file that exists but cannot be read or parsed would be replaced by defaults,
+		// dropping a token the owner is typing into it. Refused in every mode.
+		onDisk, loadErr := config.LoadConfig()
+		if loadErr != nil {
+			refuseOpenPort(w, r, http.StatusConflict,
+				"config.json cannot be read or parsed; fix it before saving through the API")
+			return
+		}
 		if app.controlToken == "" {
-			// A file that does not parse would be replaced by defaults, dropping a token
-			// the owner is typing into it.
-			if config.ParseFailed.Load() {
-				refuseOpenPort(w, r, http.StatusConflict,
-					"config.json does not parse; fix it before saving through the API")
-				return
-			}
 			// allowed_hosts is the same kind of setting, and gostorm_url feeds the engine's
 			// list, so the derived list is gated, not each field: a client could clear or
 			// widen what the next start enforces. A post that leaves it as it is saves as before.
@@ -115,7 +115,11 @@ func handleConfig(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		// Reload in memory (V1.4.0 Live Update)
-		cfg := config.LoadConfig()
+		cfg, err := config.LoadConfig()
+		if err != nil {
+			http.Error(w, "saved, but the file no longer loads: "+err.Error(), http.StatusInternalServerError)
+			return
+		}
 		// A save must not reintroduce a path other than the mounted one.
 		_ = applyEffectivePaths(&cfg, physicalSourcePath, virtualMountPath)
 		// RootPath comes from -path at startup, not from the file; without it

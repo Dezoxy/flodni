@@ -12,7 +12,7 @@ import (
 // save (decode what it got, encode it back).
 
 func TestOptInSwitchesDefaultToOff(t *testing.T) {
-	c := LoadConfig()
+	c := loadCfg()
 	if c.UnconfirmedReadaheadClamp || c.AttributeFillsToReader || c.RedialDroppedPeer {
 		t.Fatalf("an opt-in switch is on by default: clamp=%v attribute=%v redial=%v",
 			c.UnconfirmedReadaheadClamp, c.AttributeFillsToReader, c.RedialDroppedPeer)

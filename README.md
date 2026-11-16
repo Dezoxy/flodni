@@ -123,8 +123,9 @@ otherwise take the service over: `POST /api/config` when the body carries a non-
 `api_token` (whatever its value; a body without it, or with it empty, saves as
 before and keeps the token `config.json` holds now, one added by hand since the
 start included; nothing is written on a refusal), `POST /api/config` while
-`config.json` does not parse (409, so a file being edited is not replaced by
-defaults), and `POST /api/restart` altogether. Each refusal is logged with
+`config.json` cannot be read or parsed (409, so a file being edited is not replaced
+by defaults; with a token set this answers 409 too), and `POST /api/restart`
+altogether. Each refusal is logged with
 method, path and address. Set the token through `FLODNI_API_TOKEN` or by editing
 `config.json` and restart the service yourself; from then on an authenticated
 caller can change the token and restart through the API. The Control Panel's
@@ -207,7 +208,7 @@ and a missing header pass, so the panel's own fetches pass, behind a TLS tunnel
 too. A browser sends the header only over https or to `localhost`, so a page
 fetching a plain-http LAN address sends none and only the `Origin` check and the
 allowlist apply: it is a second signal, not a replacement. The routes that hold
-no data and are open anyway (`/control`, `/api/health`, the engine's `/echo`)
+no data and are open anyway (`/control`, `/api/health`, `/api/live`, the engine's `/echo`)
 are exempt, so a link from another site still opens the panel; a cross-site
 navigation to any other route is refused without a token.
 
@@ -218,7 +219,24 @@ state database, each as `{"ok": ..., "reason": "..."}`, with an overall
 is set and returns status words only. The image's health check runs
 `flodni healthcheck`, which requests it on `127.0.0.1:<metrics_port>` and
 exits 0 on HTTP 200 and 1 otherwise; run it with
-`docker exec <container> flodni healthcheck`.
+`docker exec <container> flodni healthcheck`. If `config.json` cannot be read or
+parsed at that moment (an edit in progress), it asks the default port, 9080,
+rather than report the daemon unhealthy.
+
+`GET /api/live` on the control port answers `200` and `ok` and checks nothing, so
+a container or load balancer that only needs to know the process serves can poll
+it cheaply. Unlike `/api/health` it runs no mount, engine or database check and
+returns no `warnings`. It is open even when a token is set, and `GET` and `HEAD`
+only.
+
+**An unreadable `config.json` refuses to start.** A `config.json` that exists but
+cannot be read, or does not parse (comments are stripped first; a value of the
+wrong type counts), stops flodni at start with a line on stderr naming the file
+and the cause, in every mode, token or not. Starting on defaults would open both
+servers whatever the file said about auth. A missing file is still valid: defaults.
+Fix the file (or remove it on purpose) and start again. Before upgrading from
+v0.2.6, check `GET /api/startup` for the `config_parse_failed` alarm and clear it:
+v0.2.6 started on the defaults and raised the alarm, and this version refuses.
 
 The body also carries `warnings`, an array that is always present and is `[]`
 when nothing is wrong. Its one value today is `no_play_webhook`, an advisory:

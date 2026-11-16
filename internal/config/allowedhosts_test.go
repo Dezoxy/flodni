@@ -15,7 +15,7 @@ import (
 
 func TestAllowedHostsDefaultsToOff(t *testing.T) {
 	t.Setenv("MKV_PROXY_ALLOWED_HOSTS", "")
-	if got := LoadConfig().AllowedHosts; len(got) != 0 {
+	if got := loadCfg().AllowedHosts; len(got) != 0 {
 		t.Fatalf("allowed_hosts = %v, want empty", got)
 	}
 }

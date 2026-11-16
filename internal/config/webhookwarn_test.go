@@ -11,7 +11,7 @@ import (
 // default, 0 turns the warning off, a negative or absurd value falls back to 7.
 
 func TestPlaybackWebhookWarnDaysDefaultsToSeven(t *testing.T) {
-	if got := LoadConfig().PlaybackWebhookWarnDays; got != 7 {
+	if got := loadCfg().PlaybackWebhookWarnDays; got != 7 {
 		t.Fatalf("playback_webhook_warn_days = %d, want 7", got)
 	}
 }

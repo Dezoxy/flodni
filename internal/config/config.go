@@ -2,8 +2,10 @@ package config
 
 import (
 	"encoding/json"
+	"errors"
 	"flodni/internal/flog"
 	"fmt"
+	"io/fs"
 	"log/slog"
 	"net"
 	"net/netip"
@@ -332,8 +334,16 @@ func (c *Config) ResolveAPIToken(posted string) string {
 	return posted
 }
 
-// LoadConfig loads configuration from environment variables with defaults
-func LoadConfig() Config {
+// LoadConfig loads configuration from environment variables with defaults.
+//
+// A config file that does not exist is valid: defaults. One that exists but
+// cannot be read, or does not parse after stripJSONComments (a type error
+// counts), returns an error naming the path and the cause (never file
+// content). The Config returned beside it is still usable, with the keys that
+// did decode, so a caller that must go on (a save, the healthcheck) can; only
+// the daemon's start refuses, because a start that cannot read its
+// configuration cannot know whether the file names auth settings.
+func LoadConfig() (Config, error) {
 	// 1. Initial Defaults (V138 Gold Standard)
 	cfg := Config{
 		MasterConcurrencyLimit: 25,
@@ -406,7 +416,12 @@ func LoadConfig() Config {
 	}
 
 	// 3. Try to load JSON
-	if data, err := os.ReadFile(cfg.ConfigPath); err == nil {
+	var loadErr error
+	data, readErr := os.ReadFile(cfg.ConfigPath)
+	if readErr != nil && !errors.Is(readErr, fs.ErrNotExist) {
+		loadErr = fmt.Errorf("config file %s exists but cannot be read: %w", cfg.ConfigPath, readErr)
+	}
+	if readErr == nil {
 		// V138: Support comments in JSON by stripping them before unmarshaling
 		cleanData := stripJSONComments(data)
 		if err := json.Unmarshal(cleanData, &cfg); err != nil {
@@ -421,6 +436,7 @@ func LoadConfig() Config {
 			}
 			ParseFailed.Store(true)
 			flog.Printf(flog.Std, parseFailedFmt, cfg.ConfigPath, err)
+			loadErr = fmt.Errorf("config file %s does not parse: %w", cfg.ConfigPath, err)
 		} else {
 			ParseFailed.Store(false)
 			flog.Std.Info(fmt.Sprintf("[Config] Loaded settings from %s", cfg.ConfigPath), "config_path", cfg.ConfigPath)
@@ -449,7 +465,7 @@ func LoadConfig() Config {
 	// 5. Finalize and map derived fields
 	cfg.finalize()
 
-	return cfg
+	return cfg, loadErr
 }
 
 // stripJSONComments removes // comments from JSON data and preserves valid syntax.

@@ -19,11 +19,11 @@ func loadWith(t *testing.T, body string) Config {
 		t.Fatal(err)
 	}
 	t.Setenv("MKV_PROXY_CONFIG_PATH", p)
-	return LoadConfig()
+	return loadCfg()
 }
 
 func TestWarmCatchupPerHourDefaultsToTwenty(t *testing.T) {
-	if got := LoadConfig().WarmCatchupPerHour; got != 20 {
+	if got := loadCfg().WarmCatchupPerHour; got != 20 {
 		t.Fatalf("warm_catchup_per_hour = %d, want 20", got)
 	}
 }
@@ -77,7 +77,7 @@ func TestConfigExampleCarriesTheCatchupPace(t *testing.T) {
 // unknown value falls back to "all".
 
 func TestWarmCatchupScopeDefaultsToAll(t *testing.T) {
-	if got := LoadConfig().WarmCatchupScope; got != "all" {
+	if got := loadCfg().WarmCatchupScope; got != "all" {
 		t.Fatalf("warm_catchup_scope = %q, want all", got)
 	}
 	if got := loadWith(t, `{"warm_on_add": true}`).WarmCatchupScope; got != "all" {
@@ -136,7 +136,7 @@ func TestConfigExampleCarriesTheCatchupScope(t *testing.T) {
 // unknown value falls back to "written".
 
 func TestWarmupEvictionOrderDefaultsToWritten(t *testing.T) {
-	if got := LoadConfig().WarmupEvictionOrder; got != "written" {
+	if got := loadCfg().WarmupEvictionOrder; got != "written" {
 		t.Fatalf("warmup_eviction_order = %q, want written", got)
 	}
 	if got := loadWith(t, `{"disk_warmup_quota_gb": 5}`).WarmupEvictionOrder; got != "written" {
@@ -158,7 +158,7 @@ func TestWarmupEvictionOrderAcceptsReadAndRefusesTheRest(t *testing.T) {
 // warm_next_episode (roadmap step 23) and its same-torrent switch are off by default.
 
 func TestWarmNextEpisodeIsOffByDefault(t *testing.T) {
-	c := LoadConfig()
+	c := loadCfg()
 	if c.WarmNextEpisode || c.WarmNextEpisodeSameTorrent {
 		t.Fatalf("warm_next_episode = %v, same_torrent = %v, want both false", c.WarmNextEpisode, c.WarmNextEpisodeSameTorrent)
 	}
