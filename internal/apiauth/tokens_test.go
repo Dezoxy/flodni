@@ -400,17 +400,27 @@ func TestGenerateTokenRoundTrip(t *testing.T) {
 
 func TestLoadRefusesDuplicateKeys(t *testing.T) {
 	h := hashHex(fakeToken('a'))
-	cases := map[string]string{
-		"scopes twice":  `{"tokens":[{"name":"a","scopes":["webhook"],"scopes":["admin"],"sha256":"` + h + `"}]}`,
-		"scopes folded": `{"tokens":[{"name":"a","scopes":["webhook"],"Scopes":["admin"],"sha256":"` + h + `"}]}`,
-		"name twice":    `{"tokens":[{"name":"a","name":"b","scopes":["read"],"sha256":"` + h + `"}]}`,
-		"tokens twice":  `{"tokens":[` + entryJSON("a", `"read"`, h) + `],"tokens":[` + entryJSON("b", `"admin"`, hashHex(fakeToken('b'))) + `]}`,
-		"sha256 twice":  `{"tokens":[{"name":"a","scopes":["read"],"sha256":"` + h + `","sha256":"` + h + `"}]}`,
+	cases := map[string]struct{ body, want string }{
+		"scopes twice": {`{"tokens":[{"name":"a","scopes":["webhook"],"scopes":["admin"],"sha256":"` + h + `"}]}`, "duplicate"},
+		"name twice":   {`{"tokens":[{"name":"a","name":"b","scopes":["read"],"sha256":"` + h + `"}]}`, "duplicate"},
+		"tokens twice": {`{"tokens":[` + entryJSON("a", `"read"`, h) + `],"tokens":[` + entryJSON("b", `"admin"`, hashHex(fakeToken('b'))) + `]}`, "duplicate"},
+		"sha256 twice": {`{"tokens":[{"name":"a","scopes":["read"],"sha256":"` + h + `","sha256":"` + h + `"}]}`, "duplicate"},
+		// encoding/json matches keys without regard to case and folds U+017F (long s)
+		// and U+212A (Kelvin sign) onto s and k, so a lower-cased comparison alone
+		// would let these load as admin. Only the four exact keys are accepted.
+		"scopes upper case":   {`{"tokens":[{"name":"a","scopes":["webhook"],"Scopes":["admin"],"sha256":"` + h + `"}]}`, "not one of"},
+		"long s":              {`{"tokens":[{"name":"a","scopes":["webhook"],"\u017fcopes":["admin"],"sha256":"` + h + `"}]}`, "not one of"},
+		"long s raw":          {`{"tokens":[{"name":"a","scopes":["webhook"],"ſcopes":["admin"],"sha256":"` + h + `"}]}`, "not one of"},
+		"kelvin sign":         {`{"to\u212aens":[` + entryJSON("a", `"admin"`, h) + `]}`, "not one of"},
+		"only a long s key":   {`{"tokens":[{"name":"a","ſcopes":["admin"],"sha256":"` + h + `"}]}`, "not one of"},
+		"sha256 long s":       {`{"tokens":[{"name":"a","scopes":["read"],"sha256":"` + h + `","\u017fha256":"` + h + `"}]}`, "not one of"},
+		"upper case tokens":   {`{"Tokens":[` + entryJSON("a", `"read"`, h) + `]}`, "not one of"},
+		"escaped exact twice": {`{"tokens":[{"name":"a","scopes":["webhook"],"\u0073copes":["admin"],"sha256":"` + h + `"}]}`, "duplicate"},
 	}
-	for name, body := range cases {
+	for name, tc := range cases {
 		t.Run(name, func(t *testing.T) {
-			if _, err := loadFile(t, body); err == nil || !strings.Contains(err.Error(), "duplicate") {
-				t.Fatalf("err = %v, want a duplicate-key refusal", err)
+			if _, err := loadFile(t, tc.body); err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("err = %v, want a refusal containing %q", err, tc.want)
 			}
 		})
 	}

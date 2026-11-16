@@ -3,10 +3,12 @@ package server
 import (
 	"log/slog"
 	"net"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strconv"
 
+	"flodni/internal/apiauth"
 	"flodni/internal/gostorm/log"
 	"flodni/internal/gostorm/settings"
 	"flodni/internal/gostorm/web"
@@ -19,6 +21,19 @@ func SetAPIToken(token string, logger *slog.Logger) {
 	web.APIToken = token
 	web.Logger = logger
 }
+
+// SetAuth hands the engine the credential store the daemon decided at start. Set, it
+// supersedes SetAPIToken: both listeners enforce its scopes, and observe is told of
+// every refusal. Call it before Start.
+func SetAuth(tokens *apiauth.Tokens, observe apiauth.Observer) {
+	web.Auth = tokens
+	web.AuthObserver = observe
+}
+
+// InProcess is the transport for Flodni's own calls to its engine in scoped mode:
+// the request goes straight to the engine's router in this process, with no
+// credential, no socket and no URL (see web.InProcess).
+func InProcess() http.RoundTripper { return web.InProcess() }
 
 // SetAllowedHosts turns on the Host allowlist (see apiauth.WithAllowedHosts) on
 // the same server. Call it before Start; empty leaves it off.

@@ -218,9 +218,6 @@ func buildStartupReport(f startupFacts) startupReport {
 		{"prune_skipped", f.scan.readability.guarded || f.scan.fileState.guarded || f.scan.inodes.guarded},
 		{"ghost_inodes_pruned", f.scan.inodes.RowsPruned > 0},
 		{"state_not_on_mounted_volume", os.Getenv(stateUnmountedEnv) == "1"},
-		// Scoped mode is loaded and reported, but nothing enforces it until ADR 0004
-		// step 3; that step removes this alarm.
-		{"auth_not_enforced", f.auth.Mode() == apiauth.ModeScoped},
 	} {
 		if a.on {
 			rep.Alarms = append(rep.Alarms, a.id)

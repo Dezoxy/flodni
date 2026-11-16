@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"encoding/json"
+	"flodni/internal/apiauth"
 	"flodni/internal/atomicfile"
 	"flodni/internal/config"
 	"fmt"
@@ -39,7 +40,7 @@ func handleConfig(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, err.Error(), 400)
 			return
 		}
-		if app.controlToken == "" && newCfg.APIToken != "" {
+		if !app.authOn() && newCfg.APIToken != "" {
 			refuseOpenPort(w, r, http.StatusForbidden,
 				"api_token cannot be set or changed through the API while no token is enforced"+setTokenHint)
 			return
@@ -47,7 +48,7 @@ func handleConfig(w http.ResponseWriter, r *http.Request) {
 		// Same for the Plex token: it is a credential for another system, so with no
 		// token enforced a client could not be trusted to replace it, or to point the
 		// URL it is sent to somewhere else.
-		if app.controlToken == "" && newCfg.Plex.Token != "" {
+		if !app.authOn() && newCfg.Plex.Token != "" {
 			refuseOpenPort(w, r, http.StatusForbidden,
 				"plex.token cannot be set or changed through the API while no token is enforced"+setPlexTokenHint)
 			return
@@ -63,27 +64,36 @@ func handleConfig(w http.ResponseWriter, r *http.Request) {
 				"config.json cannot be read or parsed; fix it before saving through the API")
 			return
 		}
-		// auth_jwt names who counts as an admin at the next start: startup-only in every
-		// mode. A post that carries a block is refused unless it equals the file's or the
-		// running one (the panel echoes the running block, which a hand edit not yet
-		// picked up makes differ from the file's). Either way the file's block is kept
-		// as it is, so a post without one must not drop it and a hand edit survives.
-		if newCfg.AuthJWT != nil && !newCfg.AuthJWT.Same(onDisk.AuthJWT) && !newCfg.AuthJWT.Same(gc().AuthJWT) {
-			refuseOpenPort(w, r, http.StatusForbidden, "auth_jwt is startup-only; edit config.json")
-			return
+		// Scoped mode holds the auth settings at the copy read at start (refuseScopedSave).
+		// The other modes keep the file's own values, as before.
+		scoped := app.auth.Mode() == apiauth.ModeScoped
+		if scoped {
+			if refuseScopedSave(w, r, &newCfg) {
+				return
+			}
+		} else {
+			// auth_jwt names who counts as an admin at the next start: startup-only in every
+			// mode. A post that carries a block is refused unless it equals the file's or the
+			// running one (the panel echoes the running block, which a hand edit not yet
+			// picked up makes differ from the file's). Either way the file's block is kept
+			// as it is, so a post without one must not drop it and a hand edit survives.
+			if newCfg.AuthJWT != nil && !newCfg.AuthJWT.Same(onDisk.AuthJWT) && !newCfg.AuthJWT.Same(gc().AuthJWT) {
+				refuseOpenPort(w, r, http.StatusForbidden, "auth_jwt is startup-only; edit config.json")
+				return
+			}
+			newCfg.AuthJWT = onDisk.AuthJWT
+			// auth_tokens_file is read at start and never changed through the API, in every
+			// mode. A post that names another path is refused; an absent or equal one (the
+			// file's, or the running one the panel echoes, which may come from the
+			// environment) saves as before. Either way the file's own value is written back,
+			// never a posted one and never the environment's.
+			if p := newCfg.AuthTokensFile; p != "" && p != onDisk.FileAuthTokensFile() && p != gc().AuthTokensFile {
+				refuseOpenPort(w, r, http.StatusForbidden, "auth_tokens_file is startup-only; edit config.json, then restart flodni")
+				return
+			}
+			newCfg.AuthTokensFile = onDisk.FileAuthTokensFile()
 		}
-		newCfg.AuthJWT = onDisk.AuthJWT
-		// auth_tokens_file is read at start and never changed through the API, in every
-		// mode. A post that names another path is refused; an absent or equal one (the
-		// file's, or the running one the panel echoes, which may come from the
-		// environment) saves as before. Either way the file's own value is written back,
-		// never a posted one and never the environment's.
-		if p := newCfg.AuthTokensFile; p != "" && p != onDisk.FileAuthTokensFile() && p != gc().AuthTokensFile {
-			refuseOpenPort(w, r, http.StatusForbidden, "auth_tokens_file is startup-only; edit config.json, then restart flodni")
-			return
-		}
-		newCfg.AuthTokensFile = onDisk.FileAuthTokensFile()
-		if app.controlToken == "" {
+		if !app.authOn() {
 			// allowed_hosts is the same kind of setting, and gostorm_url feeds the engine's
 			// list, so the derived list is gated, not each field: a client could clear or
 			// widen what the next start enforces. A post that leaves it as it is saves as before.
@@ -101,13 +111,13 @@ func handleConfig(w http.ResponseWriter, r *http.Request) {
 					"plex.url cannot be changed through the API while no token is enforced"+setPlexTokenHint)
 				return
 			}
-		} else {
+		} else if !scoped {
 			// The panel never sees the token; an empty post keeps the one in the file.
 			newCfg.APIToken = gc().ResolveAPIToken(newCfg.APIToken)
 		}
 		// A panel save keeps the list as the file holds it, never the environment's. On the
 		// open path HostsSaveChanged has already done this; here it covers the token path.
-		if app.controlToken != "" {
+		if app.authOn() {
 			onDisk.HostsSaveChanged(&newCfg, gc())
 		}
 		// The stored token goes wherever plex.url points, and the panel cannot read it
@@ -159,6 +169,44 @@ func handleConfig(w http.ResponseWriter, r *http.Request) {
 		logger.Info("[Config] Updated via Dashboard API")
 		w.WriteHeader(200)
 	}
+}
+
+// refuseScopedSave holds the startup-only settings in scoped mode (ADR 0004): api_token,
+// auth_tokens_file, auth_jwt and auth_panel_https are read at start and never changed
+// through the API, so a leaked admin token, a session or an admitted proxy user cannot
+// plant a credential, or their own issuer, that outlives the owner's rotation and a
+// restart. A post that would change one answers 403 and writes nothing. A post that
+// leaves them alone keeps the values of the copy read at start (gc()), never a re-read
+// of the file, so a hand edit made since then does not ride along with someone's save.
+// A live gostorm_url that is not loopback is refused too: the next start would
+// refuse it. It reports whether it answered.
+func refuseScopedSave(w http.ResponseWriter, r *http.Request, newCfg *config.Config) bool {
+	run := gc()
+	switch {
+	case newCfg.APIToken != "":
+		refuseOpenPort(w, r, http.StatusForbidden, "api_token is startup-only in scoped mode; it must stay unset (remove it from config.json)")
+		return true
+	case newCfg.AuthTokensFile != "" && newCfg.AuthTokensFile != run.FileAuthTokensFile() && newCfg.AuthTokensFile != run.AuthTokensFile:
+		refuseOpenPort(w, r, http.StatusForbidden, "auth_tokens_file is startup-only; edit config.json, then restart flodni")
+		return true
+	case newCfg.AuthJWT != nil && !newCfg.AuthJWT.Same(run.AuthJWT):
+		refuseOpenPort(w, r, http.StatusForbidden, "auth_jwt is startup-only; edit config.json")
+		return true
+	case newCfg.AuthPanelHTTPS != run.AuthPanelHTTPS:
+		refuseOpenPort(w, r, http.StatusForbidden, "auth_panel_https is startup-only; edit config.json, then restart flodni")
+		return true
+	}
+	if u := newCfg.GoStormBaseURL; u != "" {
+		if err := apiauth.RequireLoopback(u); err != nil {
+			refuseOpenPort(w, r, http.StatusForbidden, "gostorm_url must stay a loopback address in scoped mode: the engine is called without a credential")
+			return true
+		}
+	}
+	newCfg.APIToken = run.ResolveAPIToken("")
+	newCfg.AuthTokensFile = run.FileAuthTokensFile()
+	newCfg.AuthJWT = run.AuthJWT
+	newCfg.AuthPanelHTTPS = run.AuthPanelHTTPS
+	return false
 }
 
 // checkLoadable is config.CheckLoadable; a test replaces it to force a refusal,
@@ -217,7 +265,7 @@ func handleRestart(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "method not allowed", 405)
 		return
 	}
-	if app.controlToken == "" {
+	if !app.authOn() {
 		refuseOpenPort(w, r, http.StatusForbidden, "restart is refused while no token is enforced"+setTokenHint)
 		return
 	}

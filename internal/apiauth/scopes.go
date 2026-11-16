@@ -150,3 +150,25 @@ func ScopeFor(server Server, method, pattern, action string) Scope {
 	}
 	return ScopeAdmin
 }
+
+// HasActions reports whether the route's scope depends on an action in the body.
+func HasActions(server Server, method, pattern string) bool {
+	for _, r := range routeTable {
+		if r.Server == server && r.Method == method && r.Pattern == pattern && r.Action != ActionNone {
+			return true
+		}
+	}
+	return false
+}
+
+// CouldApply reports whether a caller holding scopes has any scope a row of this
+// route and method asks for. The engine gate reads a body only for such a caller:
+// one that holds nothing any row could need is refused without reading.
+func CouldApply(scopes ScopeSet, server Server, method, pattern string) bool {
+	for _, r := range routeTable {
+		if r.Server == server && r.Method == method && r.Pattern == pattern && scopes.Has(r.Scope) {
+			return true
+		}
+	}
+	return scopes.Has(ScopeAdmin)
+}

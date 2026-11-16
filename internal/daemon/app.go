@@ -27,9 +27,12 @@ type App struct {
 	// once in Run() and shared by the auth middleware and the confirm gate (apiTokenSet).
 	controlToken string
 
-	// auth is the token store decided at start-up (open, legacy_token or scoped). The
-	// gate that enforces it is a later step; today it feeds the startup report.
+	// auth is the token store decided at start-up (open, legacy_token or scoped). Both
+	// servers enforce it, and the startup report carries its summary.
 	auth *apiauth.Tokens
+
+	// jwt verifies the proxy's assertion on the control port; nil when auth_jwt is off.
+	jwt apiauth.JWTVerifier
 
 	// startup collects the startup stages and emits the one [Startup] report.
 	startup *startupReporter
@@ -53,6 +56,13 @@ type App struct {
 
 	// linked is the set of stub names a library symlink points at (linked_stubs.go).
 	linked linkedIndex
+}
+
+// authOn reports whether any credential is enforced: an api_token (controlToken) or a
+// tokens file. It is the switch of the routes that fail closed without one (restart,
+// confirm, api_token and plex writes), now "any auth enforced".
+func (a *App) authOn() bool {
+	return a.controlToken != "" || a.auth.Mode() == apiauth.ModeScoped
 }
 
 func newApp() *App {

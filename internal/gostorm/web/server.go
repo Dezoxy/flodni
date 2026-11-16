@@ -29,7 +29,7 @@ var (
 	waitChan = make(chan error, 3)
 
 	// APIToken, when set before Start, is required as a bearer token on every
-	// route except GET /echo. Empty: no auth.
+	// route except GET /echo. Empty: no auth. Auth (scope.go) supersedes it.
 	APIToken string
 
 	// AllowedHosts, when non-empty and set before Start, refuses a request whose
@@ -46,7 +46,7 @@ var (
 func newServer(addr string, h http.Handler) *http.Server {
 	return &http.Server{
 		Addr:              addr,
-		Handler:           apiauth.GoStorm(APIToken, Logger, h, apiauth.WithAllowedHosts(AllowedHosts)),
+		Handler:           apiauth.GoStorm("", Logger, h, apiauth.WithTokens(authTokens()), apiauth.WithObserver(AuthObserver), apiauth.WithAllowedHosts(AllowedHosts)),
 		ErrorLog:          redact.ErrorLog(),
 		ReadHeaderTimeout: 10 * time.Second,
 		IdleTimeout:       120 * time.Second,
@@ -58,12 +58,25 @@ func newServer(addr string, h http.Handler) *http.Server {
 // is a script, so no page on another origin has a reason to read a response.
 func newRoute() *gin.Engine {
 	route := gin.New()
-	route.Use(log.WebLogger(), blocker.Blocker(), log.Recovery(), location.Default())
-	auth.SetupAuth(route)
-	if APIToken != "" {
-		// Requests reaching a handler carried the token (apiauth.GoStorm gates them).
-		route.Use(func(c *gin.Context) { c.Set(api.TokenEnforcedKey, true) })
+	// No response is produced before the scope middleware runs, in any mode: a
+	// redirect or an Allow header would answer a path the middleware never classified,
+	// and the pattern it reads (c.FullPath) must be the one that is served.
+	route.RedirectTrailingSlash = false
+	route.RedirectFixedPath = false
+	route.HandleMethodNotAllowed = false
+	route.UseRawPath = false
+	route.UseEscapedPath = false
+	route.RemoveExtraSlash = false
+	route.Use(log.WebLogger(), blocker.Blocker(), log.Recovery())
+	// Before every route registration: gin freezes each route's handler chain when
+	// it is registered, so a route registered earlier would skip the middleware. The
+	// mode is fixed here; a router built for an enforced mode refuses a request with
+	// no identity, never reads it as open.
+	if authTokens().Mode() != apiauth.ModeOpen {
+		route.Use(scopeMiddleware())
 	}
+	route.Use(location.Default())
+	auth.SetupAuth(route)
 
 	route.GET("/echo", echo)
 
@@ -86,6 +99,7 @@ func Start() {
 	gin.SetMode(gin.ReleaseMode)
 
 	route := newRoute()
+	inproc.Store(&handlerBox{h: route}) // Flodni's own calls reach the engine through this
 
 	// check if https enabled
 	if settings.Ssl {
@@ -110,7 +124,10 @@ func Start() {
 		}()
 	}
 
-	if APIToken != "" {
+	switch authTokens().Mode() {
+	case apiauth.ModeScoped:
+		log.TLogln("Scoped-token auth enabled (all routes except GET /echo)")
+	case apiauth.ModeLegacyToken:
 		log.TLogln("Bearer-token auth enabled (all routes except GET /echo)")
 	}
 	go func() {
