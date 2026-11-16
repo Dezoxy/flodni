@@ -234,7 +234,7 @@ func (r *Reader) Close() {
 	if len(r.file.Torrent().Files()) > 0 {
 		_ = r.Reader.Close() // read-only reader
 	}
-	safeGo(func() {
+	r.cache.goBG(func() {
 		// Serialised with cleanPieces: both rebuild the shared pieceInRange bitmap.
 		r.cache.muRemove.Lock()
 		defer r.cache.muRemove.Unlock()

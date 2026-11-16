@@ -62,10 +62,14 @@ jobs:
           echo "### Tests: $count test file(s) outside the vendored engine" >> "$GITHUB_STEP_SUMMARY"
           go list ./... | grep -v 'internal/anacrolix-torrent' | xargs -r go test -race -count=1
       # The vendored engine is its own module, so ./... above never reaches it. Its
-      # private-torrent guards pin CLAUDE.md hard rule 3.
-      - name: Engine private-torrent and request-server tests
+      # private-torrent guards pin CLAUDE.md hard rule 3, its malformed-input tests pin the
+      # refusal of bad peer, tracker and webseed input.
+      - name: Engine private-torrent, request-server and malformed-input tests
         working-directory: internal/anacrolix-torrent
-        run: go test -race -count=1 -run 'Private|PeerRequestServer|PeerWake|ProcessCounters' .
+        run: |
+          go test -race -count=1 -run 'Private|PeerRequestServer|PeerWake|ProcessCounters|Malformed' .
+          go test -race -count=1 -run Malformed ./tracker/http ./webseed
+          go test -race -count=1 -run DecodeDepth ./bencode
 
   workflow-lint:
     name: Workflow lint (actionlint, zizmor)

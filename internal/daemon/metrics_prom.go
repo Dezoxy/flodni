@@ -13,6 +13,7 @@ import (
 	"flodni/internal/gostorm/native"
 	"flodni/internal/gostorm/settings"
 	"flodni/internal/gostorm/torr"
+	"flodni/internal/gostorm/torr/storage/torrstor"
 	"flodni/internal/promtext"
 	"flodni/internal/warmup"
 )
@@ -154,9 +155,28 @@ func collectProm(w *promtext.Writer) {
 		"Outcome of the refill after a short read.",
 		promSample(fuseShortReadRepaired.Load(), lbl("result", "repaired")),
 		promSample(fuseShortReadFailed.Load(), lbl("result", "failed")))
+	collectFuseReadAheadProm(w)
 	w.Counter("flodni_fetch_dedup_total",
 		"Concurrent fetches of the same chunk that shared one fetch.",
 		promSample(fetchFlightDedupCount.Load()))
+}
+
+// collectFuseReadAheadProm writes the mount's kernel read-ahead in bytes, read from sysfs at
+// each scrape (one small file). No series before the mount's BDI is known, on a
+// platform without sysfs, or when the file cannot be read: a zero would read as
+// "read-ahead off".
+func collectFuseReadAheadProm(w *promtext.Writer) {
+	bdi := mountBDI.Load()
+	if bdi == nil {
+		return
+	}
+	kb, err := readAheadKB(sysBDIRoot, *bdi)
+	if err != nil {
+		return
+	}
+	w.Gauge("flodni_fuse_read_ahead_bytes",
+		"Kernel read-ahead of the FUSE mount in bytes (sysfs read_ahead_kb times 1024), read at each scrape. Flodni never writes it; the host may tune it. Absent when the file cannot be read.",
+		promSample(kb*1024))
 }
 
 func collectWarmupProm(w *promtext.Writer) {
@@ -386,6 +406,12 @@ func collectEngineReadsProm(w *promtext.Writer) {
 	w.Counter("flodni_engine_gradient2_backoff_samples_total",
 		"Gradient2 limiter samples that found the peer's latency gradient below 1 and shrank its growth. Stays 0 with the limiter off (the default).",
 		promSample(pc.Gradient2Backoffs))
+	w.Counter("flodni_readahead_refetched_bytes_total",
+		"Bytes the engine fetched again for a piece that had completed and been evicted from the in-memory piece cache. Baseline for deciding whether eviction is costing downloads; nothing acts on it.",
+		promSample(torrstor.RefetchedBytes()))
+	w.Gauge("flodni_readahead_stranded_partial_bytes",
+		"Bytes held by partially written pieces outside every reader's protected window, summed over open torrents. Such a piece is never evicted, so after a seek these stay until that piece is fetched to the end. Sampled at scrape under each cache's reader read lock only, never the engine's client lock.",
+		promSample(torrstor.StrandedPartialBytes()))
 	repaired, unfilled := native.ShortReadRepairCounts()
 	w.Counter("flodni_engine_short_read_repairs_total",
 		"Outcome of the stream reader's refill loop, per read that needed it: repaired after a reconnect, or unfilled and left a gap.",

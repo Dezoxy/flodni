@@ -139,6 +139,7 @@ func TestHandlePrometheus(t *testing.T) {
 		"flodni_engine_short_reads_total", "flodni_engine_short_read_repairs_total", "flodni_engine_peer_redials_total", "flodni_engine_db_write_errors_total", "flodni_sessions_open",
 		"flodni_engine_hedge_triggers_total", "flodni_engine_peer_ejects_total", "flodni_engine_peer_churn_drops_total",
 		"flodni_engine_gradient2_backoff_samples_total", "flodni_readahead_evictions_total", "flodni_warmup_head_fill_duration_seconds",
+		"flodni_readahead_refetched_bytes_total", "flodni_readahead_stranded_partial_bytes",
 		"go_goroutines", "go_memstats_heap_inuse_bytes", "go_memstats_sys_bytes", "go_gc_cycles_total",
 	} {
 		if !strings.Contains(body, "# TYPE "+fam+" ") {
@@ -204,6 +205,8 @@ func TestHandlePrometheus(t *testing.T) {
 		`flodni_engine_peer_churn_drops_total{transport="utp"}`,
 		`flodni_engine_gradient2_backoff_samples_total`,
 		`flodni_readahead_evictions_total`,
+		`flodni_readahead_refetched_bytes_total`,
+		`flodni_readahead_stranded_partial_bytes`,
 		`flodni_warmup_head_fill_duration_seconds_sum`,
 		`flodni_warmup_head_fill_duration_seconds_count`,
 		`flodni_warmup_head_fill_duration_seconds_bucket{le="120"}`,
@@ -311,13 +314,15 @@ func TestWarmupFilesGaugeNeedsTheCache(t *testing.T) {
 func TestRuntimeAndProcessFamilyTypes(t *testing.T) {
 	body := scrape(t).Body.String()
 	for fam, typ := range map[string]string{
-		"flodni_engine_short_reads_total":        "counter",
-		"flodni_engine_short_read_repairs_total": "counter",
-		"flodni_sessions_open":                   "gauge",
-		"go_goroutines":                          "gauge",
-		"go_memstats_heap_inuse_bytes":           "gauge",
-		"go_memstats_sys_bytes":                  "gauge",
-		"go_gc_cycles_total":                     "counter",
+		"flodni_engine_short_reads_total":         "counter",
+		"flodni_engine_short_read_repairs_total":  "counter",
+		"flodni_sessions_open":                    "gauge",
+		"flodni_readahead_refetched_bytes_total":  "counter",
+		"flodni_readahead_stranded_partial_bytes": "gauge",
+		"go_goroutines":                           "gauge",
+		"go_memstats_heap_inuse_bytes":            "gauge",
+		"go_memstats_sys_bytes":                   "gauge",
+		"go_gc_cycles_total":                      "counter",
 	} {
 		if !strings.Contains(body, "# TYPE "+fam+" "+typ+"\n") {
 			t.Errorf("%s is not declared as a %s", fam, typ)
