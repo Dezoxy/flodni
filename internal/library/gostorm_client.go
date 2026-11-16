@@ -20,14 +20,29 @@ type GoStormClient struct {
 	baseURL    string
 	token      string // bearer token for the engine's server; empty sends none
 	httpClient *http.Client
+	// addTimeout bounds an add. The engine answers it once the record is saved, which waits
+	// for the torrent's metadata: longer than the general limit, shorter than never.
+	addTimeout time.Duration
+}
+
+// defaultAddTimeout covers the engine's own metadata wait (a minute plus its disconnect
+// timeout) with room to spare.
+const defaultAddTimeout = 3 * time.Minute
+
+// addClient is the client for an add: the same transport under the add's own limit.
+func (c *GoStormClient) addClient() *http.Client {
+	cl := *c.httpClient
+	cl.Timeout = c.addTimeout
+	return &cl
 }
 
 // NewGoStormClient creates a client for GoStorm API operations. A non-empty
 // token is sent as a bearer token on every request.
 func NewGoStormClient(baseURL, token string) *GoStormClient {
 	return &GoStormClient{
-		baseURL: strings.TrimRight(baseURL, "/"),
-		token:   token,
+		baseURL:    strings.TrimRight(baseURL, "/"),
+		token:      token,
+		addTimeout: defaultAddTimeout,
 		httpClient: &http.Client{
 			Timeout: 30 * time.Second,
 			Transport: &http.Transport{
@@ -45,6 +60,7 @@ func NewGoStormClient(baseURL, token string) *GoStormClient {
 func NewGoStormClientTransport(rt http.RoundTripper) *GoStormClient {
 	return &GoStormClient{
 		baseURL:    "http://engine.internal",
+		addTimeout: defaultAddTimeout,
 		httpClient: &http.Client{Timeout: 30 * time.Second, Transport: rt},
 	}
 }
@@ -87,7 +103,7 @@ func (c *GoStormClient) AddTorrentConfirmed(ctx context.Context, magnet, title s
 	req.Header.Set("Content-Type", "application/json")
 	c.authorize(req)
 
-	resp, err := c.httpClient.Do(req)
+	resp, err := c.addClient().Do(req)
 	if err != nil {
 		return "", false, err
 	}

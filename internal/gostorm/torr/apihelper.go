@@ -3,9 +3,11 @@ package torr
 import (
 	"context"
 	"encoding/hex"
+	"errors"
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 
@@ -124,6 +126,42 @@ func AddTorrent(spec *torrent.TorrentSpec, title, poster string, data string, ca
 	}
 
 	return torr, nil
+}
+
+// ErrNoMetadata and ErrNotSaved are why an add that asked for a record has none.
+var (
+	ErrNoMetadata = errors.New("no metadata before the timeout")
+	ErrNotSaved   = errors.New("the record was not saved")
+)
+
+// SetAddedTitle gives an added torrent without a title the cleaned display name of its
+// link, or the name its metadata carries. Call it once the metadata is in.
+func SetAddedTitle(tor *Torrent, displayName string) {
+	if tor.Title != "" {
+		return
+	}
+	tor.Title = displayName // prefer dn over name
+	tor.Title = strings.ReplaceAll(tor.Title, "rutor.info", "")
+	tor.Title = strings.ReplaceAll(tor.Title, "_", " ")
+	tor.Title = strings.Trim(tor.Title, " ")
+	if tor.Title == "" && tor.Torrent != nil {
+		tor.Title = tor.Name()
+	}
+}
+
+// SaveAdded is the add that must not answer before its record exists: it waits for the
+// metadata, titles the torrent and commits the record, and says which of the two failed.
+// It does not use the save debounce: a save made a moment ago does not stand for this one.
+func SaveAdded(tor *Torrent, displayName string) error {
+	if !tor.GotInfo() {
+		return ErrNoMetadata
+	}
+	SetAddedTitle(tor, displayName)
+	if !saveTorrentToDB(tor) {
+		return ErrNotSaved
+	}
+	lastSaveTimes.Store(tor.Hash(), time.Now())
+	return nil
 }
 
 // ForceSaveTorrentToDB bypasses debounce — use only when the torrent is about

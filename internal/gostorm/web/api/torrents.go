@@ -84,6 +84,12 @@ func torrents(c *gin.Context) {
 	}
 }
 
+// The engine calls the add handler makes, as variables so a test can stand in for them.
+var (
+	addTorrentToEngine = torr.AddTorrent
+	saveAdded          = torr.SaveAdded
+)
+
 func addTorrent(req torrReqJS, c *gin.Context) {
 	if req.Link == "" {
 		c.AbortWithError(http.StatusBadRequest, errors.New("link is empty"))
@@ -122,33 +128,34 @@ func addTorrent(req torrReqJS, c *gin.Context) {
 		}
 	}
 
-	tor, err := torr.AddTorrent(torrSpec, req.Title, req.Poster, req.Data, req.Category)
+	tor, err := addTorrentToEngine(torrSpec, req.Title, req.Poster, req.Data, req.Category)
 	if err != nil {
 		log.TLogln("error add torrent:", redact.Err(err))
 		c.AbortWithError(http.StatusInternalServerError, err)
 		return
 	}
 
-	go func() {
-		if !tor.GotInfo() {
-			log.TLogln("error add torrent:", "timeout connection get torrent info")
+	if req.SaveToDB {
+		// The answer waits for the record: a caller that asked for it saved must not be
+		// told 200 before it exists, nor never hear that it could not be.
+		if err := saveAdded(tor, torrSpec.DisplayName); err != nil {
+			log.TLogln("error add torrent:", redact.Err(err))
+			status := http.StatusInternalServerError
+			if errors.Is(err, torr.ErrNoMetadata) {
+				status = http.StatusGatewayTimeout
+			}
+			c.AbortWithStatusJSON(status, gin.H{"error": err.Error()})
 			return
 		}
-
-		if tor.Title == "" {
-			tor.Title = torrSpec.DisplayName // prefer dn over name
-			tor.Title = strings.ReplaceAll(tor.Title, "rutor.info", "")
-			tor.Title = strings.ReplaceAll(tor.Title, "_", " ")
-			tor.Title = strings.Trim(tor.Title, " ")
-			if tor.Title == "" {
-				tor.Title = tor.Name()
+	} else {
+		go func() {
+			if !tor.GotInfo() {
+				log.TLogln("error add torrent:", "timeout connection get torrent info")
+				return
 			}
-		}
-
-		if req.SaveToDB {
-			torr.SaveTorrentToDB(tor)
-		}
-	}()
+			torr.SetAddedTitle(tor, torrSpec.DisplayName)
+		}()
+	}
 
 	c.JSON(200, tor.Status())
 }
