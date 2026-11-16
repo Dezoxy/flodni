@@ -98,11 +98,13 @@ func fillAttrFromStat(st *syscall.Stat_t, out *fuse.Attr) {
 	out.Blocks = uint64(st.Blocks)           // CRITICAL: Samba uses for throughput calc
 	out.Size = uint64(st.Size)
 
-	// Use time.Now() as cross-platform baseline for virtualized FUSE attributes.
-	now := time.Now()
-	out.Mtime = sanitizeTime(now)
-	out.Atime = sanitizeTime(now)
-	out.Ctime = sanitizeTime(now)
+	// The times are the physical directory's, so a stat changes nothing and adding or
+	// removing a stub moves the directory time. time.Now() made every stat look like a
+	// change to a scanner. Atime follows mtime: it is never read from a stub tree.
+	mtime, ctime := statTimes(st)
+	out.Mtime = sanitizeTime(mtime)
+	out.Atime = sanitizeTime(mtime)
+	out.Ctime = sanitizeTime(ctime)
 }
 
 // fillAttrFromMetadata populates FUSE attributes from our internal Metadata.

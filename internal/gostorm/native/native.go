@@ -244,12 +244,12 @@ func (c *NativeClient) Wake(ctx context.Context, magnetUrl string, fileIdx int) 
 			return fmt.Errorf("torrent closed while waking: %s", hash)
 		}
 		log.Printf("[NativeBridge] Metadata ready for %s (piece=%dKB)", hash, pieceLenKB)
-		// V255: Save metadata to DB immediately so next Wake() skips GotInfo() wait.
+		// V255: Save metadata to DB (only while it is missing) so next Wake() skips GotInfo() wait.
 		// Note: ForceSaveTorrentToDB at torrent expiry captures the full peer swarm
 		// safely (no streaming active). The previous 90s delayed goroutine was
 		// removed (V306) because it fired during active playback, causing cl._mu
 		// contention (PeerConns snapshot) that briefly stalled the pump.
-		torr.SaveTorrentToDB(t)
+		torr.SaveMetadataIfMissing(t)
 
 		// Optimistic active update
 		c.activeHashes.Store(hash, true)

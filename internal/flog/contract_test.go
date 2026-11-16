@@ -35,6 +35,7 @@ var stableLines = []struct {
 	{"state db open failed", []string{"Failed to open StateDB"}, false},
 	{"inode map loaded", []string{"InodeMap: Loaded ", " files"}, false},
 	{"fuse mounted", []string{"FUSE mounted at "}, false},
+	{"fuse bdi", []string{"[FUSE] mounted, bdi ", ", read_ahead_kb "}, false},
 	{"library torrents without engine record", []string{"Library torrents with no stored engine record with metainfo: ", " of "}, false},
 	{"config parse failure", []string{"Failed to parse"}, false},
 	{"path differs", []string{"physical_source_path", "differs"}, false},
