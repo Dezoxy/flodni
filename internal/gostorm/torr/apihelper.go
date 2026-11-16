@@ -152,8 +152,10 @@ func SetAddedTitle(tor *Torrent, displayName string) {
 // SaveAdded is the add that must not answer before its record exists: it waits for the
 // metadata, titles the torrent and commits the record, and says which of the two failed.
 // It does not use the save debounce: a save made a moment ago does not stand for this one.
-func SaveAdded(tor *Torrent, displayName string) error {
-	if !tor.GotInfo() {
+//
+// wait bounds the metadata wait (the caller's metadata_wait); zero keeps the engine's own.
+func SaveAdded(tor *Torrent, displayName string, wait time.Duration) error {
+	if !gotInfoWithin(tor, wait) {
 		return ErrNoMetadata
 	}
 	SetAddedTitle(tor, displayName)
@@ -162,6 +164,29 @@ func SaveAdded(tor *Torrent, displayName string) error {
 	}
 	lastSaveTimes.Store(tor.Hash(), time.Now())
 	return nil
+}
+
+// waitInfo is the metadata wait of an add; a variable so a test can stand in for it.
+var waitInfo = func(t *Torrent) bool { return t.GotInfo() }
+
+// gotInfoWithin waits for the metadata for at most wait (zero: the engine's own limit). A
+// torrent given up on is closed, as one that timed out inside GotInfo is.
+func gotInfoWithin(tor *Torrent, wait time.Duration) bool {
+	info := waitInfo
+	if wait <= 0 {
+		return info(tor)
+	}
+	done := make(chan bool, 1)
+	go func() { done <- info(tor) }()
+	timer := time.NewTimer(wait)
+	defer timer.Stop()
+	select {
+	case ok := <-done:
+		return ok
+	case <-timer.C:
+		tor.Close()
+		return false
+	}
 }
 
 // ForceSaveTorrentToDB bypasses debounce — use only when the torrent is about

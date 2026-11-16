@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"mime/multipart"
@@ -20,19 +21,38 @@ type GoStormClient struct {
 	baseURL    string
 	token      string // bearer token for the engine's server; empty sends none
 	httpClient *http.Client
-	// addTimeout bounds an add. The engine answers it once the record is saved, which waits
-	// for the torrent's metadata: longer than the general limit, shorter than never.
+	// addTimeout caps an add. The engine answers it once the record is saved, which waits
+	// for the torrent's metadata: longer than the general limit, shorter than never. The
+	// caller's metadata_wait plus addMargin bounds it further.
 	addTimeout time.Duration
+	addMargin  time.Duration
 }
 
-// defaultAddTimeout covers the engine's own metadata wait (a minute plus its disconnect
-// timeout) with room to spare.
-const defaultAddTimeout = 3 * time.Minute
+const (
+	// defaultAddTimeout covers the engine's own metadata wait (a minute plus its
+	// disconnect timeout, 75 s by default) with room to spare.
+	defaultAddTimeout = 2 * time.Minute
+	// defaultAddMargin is what an add gets beyond the caller's metadata_wait for the
+	// engine to answer its own timeout.
+	defaultAddMargin = 5 * time.Second
+)
 
-// addClient is the client for an add: the same transport under the add's own limit.
+// errNoMetadata is an add that got no metadata in time: the engine said so (504) or the
+// add outlasted its bound.
+var errNoMetadata = errors.New("no metadata")
+
+type addWaitKey struct{}
+
+// withAddWait carries the caller's metadata wait (seconds) to the engine add.
+func withAddWait(ctx context.Context, seconds int) context.Context {
+	return context.WithValue(ctx, addWaitKey{}, seconds)
+}
+
+// addClient is the client for an add: the same transport; the add's deadline is a
+// context, so the general 30 s limit does not apply.
 func (c *GoStormClient) addClient() *http.Client {
 	cl := *c.httpClient
-	cl.Timeout = c.addTimeout
+	cl.Timeout = 0
 	return &cl
 }
 
@@ -43,6 +63,7 @@ func NewGoStormClient(baseURL, token string) *GoStormClient {
 		baseURL:    strings.TrimRight(baseURL, "/"),
 		token:      token,
 		addTimeout: defaultAddTimeout,
+		addMargin:  defaultAddMargin,
 		httpClient: &http.Client{
 			Timeout: 30 * time.Second,
 			Transport: &http.Transport{
@@ -61,6 +82,7 @@ func NewGoStormClientTransport(rt http.RoundTripper) *GoStormClient {
 	return &GoStormClient{
 		baseURL:    "http://engine.internal",
 		addTimeout: defaultAddTimeout,
+		addMargin:  defaultAddMargin,
 		httpClient: &http.Client{Timeout: 30 * time.Second, Transport: rt},
 	}
 }
@@ -91,6 +113,17 @@ func (c *GoStormClient) AddTorrentConfirmed(ctx context.Context, magnet, title s
 		"title":      title,
 		"save_to_db": true,
 	}
+	wait, _ := ctx.Value(addWaitKey{}).(int)
+	limit := c.addTimeout
+	if wait > 0 {
+		body["metadata_wait"] = wait
+		if t := time.Duration(wait)*time.Second + c.addMargin; t < limit {
+			limit = t
+		}
+	}
+	parent := ctx
+	ctx, cancel := context.WithTimeout(ctx, limit)
+	defer cancel()
 	data, err := json.Marshal(body)
 	if err != nil {
 		return "", false, err
@@ -105,10 +138,17 @@ func (c *GoStormClient) AddTorrentConfirmed(ctx context.Context, magnet, title s
 
 	resp, err := c.addClient().Do(req)
 	if err != nil {
+		if parent.Err() == nil && ctx.Err() != nil {
+			return "", false, fmt.Errorf("%w: the add outlasted %s", errNoMetadata, limit)
+		}
 		return "", false, err
 	}
 	defer resp.Body.Close()
 
+	if resp.StatusCode == http.StatusGatewayTimeout {
+		respBody, _ := io.ReadAll(io.LimitReader(resp.Body, 120))
+		return "", false, fmt.Errorf("%w: gostorm error 504: %s", errNoMetadata, respBody)
+	}
 	if resp.StatusCode >= 400 {
 		respBody, _ := io.ReadAll(resp.Body)
 		return "", false, fmt.Errorf("gostorm error %d: %s", resp.StatusCode, string(respBody[:min(len(respBody), 120)]))

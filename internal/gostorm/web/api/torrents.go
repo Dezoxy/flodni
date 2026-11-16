@@ -4,6 +4,7 @@ import (
 	"flodni/internal/gostorm/torrshash"
 	"net/http"
 	"strings"
+	"time"
 
 	"flodni/internal/gostorm/log"
 	"flodni/internal/gostorm/torr"
@@ -26,6 +27,8 @@ type torrReqJS struct {
 	Poster   string `json:"poster,omitempty"`
 	Data     string `json:"data,omitempty"`
 	SaveToDB bool   `json:"save_to_db,omitempty"`
+	// MetadataWait is how long an add with save_to_db waits for metadata, in seconds.
+	MetadataWait int `json:"metadata_wait,omitempty"`
 }
 
 // torrents godoc
@@ -90,6 +93,16 @@ var (
 	saveAdded          = torr.SaveAdded
 )
 
+// maxAddWait caps the caller's metadata_wait, as the library caps its own.
+const maxAddWait = 300
+
+func addWait(seconds int) time.Duration {
+	if seconds <= 0 {
+		return 0
+	}
+	return time.Duration(min(seconds, maxAddWait)) * time.Second
+}
+
 func addTorrent(req torrReqJS, c *gin.Context) {
 	if req.Link == "" {
 		c.AbortWithError(http.StatusBadRequest, errors.New("link is empty"))
@@ -138,7 +151,7 @@ func addTorrent(req torrReqJS, c *gin.Context) {
 	if req.SaveToDB {
 		// The answer waits for the record: a caller that asked for it saved must not be
 		// told 200 before it exists, nor never hear that it could not be.
-		if err := saveAdded(tor, torrSpec.DisplayName); err != nil {
+		if err := saveAdded(tor, torrSpec.DisplayName, addWait(req.MetadataWait)); err != nil {
 			log.TLogln("error add torrent:", redact.Err(err))
 			status := http.StatusInternalServerError
 			if errors.Is(err, torr.ErrNoMetadata) {

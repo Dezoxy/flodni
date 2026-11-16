@@ -71,13 +71,14 @@ func (m *Manager) Inspect(ctx context.Context, req InspectRequest) (*InspectResp
 	if err := m.uploadReleaseFile(ctx, file, title); err != nil {
 		return nil, err
 	}
-	addedHash, err := m.cfg.GoStorm.AddTorrent(ctx, magnet, title)
+	wait := metadataWait(req.MetadataWait)
+	addedHash, err := m.cfg.GoStorm.AddTorrent(withAddWait(ctx, wait), magnet, title)
 	if err != nil || addedHash == "" {
 		// An interrupted request may still have been taken, and the engine saves it.
 		if !preexisting {
 			m.dropTorrent(ctx, lockKey)
 		}
-		return nil, errf(http.StatusBadGateway, "gostorm rejected the torrent: %v", err)
+		return nil, addFailure(wait, err)
 	}
 	engineHash := strings.ToLower(strings.TrimSpace(addedHash))
 	if !reInfoHash.MatchString(engineHash) {
@@ -94,12 +95,6 @@ func (m *Manager) Inspect(ctx context.Context, req InspectRequest) (*InspectResp
 		preexisting = preexisting || known[engineKey]
 	}
 
-	wait := req.MetadataWait
-	if wait <= 0 {
-		wait = defaultMetadataWait
-	} else if wait > maxMetadataWait {
-		wait = maxMetadataWait
-	}
 	info, err := m.cfg.GoStorm.GetTorrentInfo(ctx, engineHash, wait)
 	if err != nil || info == nil {
 		if !preexisting {

@@ -26,7 +26,8 @@ func TestCheckImgUrlAcceptsAnImage(t *testing.T) {
 	}
 }
 
-// A poster host that never answers must not hold a save for ever.
+// A poster host that never answers must not hold a save for ever, and the HEAD and the
+// GET fallback share one deadline: two slow requests cost the limit once, not twice.
 func TestCheckImgUrlTimesOut(t *testing.T) {
 	release := make(chan struct{})
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { <-release }))
@@ -36,15 +37,37 @@ func TestCheckImgUrlTimesOut(t *testing.T) {
 	imageCheckTimeout = 200 * time.Millisecond
 	defer func() { imageCheckTimeout = prev }()
 
-	done := make(chan bool, 1)
-	go func() { done <- CheckImgUrl(srv.URL + "/p.png") }()
-	select {
-	case ok := <-done:
-		if ok {
-			t.Fatal("a stalled host passed")
+	start := time.Now()
+	if CheckImgUrl(srv.URL + "/p.png") {
+		t.Fatal("a stalled host passed")
+	}
+	if d := time.Since(start); d > 400*time.Millisecond {
+		t.Fatalf("took %v for a 200 ms limit: the limit applied per request, not in total", d)
+	}
+}
+
+// A HEAD the server refuses, then a GET that stalls: the fallback gets what is left.
+func TestCheckImgUrlFallbackSharesTheDeadline(t *testing.T) {
+	release := make(chan struct{})
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodHead {
+			time.Sleep(150 * time.Millisecond)
+			w.WriteHeader(http.StatusMethodNotAllowed)
+			return
 		}
-	case <-time.After(5 * time.Second):
-		t.Fatal("the poster check did not time out")
+		<-release
+	}))
+	defer srv.Close()
+	defer close(release)
+	prev := imageCheckTimeout
+	imageCheckTimeout = 200 * time.Millisecond
+	defer func() { imageCheckTimeout = prev }()
+	start := time.Now()
+	if CheckImgUrl(srv.URL + "/p.png") {
+		t.Fatal("a stalled GET passed")
+	}
+	if d := time.Since(start); d > 350*time.Millisecond {
+		t.Fatalf("took %v: HEAD and GET each had the full limit", d)
 	}
 }
 

@@ -25,7 +25,7 @@ func TestSaveAddedWritesTheRecordBeforeItReturns(t *testing.T) {
 	h := lifeHash(40)
 	tr := holdWithInfo(&torrent.TorrentSpec{InfoHash: h, InfoBytes: []byte("info")})
 
-	if err := SaveAdded(tr, "Some_Name"); err != nil {
+	if err := SaveAdded(tr, "Some_Name", 0); err != nil {
 		t.Fatalf("SaveAdded: %v", err)
 	}
 	rec := GetTorrentDB(h)
@@ -45,7 +45,7 @@ func TestSaveAddedFailsWhenTheStoreFails(t *testing.T) {
 	restore := sets.InjectCommitFault(func() error { return errors.New("injected: disk full") })
 	defer restore()
 
-	err := SaveAdded(tr, "n")
+	err := SaveAdded(tr, "n", 0)
 	if !errors.Is(err, ErrNotSaved) {
 		t.Fatalf("err = %v, want ErrNotSaved", err)
 	}
@@ -63,7 +63,7 @@ func TestSaveAddedIgnoresTheSaveDebounce(t *testing.T) {
 	lastSaveTimes.Store(h, time.Now())
 	t.Cleanup(func() { lastSaveTimes.Delete(h) })
 
-	if err := SaveAdded(tr, "n"); err != nil {
+	if err := SaveAdded(tr, "n", 0); err != nil {
 		t.Fatal(err)
 	}
 	if GetTorrentDB(h) == nil {
@@ -76,7 +76,7 @@ func TestSaveAddedFailsOnAMetadataTimeout(t *testing.T) {
 	warmupFixture(t)
 	h := lifeHash(43)
 	tr := register(bts, &torrent.TorrentSpec{InfoHash: h}) // no anacrolix torrent: WaitInfo gives up
-	err := SaveAdded(tr, "n")
+	err := SaveAdded(tr, "n", 0)
 	if !errors.Is(err, ErrNoMetadata) {
 		t.Fatalf("err = %v, want ErrNoMetadata", err)
 	}
@@ -93,7 +93,7 @@ func TestSaveAddedFailsWhenTheTorrentIsNoLongerHeld(t *testing.T) {
 	bts.mu.Lock()
 	delete(bts.torrents, h)
 	bts.mu.Unlock()
-	if err := SaveAdded(tr, "n"); !errors.Is(err, ErrNotSaved) {
+	if err := SaveAdded(tr, "n", 0); !errors.Is(err, ErrNotSaved) {
 		t.Fatalf("err = %v, want ErrNotSaved", err)
 	}
 }
@@ -118,11 +118,38 @@ func TestAddAfterUploadKeepsTheUploadedMetadata(t *testing.T) {
 	if second != first {
 		t.Fatal("the add built a second wrapper for the uploaded hash")
 	}
-	if err := SaveAdded(second, "Title"); err != nil {
+	if err := SaveAdded(second, "Title", 0); err != nil {
 		t.Fatal(err)
 	}
 	rec := GetTorrentDB(h)
 	if rec == nil || string(rec.TorrentSpec.InfoBytes) != "uploaded-info" {
 		t.Fatalf("record %+v, want the uploaded info bytes", rec)
+	}
+}
+
+// The caller's wait bounds the metadata wait: a torrent whose metadata never comes is given
+// up on at the caller's limit, closed, and no record is written.
+func TestSaveAddedHonoursTheCallersWait(t *testing.T) {
+	warmupFixture(t)
+	h := lifeHash(46)
+	tr := register(bts, &torrent.TorrentSpec{InfoHash: h})
+	release := make(chan struct{})
+	prev := waitInfo
+	waitInfo = func(*Torrent) bool { <-release; return false }
+	defer func() { close(release); waitInfo = prev }()
+
+	start := time.Now()
+	err := SaveAdded(tr, "n", 150*time.Millisecond)
+	if !errors.Is(err, ErrNoMetadata) {
+		t.Fatalf("err = %v, want ErrNoMetadata", err)
+	}
+	if d := time.Since(start); d > 2*time.Second {
+		t.Fatalf("took %v for a 150 ms wait", d)
+	}
+	if GetTorrentDB(h) != nil {
+		t.Fatal("a record exists for a torrent that gave no metadata")
+	}
+	if heldByEngine(h) != nil {
+		t.Fatal("the torrent that gave no metadata is still held")
 	}
 }

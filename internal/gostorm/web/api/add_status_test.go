@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"flodni/internal/gostorm/torr"
 
@@ -24,6 +25,7 @@ func TestAddAnswersOnlyAfterTheSave(t *testing.T) {
 		return &torr.Torrent{}, nil
 	}
 	const hash = "0123456789abcdef0123456789abcdef01234567"
+	var gotWait time.Duration
 	for _, c := range []struct {
 		name string
 		err  error
@@ -33,14 +35,17 @@ func TestAddAnswersOnlyAfterTheSave(t *testing.T) {
 		{"no metadata", torr.ErrNoMetadata, http.StatusGatewayTimeout},
 		{"not saved", torr.ErrNotSaved, http.StatusInternalServerError},
 	} {
-		saveAdded = func(*torr.Torrent, string) error { return c.err }
+		saveAdded = func(_ *torr.Torrent, _ string, w time.Duration) error { gotWait = w; return c.err }
 		r := gin.New()
 		r.POST("/torrents", torrents)
-		body, _ := json.Marshal(map[string]interface{}{"action": "add", "link": "magnet:?xt=urn:btih:" + hash, "save_to_db": true})
+		body, _ := json.Marshal(map[string]interface{}{"action": "add", "link": "magnet:?xt=urn:btih:" + hash, "save_to_db": true, "metadata_wait": 5})
 		rec := httptest.NewRecorder()
 		req := httptest.NewRequest(http.MethodPost, "/torrents", bytes.NewReader(body))
 		req.Header.Set("Content-Type", "application/json")
 		r.ServeHTTP(rec, req)
+		if gotWait != 5*time.Second {
+			t.Errorf("%s: the add was given a wait of %v, want the caller's 5 s", c.name, gotWait)
+		}
 		if rec.Code != c.want {
 			t.Errorf("%s: status %d, want %d (%s)", c.name, rec.Code, c.want, rec.Body)
 		}

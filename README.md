@@ -328,12 +328,16 @@ marked "every mode". Read these before the first start of v0.3.0:
   link is refused as an unknown scheme. An `http(s)` link is the only fetch an
   add makes: at most 10 MiB, 60 s in all, up to 3 redirects and only on the
   host it started at (a redirect to a `magnet:` link still works). The poster
-  check has a 10 s limit and the same redirect rule.
+  check has one 10 s deadline in total, HEAD and GET fallback together, and the
+  same redirect rule.
 - With `save_to_db` set, `POST /torrents` answers only after the record is
-  saved: 200 when it is, 504 when no metadata arrived before the timeout, 500
-  when the save failed (a JSON `error` says which). Without `save_to_db` it
-  answers at once, as before. The library client gives an add up to 3 minutes
-  instead of 30 s for this.
+  saved: 200 when it is, 504 when no metadata arrived before the timeout (the
+  optional `metadata_wait`, in seconds, bounds it), 500 when the save failed (a
+  JSON `error` says which). Without `save_to_db` it answers at once, as before.
+  `POST /torrent/upload` with `save` still saves in the background. The library
+  add sends its `metadata_wait` on, so a dead swarm answers 504 "no metadata"
+  within about that wait plus 5 s, as before, not 502; the add call is capped at
+  2 minutes (it was 30 s per call before the engine waited for the record).
 - The engine answers 404, not a 307 redirect, to `POST /torrents/` with a
   trailing slash, in every mode.
 - Scoped mode, once chosen: both ports deny by default, a wrong bearer is
