@@ -28,6 +28,8 @@ control POST /api/restart - admin
 control GET /api/health - open
 control GET /api/live - open
 control GET /control - open
+control POST /control/login - open
+control POST /control/logout - admin
 engine GET /echo - open
 engine POST /settings get engine
 engine POST /settings * admin
