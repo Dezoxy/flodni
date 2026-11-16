@@ -1,6 +1,7 @@
 package jwt
 
 import (
+	"bytes"
 	"crypto"
 	"crypto/ecdsa"
 	"crypto/elliptic"
@@ -19,6 +20,7 @@ import (
 	"time"
 
 	"flodni/internal/config"
+	"flodni/internal/flog"
 )
 
 const (
@@ -660,5 +662,162 @@ func TestConfigRefusesNonASCIIAllowedEmail(t *testing.T) {
 	_, err := New(config.AuthJWT{Issuer: testIss, Audience: testAud, JWKSURL: "https://idp.example/k", Header: "H", AllowedEmails: []string{"\u212a@example.test"}})
 	if err == nil {
 		t.Fatal("accepted")
+	}
+}
+
+func TestRS256NegativeSignatures(t *testing.T) {
+	rs, rs2 := newRSA(t, "rs", 2048), newRSA(t, "rs2", 2048)
+	ec, ec2 := newEC(t, "ec"), newEC(t, "ec2")
+	v, _ := newVerifier(t, newJWKS(t, rs, rs2, ec, ec2), nil)
+	good := mint(t, rs, nil, nil)
+	parts := strings.Split(good, ".")
+	tampered := parts[0] + "." + jsonEnc(t, map[string]any{"iss": testIss, "aud": testAud, "sub": "root", "exp": epoch.Add(time.Hour).Unix()}) + "." + parts[2]
+	zero := func(n int) func([]byte) []byte { return func([]byte) []byte { return make([]byte, n) } }
+	// signed by one key, carrying another key's kid
+	swapped := func(signed, claimed *signer) string {
+		return mint(t, signed, func(h, c map[string]any) { h["kid"] = claimed.kid }, nil)
+	}
+	for name, tc := range map[string]struct{ token, want string }{
+		"valid":               {good, ""},
+		"flipped signature":   {mint(t, rs, nil, func(s []byte) []byte { s[10] ^= 1; return s }), ReasonSignature},
+		"tampered payload":    {tampered, ReasonSignature},
+		"255-byte signature":  {mint(t, rs, nil, func(s []byte) []byte { return s[:255] }), ReasonSignature},
+		"all-zero signature":  {mint(t, rs, nil, zero(256)), ReasonSignature},
+		"RSA key, other kid":  {swapped(rs, rs2), ReasonSignature},
+		"EC key, other kid":   {swapped(ec, ec2), ReasonSignature},
+		"all-zero ES256":      {mint(t, ec, nil, zero(64)), ReasonSignature},
+		"upper-case ALG only": {mint(t, ec, func(h, c map[string]any) { delete(h, "alg"); h["ALG"] = "ES256" }, nil), ReasonAlg},
+		"upper-case KID only": {mint(t, ec, func(h, c map[string]any) { delete(h, "kid"); h["KID"] = "ec" }, nil), ReasonUnknownKid},
+		"upper-case ISS only": {mint(t, ec, func(h, c map[string]any) { delete(c, "iss"); c["ISS"] = testIss }, nil), ReasonClaims},
+		"aud null":            {mint(t, ec, func(h, c map[string]any) { c["aud"] = nil }, nil), ReasonClaims},
+		"aud empty array":     {mint(t, ec, func(h, c map[string]any) { c["aud"] = []string{} }, nil), ReasonClaims},
+	} {
+		t.Run(name, func(t *testing.T) { wantReason(t, v, req(tc.token), tc.want) })
+	}
+}
+
+func TestStrictBase64RefusesStrayBits(t *testing.T) {
+	ec := newEC(t, "ec")
+	v, _ := newVerifier(t, newJWKS(t, ec), nil)
+	tk := mint(t, ec, nil, nil)
+	const alpha = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_"
+	last := tk[len(tk)-1]
+	i := strings.IndexByte(alpha, last)
+	if i&3 != 0 {
+		t.Fatalf("a 64-byte signature ends in two zero bits; got index %d", i)
+	}
+	// the same bytes decode from the changed character unless the decoder is strict
+	wantReason(t, v, req(tk[:len(tk)-1]+string(alpha[i|1])), ReasonMalformed)
+	wantReason(t, v, req(tk), "")
+}
+
+func TestTimeClaimEdges(t *testing.T) {
+	ec := newEC(t, "ec")
+	v, _ := newVerifier(t, newJWKS(t, ec), nil)
+	exp := func(val any) string { return mint(t, ec, func(h, c map[string]any) { c["exp"] = val }, nil) }
+	nbf := func(val any) string { return mint(t, ec, func(h, c map[string]any) { c["nbf"] = val }, nil) }
+	for name, tc := range map[string]struct{ token, want string }{
+		"exp year 2286":  {exp(1e10), ""},
+		"exp float":      {exp(float64(epoch.Unix()) + 3600.5), ""},
+		"exp negative":   {exp(-1), ReasonClaims},
+		"exp null":       {exp(nil), ReasonClaims},
+		"exp too large":  {exp(2e12), ReasonClaims},
+		"nbf year 2286":  {nbf(1e10), ReasonNotYetValid},
+		"nbf float past": {nbf(float64(epoch.Unix()) - 5.5), ""},
+		"nbf negative":   {nbf(-1), ReasonClaims},
+		"nbf null":       {nbf(nil), ReasonClaims},
+	} {
+		t.Run(name, func(t *testing.T) { wantReason(t, v, req(tc.token), tc.want) })
+	}
+}
+
+func TestTokenSizeCap(t *testing.T) {
+	ec := newEC(t, "ec")
+	v, _ := newVerifier(t, newJWKS(t, ec), nil)
+	big := mint(t, ec, func(h, c map[string]any) { c["pad"] = strings.Repeat("a", 20<<10) }, nil)
+	wantReason(t, v, req(big), ReasonMalformed)
+	small := mint(t, ec, func(h, c map[string]any) { c["pad"] = strings.Repeat("a", 2<<10) }, nil)
+	wantReason(t, v, req(small), "")
+	wantReason(t, v, req(strings.Repeat(".", 1<<20)), ReasonMalformed)
+}
+
+func TestRSAKeyBounds(t *testing.T) {
+	rs := newRSA(t, "rs", 2048)
+	with := func(e int64) (key, bool) {
+		j := rs.jwk()
+		j["e"] = enc(big.NewInt(e).Bytes())
+		b, _ := json.Marshal(j)
+		var k jwk
+		_ = json.Unmarshal(b, &k)
+		return k.key()
+	}
+	for _, e := range []int64{1, 2147483649} {
+		if _, ok := with(e); ok {
+			t.Errorf("e=%d accepted", e)
+		}
+	}
+	for _, e := range []int64{3, 2147483647} {
+		if _, ok := with(e); !ok {
+			t.Errorf("e=%d refused", e)
+		}
+	}
+	for _, bits := range []int{1024, 2047} {
+		weak := newRSA(t, "weak", bits)
+		if _, ok := weak.jwkKey(); ok {
+			t.Errorf("%d-bit key accepted", bits)
+		}
+	}
+	if _, ok := newRSA(t, "ok", 2048).jwkKey(); !ok {
+		t.Error("2048-bit key refused")
+	}
+}
+
+func TestFetchFailureIsLoggedByClassOnly(t *testing.T) {
+	ec := newEC(t, "ec")
+	for _, tc := range []struct{ mode, raw, class string }{
+		{"down", "", "status"},
+		{"huge", "", "size"},
+		{"raw", "not json", "format"},
+		{"raw", `{"keys":[]}`, "no usable key"},
+		{"raw", `{"keys":[{"kty":"EC","kid":"a"},{"kty":"EC","kid":"a"}]}`, "duplicate or missing kid"},
+	} {
+		f := newJWKS(t, ec)
+		f.mu.Lock()
+		f.mode, f.raw = tc.mode, tc.raw
+		f.mu.Unlock()
+		v, _ := newVerifier(t, f, func(c *config.AuthJWT) { c.JWKSURL += "/secret-path?k=secret-query" })
+		var buf bytes.Buffer
+		v.keys.log = flog.NewText(&buf)
+		wantReason(t, v, req(mint(t, ec, nil, nil)), ReasonKeysUnavailable)
+		out := buf.String()
+		if strings.Count(out, "jwks fetch failed") != 1 || !strings.Contains(out, tc.class) {
+			t.Errorf("%s: log %q lacks one line with class %q", tc.mode, out, tc.class)
+		}
+		for _, leak := range []string{"secret-path", "secret-query", f.srv.URL, "127.0.0.1"} {
+			if strings.Contains(out, leak) {
+				t.Errorf("%s: log leaks %q: %q", tc.mode, leak, out)
+			}
+		}
+	}
+	// a TLS failure: the client does not trust the test CA
+	f := newJWKS(t, ec)
+	v, _ := newVerifier(t, f, nil)
+	v.keys.client.Transport = http.DefaultTransport
+	var buf bytes.Buffer
+	v.keys.log = flog.NewText(&buf)
+	wantReason(t, v, req(mint(t, ec, nil, nil)), ReasonKeysUnavailable)
+	if !strings.Contains(buf.String(), "class=tls") || strings.Contains(buf.String(), "127.0.0.1") {
+		t.Errorf("tls: %q", buf.String())
+	}
+}
+
+func TestNumericDoesNotOverflow(t *testing.T) {
+	for _, f := range []string{"1e10", "9e11", "1800000000.75"} {
+		got, ok := numeric(json.RawMessage(f))
+		var v float64
+		_ = json.Unmarshal([]byte(f), &v)
+		if !ok || got.Unix() != int64(v) {
+			t.Errorf("%s: %v %v", f, got, ok)
+		}
 	}
 }

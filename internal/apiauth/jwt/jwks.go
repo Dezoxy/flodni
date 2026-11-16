@@ -4,13 +4,18 @@ import (
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rsa"
+	"crypto/tls"
 	"encoding/json"
 	"errors"
 	"io"
+	"log/slog"
 	"math/big"
+	"net"
 	"net/http"
 	"sync"
 	"time"
+
+	"flodni/internal/flog"
 )
 
 const (
@@ -27,6 +32,7 @@ type keyCache struct {
 	url    string
 	now    func() time.Time
 	client *http.Client
+	log    *slog.Logger
 
 	mu      sync.Mutex
 	set     map[string]key
@@ -38,7 +44,7 @@ type keyCache struct {
 }
 
 func (c *keyCache) init(url string, now func() time.Time) {
-	c.url, c.now, c.backoff = url, now, minRefresh
+	c.url, c.now, c.backoff, c.log = url, now, minRefresh, flog.Std
 	c.client = &http.Client{
 		Timeout:       fetchTimout,
 		CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
@@ -84,6 +90,8 @@ func (c *keyCache) get(kid string) (key, error) {
 		if err == nil {
 			c.set, c.fetched, c.backoff, c.next = set, now, minRefresh, now.Add(minRefresh)
 		} else {
+			// The class only: the URL (path, query) and the error text stay out of the log.
+			c.log.Warn("[Auth] jwks fetch failed", "class", errClass(err))
 			c.next = now.Add(c.backoff)
 			c.backoff = min(c.backoff*2, maxBackoff)
 		}
@@ -99,17 +107,47 @@ func (c *keyCache) get(kid string) (key, error) {
 func (c *keyCache) fetch() (map[string]key, error) {
 	resp, err := c.client.Get(c.url)
 	if err != nil {
-		return nil, err
+		return nil, classed(netClass(err))
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		return nil, errors.New("jwks: status " + resp.Status)
+		return nil, classed("status")
 	}
 	body, err := io.ReadAll(io.LimitReader(resp.Body, fetchLimit+1))
-	if err != nil || len(body) > fetchLimit {
-		return nil, errors.New("jwks: unreadable or too large")
+	if err != nil {
+		return nil, classed("network")
+	}
+	if len(body) > fetchLimit {
+		return nil, classed("size")
 	}
 	return parseJWKS(body)
+}
+
+// classed is a fetch failure known by its class alone.
+type classed string
+
+func (e classed) Error() string { return "jwks: " + string(e) }
+
+func errClass(err error) string {
+	var c classed
+	if errors.As(err, &c) {
+		return string(c)
+	}
+	return "network"
+}
+
+// netClass names a transport failure without its text, which holds the URL.
+func netClass(err error) string {
+	var cv *tls.CertificateVerificationError
+	var rh tls.RecordHeaderError
+	var ne net.Error
+	switch {
+	case errors.As(err, &cv), errors.As(err, &rh):
+		return "tls"
+	case errors.As(err, &ne) && ne.Timeout():
+		return "timeout"
+	}
+	return "network"
 }
 
 type jwk struct {
@@ -119,13 +157,13 @@ type jwk struct {
 func parseJWKS(body []byte) (map[string]key, error) {
 	var doc struct{ Keys []jwk }
 	if err := json.Unmarshal(body, &doc); err != nil {
-		return nil, err
+		return nil, classed("format")
 	}
 	set := map[string]key{}
 	seen := map[string]bool{}
 	for _, j := range doc.Keys {
 		if j.Kid == "" || seen[j.Kid] {
-			return nil, errors.New("jwks: key with no kid or a repeated kid")
+			return nil, classed("duplicate or missing kid")
 		}
 		seen[j.Kid] = true
 		if k, ok := j.key(); ok {
@@ -133,7 +171,7 @@ func parseJWKS(body []byte) (map[string]key, error) {
 		}
 	}
 	if len(set) == 0 {
-		return nil, errors.New("jwks: no usable key")
+		return nil, classed("no usable key")
 	}
 	return set, nil
 }

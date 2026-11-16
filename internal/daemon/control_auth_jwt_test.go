@@ -12,6 +12,7 @@ import (
 
 // One key per line: the config loader's comment stripper cuts a line at a second "//".
 const jwtBlock = "{\n\"issuer\":\"https://idp.example\",\n\"audience\":\"a\",\n\"jwks_url\":\"https://idp.example/k\",\n\"header\":\"H\"}"
+const jwtBlockEdited = "{\n\"issuer\":\"https://idp.example\",\n\"audience\":\"edited\",\n\"jwks_url\":\"https://idp.example/k\",\n\"header\":\"H\"}"
 const jwtBlockEvil = "{\n\"issuer\":\"https://evil.example\",\n\"audience\":\"a\",\n\"jwks_url\":\"https://evil.example/k\",\n\"header\":\"H\"}"
 
 func fileAuthJWT(t *testing.T, path string) *config.AuthJWT {
@@ -82,5 +83,28 @@ func TestSaveKeepsAuthJWTWhenOmittedOrEqual(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// A hand edit of the block that has not been picked up yet must not make every panel
+// save fail: the panel echoes the running block, which differs from the file's.
+func TestSaveAfterAHandEditEchoingTheRunningBlockKeepsTheEdit(t *testing.T) {
+	h, path, _ := controlAPIServer(t, "", "")
+	if err := os.WriteFile(path, []byte(`{"log_level":"info","auth_jwt":`+jwtBlock+`}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg := config.LoadConfig()
+	globalConfig.Store(&cfg) // the running block is jwtBlock
+	if err := os.WriteFile(path, []byte(`{"log_level":"info","auth_jwt":`+jwtBlockEdited+`}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if code, resp := doControl(h, "/api/config", `{"log_level":"debug","auth_jwt":`+jwtBlock+`}`, ""); code != http.StatusOK {
+		t.Fatalf("echoing the running block: status %d (%s), want 200", code, resp)
+	}
+	if got := fileAuthJWT(t, path); got == nil || got.Audience != "edited" {
+		t.Fatalf("the hand edit was lost: %+v", got)
+	}
+	if code, _ := doControl(h, "/api/config", `{"auth_jwt":`+jwtBlockEvil+`}`, ""); code != http.StatusForbidden {
+		t.Fatalf("a third block: status %d, want 403", code)
 	}
 }

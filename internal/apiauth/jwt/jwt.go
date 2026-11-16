@@ -38,7 +38,10 @@ const (
 	ReasonClaims          = "jwt_claims"
 )
 
-const skew = 60 * time.Second
+const (
+	skew     = 60 * time.Second
+	maxToken = 16 << 10 // bytes of header value
+)
 
 // Error carries the reason code. Its text never holds the token.
 type Error struct{ Reason string }
@@ -96,7 +99,10 @@ func (v *Verifier) Verify(r *http.Request) (Identity, error) {
 	if len(vals) != 1 {
 		return Identity{}, fail(ReasonMalformed)
 	}
-	parts := strings.Split(vals[0], ".")
+	if len(vals[0]) > maxToken {
+		return Identity{}, fail(ReasonMalformed)
+	}
+	parts := strings.SplitN(vals[0], ".", 4)
 	if len(parts) != 3 {
 		return Identity{}, fail(ReasonMalformed)
 	}
@@ -159,6 +165,9 @@ func (v *Verifier) claims(payload []byte) (Identity, error) {
 			return Identity{}, fail(ReasonClaims)
 		}
 		aud = []string{one}
+	}
+	if len(aud) == 0 { // null or []
+		return Identity{}, fail(ReasonClaims)
 	}
 	found := false
 	for _, a := range aud {
@@ -227,7 +236,7 @@ func numeric(raw json.RawMessage) (time.Time, bool) {
 	if string(raw) == "null" || json.Unmarshal(raw, &f) != nil || f < 0 || f > 1e12 {
 		return time.Time{}, false
 	}
-	return time.Unix(0, int64(f*1e9)), true
+	return time.Unix(int64(f), 0), true
 }
 
 // b64 decodes strict unpadded base64url: only the URL alphabet (Go's decoder
