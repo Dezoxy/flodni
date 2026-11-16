@@ -900,3 +900,49 @@ func TestEngineFailsClosedWhenTheStoreIsMissing(t *testing.T) {
 		t.Errorf("router alone: %d, want 401", rec.Code)
 	}
 }
+
+// Flodni's own calls to its engine (the in-process identity) are not named in the log: in
+// scoped mode every library call would otherwise log a write that no caller made.
+func TestEngineDoesNotLogTheInternalIdentity(t *testing.T) {
+	newEngineRun(t) // scoped Auth, so the router builds its scope middleware
+	onScopePass = nil
+	buf := captureStdLog(t)
+	route := newRoute()
+	route.POST("/probe-write", func(c *gin.Context) { c.Status(200) })
+	for _, tc := range []struct {
+		name     string
+		id       apiauth.Identity
+		wantLogs bool
+	}{
+		{"a named caller", apiauth.Identity{Name: "probe", Scopes: apiauth.InternalIdentity().Scopes}, true},
+		{"the in-process identity", apiauth.InternalIdentity(), false},
+	} {
+		buf.Reset()
+		req := httptest.NewRequest("POST", "/probe-write", nil)
+		req = req.WithContext(apiauth.WithIdentity(req.Context(), tc.id))
+		rec := httptest.NewRecorder()
+		route.ServeHTTP(rec, req)
+		if rec.Code != 200 {
+			t.Fatalf("%s: status %d", tc.name, rec.Code)
+		}
+		if got := strings.Contains(buf.String(), "[Auth] token"); got != tc.wantLogs {
+			t.Errorf("%s: logged=%v, want %v: %q", tc.name, got, tc.wantLogs, buf.String())
+		}
+	}
+}
+
+func TestAuthLine(t *testing.T) {
+	open, _ := apiauth.Load(apiauth.LoadOptions{})
+	legacy, _ := apiauth.Load(apiauth.LoadOptions{APIToken: "x"})
+	for name, tc := range map[string]struct {
+		t    *apiauth.Tokens
+		want string
+	}{
+		"closed": {nil, "closed"}, "open": {open, "off"}, "legacy": {legacy, "Bearer-token"},
+		"scoped": {authtest.New(t).Tokens, "Scoped-token"},
+	} {
+		if got := authLine(tc.t); !strings.Contains(got, tc.want) {
+			t.Errorf("%s: %q does not say %q", name, got, tc.want)
+		}
+	}
+}

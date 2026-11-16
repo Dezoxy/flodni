@@ -54,6 +54,33 @@ survives a restart. A `config.json` with an unknown or repeated `auth_*` key, or
 a null `auth_tokens_file`, stops the start too. The CI secret scan has a rule for the token shape
 (`fl_[A-Za-z0-9_-]{43}`).
 
+A scoped token that leaks costs only its caller's scopes: a `webhook` token (the
+only kind that may ride in a URL) can forge a play event and nothing else, a
+`metrics` token reads metrics, a `library` token files and removes titles, and
+only `admin` can write the configuration, restart or stop the process. Give each
+caller its own token, keep one `admin` token offline as the break-glass
+credential, and rotate by adding the new entry, moving the caller and removing the
+old entry. Tokens are plaintext at the callers (a container's environment,
+`docker inspect`, the media server's stored webhook URL, shell history); Flodni
+keeps only hashes. `flodni_auth_refusals_total{route,scope,reason}` counts every
+refusal, so a run of guesses shows. A `library` token reaches the engine's add
+through Flodni, which accepts only an anchored `magnet:` hash for it; the
+in-process identity Flodni uses for its own engine calls is `admin` on the engine.
+
+The control panel can sit behind an identity-aware proxy (`auth_jwt`): a verified
+assertion is `admin` on the control port, checked for algorithm (RS256 or ES256,
+chosen by the key), issuer, audience and expiry, and an assertion can be replayed
+until it expires; a revoked key stays trusted until the next fetch, up to 24
+hours. The audience must be the application's own. A request authenticated by a
+cookie or the proxy's header, not by a bearer token, needs an `Origin` of the
+same host and port, `Sec-Fetch-Site: same-origin` when present and a JSON content
+type, and the engine port never reads either. The panel's session cookie
+(`flodni_session`) is `HttpOnly` and `SameSite=Strict`, but cookies ignore ports:
+the browser sends it to every port of the hostname, so run no other service you do
+not trust on the panel's hostname. `GET /control` answers
+`Content-Security-Policy: frame-ancestors 'none'` and `X-Frame-Options: DENY`, so
+another site cannot frame the panel.
+
 With `api_token` alone, the same token also covers GoStorm's own server on port 8090 (torrent
 control, settings, `/stream`, shutdown): every route except `GET /echo`, the
 readiness probe, needs the `Authorization: Bearer` header, and there is no

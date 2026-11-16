@@ -29,6 +29,10 @@ var (
 	// engine's own APIToken decides (open, or legacy).
 	Auth *apiauth.Tokens
 
+	// AuthConfigured says SetAuth ran: the daemon decided the credentials. Start refuses
+	// to run without it, so a start that never configured auth cannot serve open.
+	AuthConfigured bool
+
 	// AuthClosed says the daemon handed over no store (SetAuth(nil)): the engine then
 	// answers nothing instead of falling back to APIToken or to open.
 	AuthClosed bool
@@ -59,6 +63,21 @@ func authTokens() *apiauth.Tokens {
 	}
 	t, _ := apiauth.Load(apiauth.LoadOptions{APIToken: APIToken}) // api_token alone cannot fail
 	return t
+}
+
+// authLine is the engine's one start-up line about auth. A closed engine (no store)
+// says so loudly: it answers 503 to everything.
+func authLine(t *apiauth.Tokens) string {
+	if t == nil {
+		return "[Auth] the engine is closed: no credential store was set, every request answers 503"
+	}
+	switch t.Mode() {
+	case apiauth.ModeScoped:
+		return "Scoped-token auth enabled (all routes except GET /echo)"
+	case apiauth.ModeLegacyToken:
+		return "Bearer-token auth enabled (all routes except GET /echo)"
+	}
+	return "Auth is off: no api_token and no tokens file (the engine is open)"
 }
 
 // scopeMiddleware is the router's half. The mode is fixed here, at construction: a

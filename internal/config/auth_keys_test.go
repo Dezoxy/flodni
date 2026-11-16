@@ -150,6 +150,15 @@ func TestLoadConfigRefusesAnyUnknownKeyContainingAuth(t *testing.T) {
 	}
 }
 
+// A lone re-cased auth_jwt key folds onto the real field in encoding/json; it is refused
+// all the same, never read as the block.
+func TestLoadConfigRefusesALoneRecasedAuthJWT(t *testing.T) {
+	writeFile(t, `{"Auth_JWT":{"issuer":"https://i.example","audience":"a","jwks_url":"https://i.example/k","header":"H"}}`)
+	if _, err := LoadConfig(); err == nil {
+		t.Error("a re-cased auth_jwt loaded")
+	}
+}
+
 // api_token gets the duplicate, fold and null refusals: the last duplicate wins in
 // encoding/json, so {"api_token":"x","Api_Token":""} would start with no token.
 func TestLoadConfigProtectsAPIToken(t *testing.T) {
@@ -158,7 +167,7 @@ func TestLoadConfigProtectsAPIToken(t *testing.T) {
 		"case variant":   `{"api_token":"x","Api_Token":""}`,
 		"upper":          `{"API_TOKEN":"x"}`,
 		"null":           `{"api_token":null}`,
-		"escaped repeat": `{"api_token":"x","api_token":""}`,
+		"escaped repeat": `{"api_token":"x","api\u005ftoken":""}`,
 		"kelvin variant": `{"api_toKen":"x"}`,
 	} {
 		t.Run(name, func(t *testing.T) {
@@ -187,7 +196,8 @@ func TestLoadConfigDecodesAuthJWTStrictly(t *testing.T) {
 		"case variant":      `{` + base + `,"Audience":"b"}`,
 		"emails then empty": `{` + base + `,"allowed_emails":["a@x.example"],"Allowed_Emails":[]}`,
 		"unknown key":       `{` + base + `,"extra":1}`,
-		"escaped repeat":    `{` + base + `,"audience":"b"}`,
+		"escaped repeat":    `{` + base + `,"aud\u0069ence":"b"}`,
+		"lone re-cased key": `{"Issuer":"https://i.example","audience":"a","jwks_url":"https://i.example/k","header":"H"}`,
 	} {
 		t.Run(name, func(t *testing.T) {
 			writeFile(t, `{"auth_jwt":`+blk+`}`)

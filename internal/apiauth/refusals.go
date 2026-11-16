@@ -18,6 +18,7 @@ const (
 	ReasonHost            = "host"
 	ReasonOrigin          = "origin"
 	ReasonCrossSite       = "cross_site"
+	ReasonClosed          = "closed" // the gate was built with no credential store: it answers 503
 )
 
 // Fixed route labels besides the table's own patterns.
@@ -48,7 +49,7 @@ type RefusalCount struct {
 var knownReasons = func() map[string]bool {
 	m := map[string]bool{}
 	for _, r := range []string{ReasonMissing, ReasonInvalid, ReasonScope, ReasonQueryNotAllowed, ReasonBody, ReasonCSRF,
-		ReasonSession, ReasonHost, ReasonOrigin, ReasonCrossSite,
+		ReasonSession, ReasonHost, ReasonOrigin, ReasonCrossSite, ReasonClosed,
 		"jwt_malformed", "jwt_alg", "jwt_unknown_kid", "jwt_keys_unavailable", "jwt_signature", "jwt_issuer",
 		"jwt_audience", "jwt_expired", "jwt_not_yet_valid", "jwt_claims"} {
 		m[r] = true

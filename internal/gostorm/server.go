@@ -1,6 +1,7 @@
 package server
 
 import (
+	"errors"
 	"log/slog"
 	"net"
 	"net/http"
@@ -27,6 +28,7 @@ func SetAPIToken(token string, logger *slog.Logger) {
 // every refusal. Call it before Start.
 func SetAuth(tokens *apiauth.Tokens, observe apiauth.Observer) {
 	web.Auth = tokens
+	web.AuthConfigured = true
 	web.AuthClosed = tokens == nil // no store: the engine answers nothing
 	web.AuthObserver = observe
 }
@@ -46,7 +48,20 @@ func SetAllowedHosts(hosts []string) {
 	web.AllowedHosts = hosts
 }
 
+// authReady refuses a start the daemon did not configure: SetAPIToken alone does not say
+// what the daemon decided, and the engine's own zero state must never serve.
+func authReady() error {
+	if !web.AuthConfigured {
+		return errors.New("SetAuth was not called before Start: the engine will not serve on its own zero state")
+	}
+	return nil
+}
+
 func Start() {
+	if err := authReady(); err != nil {
+		log.TLogln("[Auth] refusing to start: " + err.Error())
+		os.Exit(1)
+	}
 	settings.InitSets(settings.Args.RDB, settings.Args.SearchWA)
 	// https checks
 	if settings.Args.Ssl {
