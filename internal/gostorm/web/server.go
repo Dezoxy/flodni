@@ -56,7 +56,7 @@ func newServer(addr string, h http.Handler) *http.Server {
 // is a script, so no page on another origin has a reason to read a response.
 func newRoute() *gin.Engine {
 	route := gin.New()
-	route.Use(log.WebLogger(), blocker.Blocker(), gin.Recovery(), location.Default())
+	route.Use(log.WebLogger(), blocker.Blocker(), log.Recovery(), location.Default())
 	auth.SetupAuth(route)
 	if APIToken != "" {
 		// Requests reaching a handler carried the token (apiauth.GoStorm gates them).

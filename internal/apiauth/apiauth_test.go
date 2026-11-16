@@ -1,8 +1,11 @@
 package apiauth
 
 import (
+	"bytes"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 )
 
@@ -120,5 +123,34 @@ func TestGoStorm(t *testing.T) {
 				t.Errorf("WWW-Authenticate = %q, want Bearer", rec.Header().Get("WWW-Authenticate"))
 			}
 		})
+	}
+}
+
+// Refusal lines quote the path (%q), so a control character in it cannot forge
+// or split a log line, and carry no query.
+func TestRefusalLinesQuotePath(t *testing.T) {
+	var buf bytes.Buffer
+	logger := slog.New(slog.NewTextHandler(&buf, nil))
+	next := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {})
+
+	// 401: a token is set and none presented.
+	req := httptest.NewRequest(http.MethodGet, "/api/x%0Aforged?token=SECRET", nil)
+	Middleware(tok, logger, next).ServeHTTP(httptest.NewRecorder(), req)
+	// 403: open port, cross-origin.
+	req = httptest.NewRequest(http.MethodPost, "/api/y%0Aforged?token=SECRET", nil)
+	req.Header.Set("Origin", "https://evil.example")
+	Middleware("", logger, next).ServeHTTP(httptest.NewRecorder(), req)
+
+	out := buf.String()
+	if strings.Count(out, "\n") != 2 {
+		t.Errorf("want two log lines, got %q", out)
+	}
+	for _, want := range []string{`401 GET \"/api/x\\nforged\"`, `403 cross-origin POST \"/api/y\\nforged\"`} {
+		if !strings.Contains(out, want) {
+			t.Errorf("missing %s in %q", want, out)
+		}
+	}
+	if strings.Contains(out, "SECRET") {
+		t.Errorf("query token in log: %q", out)
 	}
 }

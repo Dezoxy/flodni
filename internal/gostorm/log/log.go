@@ -5,8 +5,12 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"net/http"
 	"os"
+	"runtime/debug"
 	"strings"
+
+	"flodni/internal/redact"
 
 	"github.com/gin-gonic/gin"
 )
@@ -65,6 +69,24 @@ func WebLogger() gin.HandlerFunc {
 			path,
 			string(body),
 		)
-		WebLogln(logStr)
+		// The query can hold ?token= and a body can hold a link: nothing leaves raw.
+		WebLogln(redact.String(logStr))
+	}
+}
+
+// Recovery answers 500 for a panicking handler and logs the panic value, a
+// redacted method and path and the stack. gin.Recovery dumps the request line
+// and every header (masking only Authorization), which would print a Cookie, the
+// proxy JWT header and a /stream link, so this logs no header and no query.
+func Recovery() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		defer func() {
+			if r := recover(); r != nil {
+				TLogln(redact.String(fmt.Sprintf("[Recovery] panic: %v | %s %q\n%s",
+					r, c.Request.Method, c.Request.URL.Path, debug.Stack())))
+				c.AbortWithStatus(http.StatusInternalServerError)
+			}
+		}()
+		c.Next()
 	}
 }

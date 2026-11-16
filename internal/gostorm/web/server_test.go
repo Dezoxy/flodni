@@ -5,6 +5,7 @@ import (
 	"flodni/internal/gostorm/web/api"
 	"fmt"
 	"github.com/gin-gonic/gin"
+	stdlog "log"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
@@ -71,6 +72,74 @@ func TestNewRouteSetsTokenEnforcedKey(t *testing.T) {
 		route.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/probe", nil))
 		if want := tok != ""; rec.Body.String() != fmt.Sprint(want) {
 			t.Errorf("token %q: key = %s, want %v", tok, rec.Body.String(), want)
+		}
+	}
+}
+
+// A panicking handler on the engine router answers 500 and logs the panic with
+// a method and path only: no header, cookie, proxy JWT or query token.
+func TestRoutePanicLogsNoRequestSecrets(t *testing.T) {
+	var buf bytes.Buffer
+	prevOut, prevFlags := stdlog.Writer(), stdlog.Flags()
+	stdlog.SetOutput(&buf)
+	t.Cleanup(func() { stdlog.SetOutput(prevOut); stdlog.SetFlags(prevFlags) })
+
+	route := newRoute()
+	route.GET("/boom", func(c *gin.Context) { panic("handler exploded") })
+	req := httptest.NewRequest(http.MethodGet, "/boom?token=SECRETQUERY&link=x", nil)
+	req.Header.Set("Cookie", "flodni_session=SECRETCOOKIE")
+	req.Header.Set("Authorization", "Bearer SECRETBEARER")
+	req.Header.Set("X-Forwarded-Jwt", "SECRETJWT")
+	rec := httptest.NewRecorder()
+	route.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusInternalServerError {
+		t.Fatalf("status %d, want 500", rec.Code)
+	}
+	out := buf.String()
+	if !strings.Contains(out, "handler exploded") || !strings.Contains(out, `GET "/boom"`) {
+		t.Errorf("panic not logged with method and path: %q", out)
+	}
+	for _, s := range []string{"SECRET", "Cookie", "flodni_session", "Authorization", "X-Forwarded-Jwt"} {
+		if strings.Contains(out, s) {
+			t.Errorf("log holds %q: %q", s, out)
+		}
+	}
+}
+
+// Sweep: requests carrying ?token=SECRET through the engine's gate (refused and
+// panicking) leave no token in the gate's log or the panic log.
+func TestEngineLogsHoldNoToken(t *testing.T) {
+	var gateBuf, stdBuf bytes.Buffer
+	prevLogger, prevToken := Logger, APIToken
+	Logger = slog.New(slog.NewTextHandler(&gateBuf, nil))
+	APIToken = "right-token"
+	prevOut := stdlog.Writer()
+	stdlog.SetOutput(&stdBuf)
+	t.Cleanup(func() { Logger, APIToken = prevLogger, prevToken; stdlog.SetOutput(prevOut) })
+
+	route := newRoute()
+	route.GET("/boom", func(c *gin.Context) { panic("boom") })
+	srv := newServer("127.0.0.1:0", route)
+	for _, target := range []string{
+		"/torrents?token=SECRET", "/boom?token=right-token", "/boom?access_token=SECRET",
+	} {
+		req := httptest.NewRequest(http.MethodGet, target, nil)
+		req.Host = "x.example"
+		req.Header.Set("Origin", "https://evil.example")
+		srv.Handler.ServeHTTP(httptest.NewRecorder(), req)
+	}
+	// Authorized (header) panic path, query token present.
+	req := httptest.NewRequest(http.MethodGet, "/boom?token=SECRET", nil)
+	req.Header.Set("Authorization", "Bearer right-token")
+	srv.Handler.ServeHTTP(httptest.NewRecorder(), req)
+
+	for name, out := range map[string]string{"gate": gateBuf.String(), "panic": stdBuf.String()} {
+		if out == "" {
+			t.Errorf("%s log is empty", name)
+		}
+		if strings.Contains(out, "SECRET") || strings.Contains(out, "right-token") {
+			t.Errorf("%s log holds a token: %q", name, out)
 		}
 	}
 }

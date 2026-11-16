@@ -147,6 +147,17 @@ The tracker scrape has its own cleaner for what a tracker sends back. Not covere
 of code that does not go through these paths, such as a new `log` call that
 prints a link directly; the redactor is a net, not a license to log URLs.
 
+The API token is kept out of the logs the same way. The redactor masks the
+value of every `token=` and `access_token=` query parameter anywhere in a
+string (`token=<redacted>`) and the value of an `Authorization`, `Cookie` or
+`Set-Cookie` header line. The engine's request log line goes through it. The
+engine router no longer uses `gin.Recovery`, which dumps the request line and
+every header except `Authorization`, so it would print the cookie, a proxy
+header and a `/stream` link: a panic now logs the panic value, a quoted method
+and path and the stack, never a header or a query, and answers 500. The auth
+gate's refusal lines quote the path with `%q` and carry no query. What a reverse
+proxy in front logs is outside Flodni.
+
 The repository holds no secrets; `config.json` is ignored by git and
 `config.json.example` carries placeholders. `config.json` holds `api_token` and the Plex token in clear text: a save from the panel keeps the file's existing permission bits (a new file is created 0600), so keep it unreadable to other users. `GET /api/config` returns neither secret; the panel shows only whether a Plex token is set and where it comes from, and a save with the field empty keeps the stored one (the environment's is never written to the file). Changing `plex.url` needs the token typed again, and on an open port neither `plex.url` nor `plex.token` can be changed through the API, because the stored token is sent to whatever host the URL names. Or pass the secrets as `FLODNI_API_TOKEN` and `FLODNI_PLEX_TOKEN` instead. CI runs gitleaks on the full
 history, and GitHub secret scanning with push protection is enabled.
