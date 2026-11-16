@@ -67,6 +67,11 @@ type Config struct {
 	// except the static panel page (see internal/apiauth). Empty: no auth.
 	// FLODNI_API_TOKEN overrides it. GET /api/config never returns it.
 	APIToken string `json:"api_token"`
+	// AuthTokensFile is the path of the scoped-token file (ADR 0004, see
+	// internal/apiauth). Set, both servers use scoped mode; api_token must then be
+	// unset or the daemon refuses to start. FLODNI_AUTH_TOKENS_FILE overrides it.
+	// Read once at start; Flodni never writes the file.
+	AuthTokensFile string `json:"auth_tokens_file"`
 	// AllowedHosts, when non-empty, makes both servers refuse (403) a request whose
 	// Host hostname is not listed: the defence against DNS rebinding (see
 	// internal/apiauth). IP literals, localhost and the machine's own hostname are
@@ -502,6 +507,9 @@ func (c *Config) applyEnvOverrides() {
 	}
 	if v := os.Getenv("FLODNI_API_TOKEN"); v != "" {
 		c.APIToken = v
+	}
+	if v := os.Getenv("FLODNI_AUTH_TOKENS_FILE"); v != "" {
+		c.AuthTokensFile = v
 	}
 	if v := os.Getenv("MKV_PROXY_ALLOWED_HOSTS"); v != "" {
 		c.AllowedHosts = strings.Split(v, ",")

@@ -3,6 +3,8 @@ package daemon
 import (
 	"sync"
 	"sync/atomic"
+
+	"flodni/internal/apiauth"
 )
 
 // App holds the process-wide read-path state that the FUSE handle, the pump, the
@@ -24,6 +26,10 @@ type App struct {
 	// Empty means the port is open. Never read gc().APIToken to decide that. It is read
 	// once in Run() and shared by the auth middleware and the confirm gate (apiTokenSet).
 	controlToken string
+
+	// auth is the token store decided at start-up (open, legacy_token or scoped). The
+	// gate that enforces it is a later step; today it feeds the startup report.
+	auth *apiauth.Tokens
 
 	// startup collects the startup stages and emits the one [Startup] report.
 	startup *startupReporter

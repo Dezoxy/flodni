@@ -89,6 +89,51 @@ never affected. The pages stay valid because a file's inode number comes
 from its torrent file (hash and index), so a replacement release has another
 inode and its own cache.
 
+### Scoped tokens (`auth_tokens_file`)
+
+One shared `api_token` opens every route. A tokens file gives each caller its
+own token with only the scopes it needs, so a leaked webhook URL cannot write
+the configuration. The file holds names, scopes and SHA-256 hashes, never a
+token; it is read once at start and Flodni never writes it.
+
+Make a token and its entry, offline (no daemon, no file written):
+
+```sh
+flodni auth new-token --name webhook --scopes webhook
+```
+
+Line 1 of stdout is the token, shown once: give it to the caller. Line 2 is the
+entry; add it to the `tokens` array of the file:
+
+```json
+{"tokens": [{"name": "webhook", "scopes": ["webhook"], "sha256": "<64 hex characters>"}]}
+```
+
+Then set `auth_tokens_file` in `config.json` (or `FLODNI_AUTH_TOKENS_FILE`, which
+wins) to the file's path and restart. A token is `fl_` plus 43 characters. A
+name matches `[a-z0-9][a-z0-9_-]{0,31}` (`internal` is reserved). Scopes are
+`admin`, `engine`, `library`, `metrics`, `read`, `scrape`, `upload` and
+`webhook`; `admin` implies all the others. To rotate, add the new entry, move the
+caller to the new token, remove the old entry and restart. Keep one `admin`
+token offline as a break-glass credential.
+
+Flodni refuses to start, and never falls back to an open port, when: the file
+cannot be read or parsed, has an unknown field or trailing data, is over 64 KiB,
+or holds no token, more than 64, an unknown scope, an entry without scopes, a
+repeated name or hash, a hash that is not 64 lower-case hex characters or is the
+hash of the empty string, or a bad or reserved name; when `api_token` is also set
+(remove it: there is no alias); when `auth_jwt` is set without a tokens file; and
+when `gostorm_url` is not a loopback address. A file writable by group or others
+only logs a warning. `GET /api/startup` and the `[Startup] report` line gain an
+`auth` section (`mode` of `open`, `legacy_token` or `scoped`, the token count, the
+scopes in use, and `jwt`) with no name, hash or path. With only `api_token` set,
+behaviour is as before.
+
+**Status:** this release loads, validates and reports the file. The gate that
+enforces the scopes on both ports is a following step of the same release, so
+until it lands a start with `auth_tokens_file` logs a warning that it is not
+enforced yet.
+
 The command-line paths (the entrypoint's `FLODNI_SOURCE_PATH` and
 `FLODNI_MOUNT_PATH`) win over `physical_source_path` and `fuse_mount_path` in
 `config.json`; a different value there is logged and overridden.
