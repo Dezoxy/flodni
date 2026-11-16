@@ -71,8 +71,8 @@ the next start. Defaults 1, 1 and 0, pinned by a test.
 `DisableSplice`. Startup-only. Off is the behaviour today.
 
 **Kernel readahead is host policy.** Flodni never writes sysfs, in any mode. The
-mount's BDI is observed and logged, and the value exposed as a gauge (a separate
-change); a deployment that wants a different readahead sets it itself, with
+mount's BDI id is logged once at start and its `read_ahead_kb` is exposed as the
+gauge `flodni_fuse_read_ahead_bytes`; a deployment that wants a different readahead sets it itself, with
 the privileges it already has. This record does not decide a value.
 
 **Dentry invalidation is required before a deployment relies on a longer entry

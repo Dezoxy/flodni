@@ -875,7 +875,12 @@ symlinks from a real filesystem; kept for correctness), and step 7 last.
    id once at start and exposes `read_ahead_kb` as the gauge
    `flodni_fuse_read_ahead_bytes` (observe only, built), so the host can tune it
    and the effect can be seen. The TTLs and splice come only as config options
-   with defaults unchanged, decided in an ADR with numbers.
+   with defaults unchanged: the ADR is
+   [0005](architecture/decisions/0005-fuse-timeouts-splice-readahead.md); the
+   options exist (`attr_timeout_seconds`, `entry_timeout_seconds`,
+   `fuse_disable_splice`, startup-only, a timeout outside 0 to 60 s refuses the
+   start), defaults unchanged. A TTL above 1 s warns at start until kernel dentry
+   invalidation is built. Raising them is for the deployment to A/B with numbers.
 
 Not needed: the cold-open wake grace (`StartWake` exists), disabling WebTorrent
 (already off), and the TV-sync duplicate-name fix (no syncer in this tree).
