@@ -761,6 +761,45 @@ designed, not built.
     panel saves write one value per line and are unaffected. Designed, not
     built.
 
+## Authentication (v0.3.0)
+
+Scoped tokens, a hashed token file and a panel sign-in that needs no token in
+the browser. Design: [ADR 0004](architecture/decisions/0004-scoped-authentication.md).
+With no token configured, behaviour stays exactly as v0.2.6. All steps are
+designed, not built.
+
+1. **One route-to-scope table and a registrar.** Every route on both servers
+   gets a scope in one table (unknown means `admin`), the control mux is built
+   through a registrar that records its patterns, and `GET /api/live` is added.
+   A test fails on any route without a scope, and a hand-written golden file
+   catches a silent change. No enforcement yet; ADR 0004. Designed, not built.
+2. **The token file, its loader and `flodni auth new-token`.** JSON with names,
+   scopes and SHA-256 hashes, read once at start and refused if anything is
+   wrong (never open mode); the CLI prints a token once and the entry to add;
+   the `[Startup] report` gains an additive `auth` section. ADR 0004. Designed,
+   not built.
+3. **Enforce scopes on both ports.** Hash lookup in constant time, deny by
+   default, `?token=` on the webhook routes only and stripped before any
+   handler or log, the engine's `action` read for `/settings` and `/torrents`,
+   the in-process secret for Flodni's own engine calls, `api_token` kept as an
+   `admin` token, and `flodni_auth_refusals_total{route,scope,reason}`. The
+   scope matrix runs on both ports. ADR 0004. Designed, not built.
+4. **Keep the query token out of every log.** A `token=` rule in the redactor,
+   the engine's request logger routed through it, and a test that no log, metric
+   or refusal line holds a token. ADR 0004. Designed, not built.
+5. **Verify a proxy-signed identity for the panel.** Optional `auth_jwt`: RS256
+   and ES256 only, issuer, audience and expiry checked, keys from the provider's
+   JWKS with a cache, a refresh on an unknown key id and a fail-closed outage.
+   Standard-library verifier. ADR 0004. Designed, not built.
+6. **A panel sign-in cookie.** `POST /control/login` with an `admin` token sets
+   an HttpOnly, SameSite=Strict, HMAC-signed session cookie; logout; the panel
+   stops keeping a token in local storage; the Origin check applies to cookie
+   and proxy-header requests. ADR 0004. Designed, not built.
+7. **Documentation and the threat model.** README, `SECURITY.md`, the changed
+   threat-model rows and three new ones, an end-to-end scoped start, and the
+   ADR moved to Accepted. The owner then moves each caller to its own token and
+   removes `api_token`. ADR 0004. Designed, not built.
+
 ## Done
 
 - 2026-11-11, trim step 1: telemetry, the update check, the MCP server and
