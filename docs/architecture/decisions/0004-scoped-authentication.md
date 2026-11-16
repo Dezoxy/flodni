@@ -398,12 +398,11 @@ JSON, because the config already is:
 - **Startup-only settings.** In scoped mode `api_token`, `auth_tokens_file`,
   `auth_jwt` and `auth_panel_https` are read at start and never changed
   through the API. A `POST /api/config` whose body would change any of them
-  answers 403 and writes nothing; a save that does not touch them keeps the
-  values the running process **last loaded** (at start, or by the previous
-  save), not a posted value, the environment's, or a hand edit made since;
-  outside scoped mode a save writes back the file's own current value of
-  `auth_tokens_file` and `auth_jwt`, re-read at save time, so a hand edit
-  survives it, as a save keeps `api_token` today. This closes a persistence
+  answers 403 and writes nothing; a save writes back
+  the file's **current** value of `auth_tokens_file`, `auth_jwt` and
+  `auth_panel_https`, re-read at save time, in every mode, so a hand edit made
+  since the start survives a save (a post that echoes the running value or the
+  file's is accepted; any other value is refused). This closes a persistence
   path the existing gate has: with a token enforced, a posted `api_token` is
   written to `config.json`, and a restart (which an `admin` may also request)
   then activates it, so a leaked admin token, a 12-hour cookie or an admitted

@@ -68,7 +68,7 @@ func handleConfig(w http.ResponseWriter, r *http.Request) {
 		// The other modes keep the file's own values, as before.
 		scoped := app.auth.Mode() == apiauth.ModeScoped
 		if scoped {
-			if refuseScopedSave(w, r, &newCfg) {
+			if refuseScopedSave(w, r, &newCfg, &onDisk) {
 				return
 			}
 		} else {
@@ -175,24 +175,26 @@ func handleConfig(w http.ResponseWriter, r *http.Request) {
 // auth_tokens_file, auth_jwt and auth_panel_https are read at start and never changed
 // through the API, so a leaked admin token, a session or an admitted proxy user cannot
 // plant a credential, or their own issuer, that outlives the owner's rotation and a
-// restart. A post that would change one answers 403 and writes nothing. A post that
-// leaves them alone keeps the values of the copy read at start (gc()), never a re-read
-// of the file, so a hand edit made since then does not ride along with someone's save.
+// restart. A post that names one is refused (403, nothing written) unless it equals the
+// running value or the file's current one (the panel echoes the running one, which a hand
+// edit not yet picked up makes differ from the file's). Either way the file's current
+// value (onDisk, the read the 409 check already made) is written back, as in the other
+// modes, so a hand edit made since the start survives a save. api_token must stay unset.
 // A live gostorm_url that is not loopback is refused too: the next start would
 // refuse it. It reports whether it answered.
-func refuseScopedSave(w http.ResponseWriter, r *http.Request, newCfg *config.Config) bool {
+func refuseScopedSave(w http.ResponseWriter, r *http.Request, newCfg *config.Config, onDisk *config.Config) bool {
 	run := gc()
 	switch {
 	case newCfg.APIToken != "":
 		refuseOpenPort(w, r, http.StatusForbidden, "api_token is startup-only in scoped mode; it must stay unset (remove it from config.json)")
 		return true
-	case newCfg.AuthTokensFile != "" && newCfg.AuthTokensFile != run.FileAuthTokensFile() && newCfg.AuthTokensFile != run.AuthTokensFile:
+	case newCfg.AuthTokensFile != "" && newCfg.AuthTokensFile != onDisk.FileAuthTokensFile() && newCfg.AuthTokensFile != run.AuthTokensFile:
 		refuseOpenPort(w, r, http.StatusForbidden, "auth_tokens_file is startup-only; edit config.json, then restart flodni")
 		return true
-	case newCfg.AuthJWT != nil && !newCfg.AuthJWT.Same(run.AuthJWT):
+	case newCfg.AuthJWT != nil && !newCfg.AuthJWT.Same(onDisk.AuthJWT) && !newCfg.AuthJWT.Same(run.AuthJWT):
 		refuseOpenPort(w, r, http.StatusForbidden, "auth_jwt is startup-only; edit config.json")
 		return true
-	case newCfg.AuthPanelHTTPS != run.AuthPanelHTTPS:
+	case newCfg.AuthPanelHTTPS != onDisk.AuthPanelHTTPS && newCfg.AuthPanelHTTPS != run.AuthPanelHTTPS:
 		refuseOpenPort(w, r, http.StatusForbidden, "auth_panel_https is startup-only; edit config.json, then restart flodni")
 		return true
 	}
@@ -208,9 +210,9 @@ func refuseScopedSave(w http.ResponseWriter, r *http.Request, newCfg *config.Con
 		}
 	}
 	newCfg.APIToken = run.ResolveAPIToken("")
-	newCfg.AuthTokensFile = run.FileAuthTokensFile()
-	newCfg.AuthJWT = run.AuthJWT
-	newCfg.AuthPanelHTTPS = run.AuthPanelHTTPS
+	newCfg.AuthTokensFile = onDisk.FileAuthTokensFile()
+	newCfg.AuthJWT = onDisk.AuthJWT
+	newCfg.AuthPanelHTTPS = onDisk.AuthPanelHTTPS
 	return false
 }
 

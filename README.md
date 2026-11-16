@@ -265,11 +265,10 @@ on a webhook still falls through to the query token.
 In scoped mode `api_token`, `auth_tokens_file`, `auth_jwt` and
 `auth_panel_https` are startup-only: `POST /api/config` answers 403 (and writes
 nothing) to a change, as it does to a non-loopback `gostorm_url`. A save
-that leaves them alone writes back the values the running process last loaded (at
-start, or by the previous save), never a posted value, the environment's, or a
-hand edit made since; outside scoped mode a save writes back the file's own
-current value of `auth_tokens_file` and `auth_jwt`, so a hand edit survives it.
-Flodni's own calls to its engine go in-process, with no credential and no URL.
+writes back the file's current value of `auth_tokens_file`, `auth_jwt` and
+`auth_panel_https`, in every mode, so a hand edit made since the start survives
+it; a post may echo either the running value or the file's, and one that matches
+neither is refused. `api_token` must stay unset in scoped mode. Flodni's own calls to its engine go in-process, with no credential and no URL.
 
 #### Panel sign-in (session cookie)
 
