@@ -108,8 +108,9 @@ var authRefusals apiauth.Refusals
 
 // newControlGate wraps the control routes in the gate main serves: the credential
 // store of the start, the router's own pattern for each request, the optional proxy
-// assertion, the Host allowlist and the refusal counter.
-func newControlGate(routes *apiauth.Registrar, tokens *apiauth.Tokens, verifier apiauth.JWTVerifier, cfg *config.Config) http.Handler {
+// assertion, the Host allowlist and the refusal counter. extra adds options, such as the
+// session cookie (apiauth.WithCookie).
+func newControlGate(routes *apiauth.Registrar, tokens *apiauth.Tokens, verifier apiauth.JWTVerifier, cfg *config.Config, extra ...apiauth.Option) http.Handler {
 	opts := []apiauth.Option{
 		apiauth.WithTokens(tokens),
 		apiauth.WithPattern(routes.Pattern),
@@ -120,7 +121,7 @@ func newControlGate(routes *apiauth.Registrar, tokens *apiauth.Tokens, verifier 
 	if verifier != nil {
 		opts = append(opts, apiauth.WithJWT(verifier))
 	}
-	return apiauth.Middleware("", logger, routes, opts...)
+	return apiauth.Middleware("", logger, routes, append(opts, extra...)...)
 }
 
 // engineHTTPClient is the client of Flodni's own calls to its engine. In scoped mode
