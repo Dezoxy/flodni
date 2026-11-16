@@ -78,6 +78,19 @@ func newPumpSim(t *testing.T, path string, size, resumeAt int64, fetchLatency ti
 	return s
 }
 
+// confirm is the media server's play webhook arriving now: every handle opened so far
+// predates it, every later one follows it.
+func (s *pumpSim) confirm() {
+	v, ok := app.playbackRegistry.Load(s.path)
+	if !ok {
+		s.t.Fatal("no playback registered")
+	}
+	ps := v.(*PlaybackState)
+	ps.mu.Lock()
+	ps.ConfirmedAt = time.Now()
+	ps.mu.Unlock()
+}
+
 // open mirrors VirtualMkvNode.Open for a native file: a fresh handle, the pump started or
 // attached at open, the handle registered afterwards.
 func (s *pumpSim) open(name string) *simHandle {
@@ -86,6 +99,7 @@ func (s *pumpSim) open(name string) *simHandle {
 	h.lastOff = -1
 	h.lastActivityTime = time.Now()
 	h.usesWarmup = true
+	h.openedAt = time.Now()
 	h.state.Store(stateWarmup)
 	h.pumpOnce.Do(func() { h.startNativePump(testHash, 3) })
 	storeOpenHandle(h)

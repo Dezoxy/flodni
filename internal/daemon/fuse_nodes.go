@@ -748,6 +748,7 @@ func (n *VirtualMkvNode) Open(ctx context.Context, flags uint32) (fs.FileHandle,
 		wake:             wake,
 		size:             n.vMeta.Size,
 		path:             n.vMeta.Path,
+		openedAt:         now,
 		lastTime:         now,
 		lastOff:          -1,
 		lastActivityTime: now,       // Initialize activity tracking

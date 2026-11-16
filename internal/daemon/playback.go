@@ -75,6 +75,13 @@ func (ps *PlaybackState) LastSignOfLife() time.Time {
 	return ps.OpenedAt
 }
 
+// confirmedAt is when the media server's webhook confirmed the playback, zero if none did.
+func (ps *PlaybackState) confirmedAt() time.Time {
+	ps.mu.RLock()
+	defer ps.mu.RUnlock()
+	return ps.ConfirmedAt
+}
+
 func (ps *PlaybackState) GetStatus() bool {
 	ps.mu.RLock()
 	defer ps.mu.RUnlock()

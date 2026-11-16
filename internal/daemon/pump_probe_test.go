@@ -11,8 +11,7 @@ import (
 // header, then a region further on, then closes. A's pump target, served offsets, latency and
 // resume position must not notice B.
 //
-// The scenario runs once per probe region; every property is its own subtest so the ones the
-// current code does not hold can wait for step 6b without hiding the ones it does.
+// The scenario runs once per probe region; every property is its own subtest.
 
 const (
 	probeSize  = 1000 * mb
@@ -40,6 +39,9 @@ type probeRun struct {
 	playerOffAtRelease int64 // the shared state's position after A's Release
 	resumeAtRelease    int64 // PlaybackState.LastSeekOff after A's Release
 	aLastOff           int64 // A's last read offset
+	playerOffAfterB    int64 // the shared state's position once B is released
+	resumeAfterB       int64 // PlaybackState.LastSeekOff once B is released
+	aLastBeforeRelease int64 // A's last read offset when B was released
 	nextCachedBefore   bool  // A's next chunk was in the read-ahead cache before B opened
 	nextCachedAtProbe  bool  // and still was when A read it during B's probe
 }
@@ -79,6 +81,9 @@ func runProbeScenario(t *testing.T, path string, probeFrom, probeLen int64) *pro
 	sim.settle()
 	run.primaryDuringProbe = sim.primaryOwner()
 	run.b.release()
+	run.aLastBeforeRelease = aNext - probeStep
+	run.playerOffAfterB = atomic.LoadInt64(&sim.pumpState().playerOff)
+	run.resumeAfterB = sim.resumeOff()
 	sim.settle()
 
 	run.a.read(aNext, probeStep) // A's next read once B is gone
@@ -93,9 +98,8 @@ func runProbeScenario(t *testing.T, path string, probeFrom, probeLen int64) *pro
 	return run
 }
 
-// checkProbeProperties asserts what A must keep. pending names the properties the current
-// code does not hold; each is skipped until step 6b.
-func checkProbeProperties(t *testing.T, run *probeRun, pending map[string]bool) {
+// checkProbeProperties asserts what A must keep.
+func checkProbeProperties(t *testing.T, run *probeRun) {
 	sim := run.sim
 	budget := int64(gc().ReadAheadBudget)
 	chunk := int64(4 * mb)
@@ -107,12 +111,7 @@ func checkProbeProperties(t *testing.T, run *probeRun, pending map[string]bool) 
 		t.Fatal("the scenario is not set up")
 	}
 	sub := func(name string, f func(t *testing.T)) {
-		t.Run(name, func(t *testing.T) {
-			if pending[name] {
-				t.Skip("step 6b")
-			}
-			f(t)
-		})
+		t.Run(name, f)
 	}
 
 	sub("the pump keeps fetching ahead of A and never at B's offsets", func(t *testing.T) {
@@ -149,6 +148,14 @@ func checkProbeProperties(t *testing.T, run *probeRun, pending map[string]bool) 
 			}
 		}
 	})
+	sub("B's reads and Release never persist a resume position", func(t *testing.T) {
+		if run.playerOffAfterB != 0 {
+			t.Errorf("B's Release moved the shared player position to %d MiB", run.playerOffAfterB/mb)
+		}
+		if run.resumeAfterB != run.aLastBeforeRelease {
+			t.Errorf("the persisted resume position after B = %d MiB, want A's %d MiB", run.resumeAfterB/mb, run.aLastBeforeRelease/mb)
+		}
+	})
 	sub("A's resume position on Release is A's own", func(t *testing.T) {
 		if run.playerOffAtRelease != run.aLastOff {
 			t.Errorf("the pump's player position after A's Release = %d MiB, want A's %d MiB", run.playerOffAtRelease/mb, run.aLastOff/mb)
@@ -181,22 +188,12 @@ func inRange(off int64, sh *simHandle, _ int64) bool {
 // B reads the header, then the last 10 MB: the media-analysis pattern.
 func TestProbeOfTheTailDuringPlaybackLeavesTheWatchingSessionAlone(t *testing.T) {
 	run := runProbeScenario(t, "/test/probe-tail.mkv", probeSize-10*mb, 10*mb)
-	checkProbeProperties(t, run, map[string]bool{
-		"A's reads need no engine fetch because of B": true,
-		"A's next read is as fast as before":          true,
-	})
+	checkProbeProperties(t, run)
 }
 
 // B reads the header, then 10 MB in the middle of the file, beyond the SSD tail window the
 // seek gate recognises.
 func TestProbeOfTheMiddleDuringPlaybackLeavesTheWatchingSessionAlone(t *testing.T) {
 	run := runProbeScenario(t, "/test/probe-middle.mkv", 700*mb, 10*mb)
-	checkProbeProperties(t, run, map[string]bool{
-		"the pump keeps fetching ahead of A and never at B's offsets": true,
-		"the pump reader is not interrupted by B":                     true,
-		"A stays the primary stream":                                  true,
-		"A's reads need no engine fetch because of B":                 true,
-		"A's next read is as fast as before":                          true,
-		"A's resume position on Release is A's own":                   true,
-	})
+	checkProbeProperties(t, run)
 }

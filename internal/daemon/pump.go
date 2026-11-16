@@ -712,10 +712,16 @@ func advanceProvesStreaming(prevOff, off, readLen, size, tolerance, streamingThr
 const primaryProofReads = 3 // consecutive sequential reads before a handle drives the pump
 
 func (h *MkvHandle) promoteIfStreaming(prevOff, off int64, readLen int) {
+	advance := prevOff >= 0 && advanceProvesStreaming(prevOff, off, int64(readLen), h.size, gc().SequentialTolerance, gc().StreamingThreshold)
+	if !advance {
+		h.seqRun.Store(0)
+	} else if h.seqRun.Add(1) >= primaryProofReads {
+		h.streamedOnce.Store(true)
+	}
 	if h.isPrimaryHandle.Load() || h.hash == "" || prevOff < 0 {
 		return
 	}
-	if !advanceProvesStreaming(prevOff, off, int64(readLen), h.size, gc().SequentialTolerance, gc().StreamingThreshold) {
+	if !advance {
 		h.seqAdvances.Store(0)
 		return
 	}
@@ -730,6 +736,11 @@ func (h *MkvHandle) promoteIfStreaming(prevOff, off int64, readLen int) {
 	}
 	ps, ok := val.(*PlaybackState)
 	if !ok || !(ps.GetStatus() || ps.IsInferredPlayback()) {
+		return
+	}
+	// A second sequential reader (a media analysis, a thumbnail pass) must not take the pump
+	// from a player that is watching. Adapted from upstream Tiramisu 49533ee.
+	if inc := activeStreamingPrimary(h.path, h); inc != nil && !mayTakeOverStreamingPrimary(h, inc, ps.confirmedAt()) {
 		return
 	}
 	if becomePrimary(h) {
@@ -804,6 +815,62 @@ func shouldInterruptPump(prevOff, off, budget int64, tailServed bool) bool {
 		return false
 	}
 	return shouldInterruptForSeek(prevOff, off, budget)
+}
+
+// primaryActiveWindow is how recently a primary that has streamed must have read to count as a
+// player that is watching. A paused player that buffered ahead goes quiet for longer; its
+// primary is then up for taking, which is what a reopen or a seek through another handle needs.
+const primaryActiveWindow = 2 * time.Second
+
+// activeStreamingPrimary returns the primary handle on path, other than except, that has
+// streamed like a player and read within primaryActiveWindow, or nil. A stale probe primary
+// (header and Cues only) never streamed, so it never blocks the real player. It takes no lock:
+// the read path calls it for every read of a non-primary handle.
+func activeStreamingPrimary(path string, except *MkvHandle) *MkvHandle {
+	var found *MkvHandle
+	now := time.Now().UnixNano()
+	app.activeHandles.Range(func(key, _ interface{}) bool {
+		other, ok := key.(*MkvHandle)
+		if !ok || other == except || other.path != path || !other.isPrimaryHandle.Load() || !other.streamedOnce.Load() {
+			return true
+		}
+		if now-other.lastRead.Load() <= int64(primaryActiveWindow) {
+			found = other
+			return false
+		}
+		return true
+	})
+	return found
+}
+
+// mayTakeOverStreamingPrimary reports whether h may take primary from inc, a primary that is
+// watching. Only the player of a session that began while inc was already reading qualifies:
+// opened after inc and no later than the webhook that confirmed the playback. An analysis started during a confirmed session opens after the confirmation;
+// when the analysis ran first, the player opens after it and before the webhook. A player
+// whose primary went quiet needs no takeover: activeStreamingPrimary is nil then.
+func mayTakeOverStreamingPrimary(h, inc *MkvHandle, confirmedAt time.Time) bool {
+	return !h.openedAt.IsZero() && h.openedAt.After(inc.openedAt) && !h.openedAt.After(confirmedAt)
+}
+
+// shadowsActivePlayer reports whether h is a second handle on a file whose primary is watching
+// and h is not the player's successor. Such a handle never takes the primary, never interrupts
+// or moves the pump and never fills the shared read-ahead cache (which would evict the
+// primary's next chunks, oldest first).
+func (h *MkvHandle) shadowsActivePlayer() bool {
+	if h.isPrimaryHandle.Load() {
+		return false
+	}
+	inc := activeStreamingPrimary(h.path, h)
+	if inc == nil {
+		return false
+	}
+	var confirmedAt time.Time
+	if val, ok := app.playbackRegistry.Load(h.path); ok {
+		if ps, ok := val.(*PlaybackState); ok {
+			confirmedAt = ps.confirmedAt()
+		}
+	}
+	return !mayTakeOverStreamingPrimary(h, inc, confirmedAt)
 }
 
 // primaryProofFor returns how many consecutive sequential reads a challenger must show before it
