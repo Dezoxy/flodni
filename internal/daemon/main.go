@@ -835,35 +835,10 @@ func Run() {
 	// Crea root node virtuale
 	rootData := &VirtualMkvRoot{sourcePath: source}
 
-	// Enable attribute caching from config
-	attrTimeout := time.Duration(gc().AttrTimeoutSeconds * float64(time.Second))
-	entryTimeout := time.Duration(gc().EntryTimeoutSeconds * float64(time.Second))
-	negativeTimeout := time.Duration(gc().NegativeTimeoutSeconds * float64(time.Second))
-
-	// go-fuse checks out ~MaxWrite per in-flight request; 0 leaves that unbounded.
-	// Past the cap it stops reading /dev/fuse, so this trades RAM for latency.
-	maxInflight := int(gc().FuseMaxInflightMB * 1024 * 1024)
-
-	server, err = fs.Mount(mount, rootData, &fs.Options{
-		AttrTimeout: &attrTimeout, EntryTimeout: &entryTimeout,
-		NegativeTimeout: &negativeTimeout,
-		MountOptions: fuse.MountOptions{
-			MaxInflightRequestBytes: maxInflight,
-			AllowOther:              true,
-			MaxBackground:           gc().ConcurrencyLimit,
-			// MaxWrite:                 1024 * 1024,
-			MaxWrite: 4 * 1024 * 1024, // Samba Turbo: 4MB write buffer
-			// MaxReadAhead:             1024 * 1024,
-			MaxReadAhead:             4 * 1024 * 1024, // Samba Turbo: 4MB read-ahead
-			RememberInodes:           true,            // ENABLED: safe with explicit cache control
-			ExplicitDataCacheControl: true,            // attribute-driven invalidation only, not open-time
-			SyncRead:                 false,           // ENABLED ASYNC READS for 4K performance
-			// NFS Export: Stable filesystem identification
-			FsName: "flodni",
-		},
-		UID: gc().UID, // Default file ownership: pi user (1000)
-		GID: gc().GID, // Default file ownership: pi group (1000)
-	})
+	if w := fuseTTLWarning(gc()); w != "" {
+		logger.Warn(w)
+	}
+	server, err = fs.Mount(mount, rootData, fuseOptions(gc()))
 	if err != nil {
 		logger.Error("FUSE mount failed", "err", err)
 		os.Exit(1)
