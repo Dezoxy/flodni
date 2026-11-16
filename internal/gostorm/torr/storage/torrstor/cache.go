@@ -171,6 +171,7 @@ func (c *Cache) Init(info *metainfo.Info, hash metainfo.Hash) {
 	for i := 0; i < c.pieceCount; i++ {
 		c.pieces[i] = NewPiece(i, c)
 	}
+	openCaches.Store(c, struct{}{})
 }
 
 // LastDelivery returns the latest completion time (Unix seconds) among pieces
@@ -237,6 +238,7 @@ func (c *Cache) Close() error {
 	}
 
 	close(c.cleanStop)
+	openCaches.Delete(c)
 
 	// Note: c.storage.caches cleanup is handled by Storage.CloseHash() and Storage.Close()
 	// to avoid concurrent map modification during range iteration in Storage.Close().
