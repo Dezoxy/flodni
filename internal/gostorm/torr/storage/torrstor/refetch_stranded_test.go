@@ -56,6 +56,12 @@ func newMetricsTestCache(t *testing.T) (*torrent.Torrent, *Cache) {
 		t.Fatal("no cache")
 	}
 	cache.SetTorrent(tor)
+	// Last cleanup, so it runs first: stop the cache and wait for its goroutines before the
+	// settings are restored and the next test writes package state they read.
+	t.Cleanup(func() {
+		_ = cache.Close()
+		cache.bg.Wait()
+	})
 	return tor, cache
 }
 
@@ -76,7 +82,8 @@ func TestRefetchedBytesAndStrandedPartial(t *testing.T) {
 	const mib = int64(1 << 20)
 	tor, c := newMetricsTestCache(t)
 	r := c.NewReader(tor.Files()[0])
-	defer c.CloseReader(r)
+	// Runs before the cache's cleanup, which waits for what this starts.
+	t.Cleanup(func() { c.CloseReader(r) })
 	if _, err := r.Seek(20*mib, 0); err != nil { // window: pieces 17..22
 		t.Fatal(err)
 	}

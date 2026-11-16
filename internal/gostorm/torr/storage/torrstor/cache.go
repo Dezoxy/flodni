@@ -94,6 +94,20 @@ type Cache struct {
 	// wakePending is set while a coalesced wake is scheduled (scheduleWake).
 	wakeMu      sync.Mutex
 	wakePending bool
+
+	// bg counts the goroutines this cache starts (the cleaner loop and the cleanups that follow
+	// a reader closing) so a test can wait for them. Close does not wait: it holds muReaders,
+	// which they take.
+	bg sync.WaitGroup
+}
+
+// goBG is safeGo for a goroutine bg tracks.
+func (c *Cache) goBG(fn func()) {
+	c.bg.Add(1)
+	safeGo(func() {
+		defer c.bg.Done()
+		fn()
+	})
 }
 
 // getBuffer returns a spare buffer of exactly pieceLength, or nil when none is held.
@@ -135,7 +149,7 @@ func NewCache(capacity int64, storage *Storage) *Cache {
 		localPriority: make(map[int]torrenttypes.PiecePriority),
 	}
 	// V227: Background cleaning goroutine
-	safeGo(func() {
+	ret.goBG(func() {
 		for {
 			select {
 			case <-ret.cleanStop:
@@ -734,7 +748,7 @@ func (c *Cache) CloseReader(r *Reader) {
 	r.Close()
 	delete(c.readers, r)
 	c.muReaders.Unlock()
-	safeGo(func() {
+	c.goBG(func() {
 		c.clearPriority()
 	})
 }
