@@ -17,6 +17,7 @@ import (
 	"flodni/internal/gostorm/web/auth"
 	"flodni/internal/gostorm/web/blocker"
 	"flodni/internal/gostorm/web/sslcerts"
+	"flodni/internal/redact"
 
 	"github.com/gin-contrib/location/v2"
 	"github.com/gin-gonic/gin"
@@ -46,6 +47,7 @@ func newServer(addr string, h http.Handler) *http.Server {
 	return &http.Server{
 		Addr:              addr,
 		Handler:           apiauth.GoStorm(APIToken, Logger, h, apiauth.WithAllowedHosts(AllowedHosts)),
+		ErrorLog:          redact.ErrorLog(),
 		ReadHeaderTimeout: 10 * time.Second,
 		IdleTimeout:       120 * time.Second,
 	}

@@ -69,19 +69,25 @@ func WebLogger() gin.HandlerFunc {
 			path,
 			string(body),
 		)
-		// The query can hold ?token= and a body can hold a link: nothing leaves raw.
+		// The query can hold ?token=: nothing leaves raw. (webLog is unset in
+		// production, so this logs nothing there.)
 		WebLogln(redact.String(logStr))
 	}
 }
 
-// Recovery answers 500 for a panicking handler and logs the panic value, a
-// redacted method and path and the stack. gin.Recovery dumps the request line
-// and every header (masking only Authorization), which would print a Cookie, the
-// proxy JWT header and a /stream link, so this logs no header and no query.
+// Recovery answers 500 for a panicking handler and logs the panic value, the
+// method, a %q-quoted path and the stack, all through the redactor, and no
+// header and no query. gin.Recovery can dump the request line and every header
+// (it does for a broken-pipe or http.ErrAbortHandler panic, masking only
+// Authorization), which would print a Cookie, the proxy JWT header and a
+// /stream link. http.ErrAbortHandler is re-panicked, as net/http expects.
 func Recovery() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		defer func() {
 			if r := recover(); r != nil {
+				if r == http.ErrAbortHandler {
+					panic(r)
+				}
 				TLogln(redact.String(fmt.Sprintf("[Recovery] panic: %v | %s %q\n%s",
 					r, c.Request.Method, c.Request.URL.Path, debug.Stack())))
 				c.AbortWithStatus(http.StatusInternalServerError)

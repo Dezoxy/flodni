@@ -143,3 +143,20 @@ func TestEngineLogsHoldNoToken(t *testing.T) {
 		}
 	}
 }
+
+// The engine's http.Server prints a panic outside gin's Recovery (WebLogger,
+// the blocker, the gate) through ErrorLog; its text must be redacted.
+func TestServerErrorLogRedacts(t *testing.T) {
+	var buf bytes.Buffer
+	prevOut := stdlog.Writer()
+	stdlog.SetOutput(&buf)
+	t.Cleanup(func() { stdlog.SetOutput(prevOut) })
+	srv := newServer("127.0.0.1:0", http.NotFoundHandler())
+	if srv.ErrorLog == nil {
+		t.Fatal("ErrorLog not set")
+	}
+	srv.ErrorLog.Printf("panic: bad ?token=SECRET")
+	if strings.Contains(buf.String(), "SECRET") || buf.Len() == 0 {
+		t.Errorf("got %q", buf.String())
+	}
+}

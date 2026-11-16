@@ -30,16 +30,16 @@ var reURL = regexp.MustCompile(`(?i)^(?:https?|udp|wss?)://`)
 // reKey is the last net for a credential outside any URL: a stray "passkey=...".
 var reKey = regexp.MustCompile(`(?i)((?:pk|passkey|authkey|torrent_pass|uk|apikey)(?:=|%3D))[^&%\s"]+`)
 
-// reQueryToken masks the value of a token (or access_token) query parameter wherever it
+// reQueryToken masks the value of a token query parameter (token, access_token, api_token, id_token ...) wherever it
 // shows: a request path in a log line, a quoted line, or text around a URL. The
-// value ends at the next parameter, white space, a quote or an angle bracket.
-var reQueryToken = regexp.MustCompile(`(?i)\b((?:access_)?token(?:=|%3D))[^&\s"'<>\\]+`)
+// value ends at the next parameter, white space, a double quote or a backslash.
+var reQueryToken = regexp.MustCompile(`(?i)\b((?:[a-z0-9]+_)*token(?:=|%3D))[^&\s"\\]+`)
 
 // reAuthHeader finds an Authorization header line; the scheme (Bearer, Basic) stays.
-var reAuthHeader = regexp.MustCompile(`(?i)\b(authorization\s*:\s*)(?:(bearer|basic)\s+)?[^\s"'<>\\][^\r\n"'<>\\]*`)
+var reAuthHeader = regexp.MustCompile(`(?i)(authorization\s*:\s*)(?:(bearer|basic)\s+)?(?:[^\r\n\\]|\\[^rn])+`)
 
 // reCookieHeader finds a Cookie or Set-Cookie header line.
-var reCookieHeader = regexp.MustCompile(`(?i)\b((?:set-)?cookie\s*:\s*)[^\s"'<>\\][^\r\n"'<>\\]*`)
+var reCookieHeader = regexp.MustCompile(`(?i)((?:set-)?cookie\s*:\s*)(?:[^\r\n\\]|\\[^rn])+`)
 
 // String masks every tracker credential in s: the userinfo, path and query of each
 // URL, the tracker and exact-source values of each magnet, stray key=value

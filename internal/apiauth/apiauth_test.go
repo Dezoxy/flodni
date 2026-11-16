@@ -2,7 +2,7 @@ package apiauth
 
 import (
 	"bytes"
-	"log/slog"
+	"flodni/internal/flog"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -126,31 +126,39 @@ func TestGoStorm(t *testing.T) {
 	}
 }
 
-// Refusal lines quote the path (%q), so a control character in it cannot forge
-// or split a log line, and carry no query.
+// Refusal lines quote the path (%q), through the production handler, so a
+// control character in it cannot forge or split a log line, whether it lands in
+// the message or in the appended path attribute. No query is logged.
 func TestRefusalLinesQuotePath(t *testing.T) {
-	var buf bytes.Buffer
-	logger := slog.New(slog.NewTextHandler(&buf, nil))
-	next := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {})
+	for _, tc := range []struct{ name, target, want string }{
+		{"LF", "/api/x%0Aforged", `"/api/x\nforged"`},
+		{"CR", "/api/x%0Dforged", `"/api/x\rforged"`},
+		{"ESC", "/api/x%1B%5B2Kforged", `"/api/x\x1b[2Kforged"`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var buf bytes.Buffer
+			logger := flog.NewText(&buf)
+			next := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {})
 
-	// 401: a token is set and none presented.
-	req := httptest.NewRequest(http.MethodGet, "/api/x%0Aforged?token=SECRET", nil)
-	Middleware(tok, logger, next).ServeHTTP(httptest.NewRecorder(), req)
-	// 403: open port, cross-origin.
-	req = httptest.NewRequest(http.MethodPost, "/api/y%0Aforged?token=SECRET", nil)
-	req.Header.Set("Origin", "https://evil.example")
-	Middleware("", logger, next).ServeHTTP(httptest.NewRecorder(), req)
+			req := httptest.NewRequest(http.MethodGet, tc.target+"?token=SECRET", nil)
+			Middleware(tok, logger, next).ServeHTTP(httptest.NewRecorder(), req) // 401
+			req = httptest.NewRequest(http.MethodPost, tc.target+"?token=SECRET", nil)
+			req.Header.Set("Origin", "https://evil.example")
+			Middleware("", logger, next).ServeHTTP(httptest.NewRecorder(), req) // 403
 
-	out := buf.String()
-	if strings.Count(out, "\n") != 2 {
-		t.Errorf("want two log lines, got %q", out)
-	}
-	for _, want := range []string{`401 GET \"/api/x\\nforged\"`, `403 cross-origin POST \"/api/y\\nforged\"`} {
-		if !strings.Contains(out, want) {
-			t.Errorf("missing %s in %q", want, out)
-		}
-	}
-	if strings.Contains(out, "SECRET") {
-		t.Errorf("query token in log: %q", out)
+			out := buf.String()
+			if strings.Count(out, "\n") != 2 {
+				t.Errorf("want two log lines, got %q", out)
+			}
+			if strings.ContainsAny(out, "\r\x1b") {
+				t.Errorf("raw control character in %q", out)
+			}
+			if strings.Count(out, tc.want) < 2 {
+				t.Errorf("want %s on both lines, got %q", tc.want, out)
+			}
+			if strings.Contains(out, "SECRET") {
+				t.Errorf("query token in log: %q", out)
+			}
+		})
 	}
 }

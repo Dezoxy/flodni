@@ -1,8 +1,10 @@
 package redact
 
 import (
+	"bytes"
 	"context"
 	"errors"
+	stdlog "log"
 	"net"
 	"net/http"
 	"net/url"
@@ -169,5 +171,31 @@ func TestStringHeaders(t *testing.T) {
 		if got != tc.want {
 			t.Errorf("%q: got %q, want %q", tc.in, got, tc.want)
 		}
+	}
+}
+
+func TestStringQueryTokenVariants(t *testing.T) {
+	for _, in := range []string{
+		"/x?api_token=SECRET", "FLODNI_API_TOKEN=SECRET", "/x?id_token=SECRET",
+		"token=SEC'RET", "token=SEC<RET",
+		`Cookie: a="x"; flodni_session=SECRET`,
+		`GET / HTTP/1.1\r\nAuthorization: Bearer SECRET\r\nCookie: a=SECRET\r\nHost: x`,
+		`map[Authorization:[Bearer SECRET]]`,
+	} {
+		assertClean(t, in, String(in), "SECRET", "RET")
+	}
+	if got := String(`x\r\nHost: h`); got != `x\r\nHost: h` {
+		t.Errorf("unrelated escaped text changed: %q", got)
+	}
+}
+
+func TestErrorLogRedacts(t *testing.T) {
+	var buf bytes.Buffer
+	prev := stdlog.Writer()
+	stdlog.SetOutput(&buf)
+	t.Cleanup(func() { stdlog.SetOutput(prev) })
+	ErrorLog().Printf("http: panic serving 1.2.3.4: bad /x?token=SECRET\ngoroutine 1")
+	if !strings.Contains(buf.String(), "http: panic serving") || strings.Contains(buf.String(), "SECRET") {
+		t.Errorf("got %q", buf.String())
 	}
 }
