@@ -446,13 +446,6 @@ func (w *statusWriter) WriteHeader(c int) {
 	w.ResponseWriter.WriteHeader(c)
 }
 
-func (w *statusWriter) Write(b []byte) (int, error) {
-	if w.code == 0 {
-		w.code = http.StatusOK
-	}
-	return w.ResponseWriter.Write(b)
-}
-
 func (w *statusWriter) status() int {
 	if w.code == 0 {
 		return http.StatusOK
