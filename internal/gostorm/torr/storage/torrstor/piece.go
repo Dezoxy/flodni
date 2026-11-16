@@ -69,6 +69,11 @@ type Piece struct {
 	// leave it: the delivery happened even if the bytes are gone.
 	completedAt atomic.Int64 `json:"-"`
 
+	// everComplete is set when MarkComplete first runs and never cleared (not by eviction): a
+	// write into a piece that has it set, while it is not complete, is a refetch. Per cache, so
+	// it is gone when the torrent closes. Feeds RefetchedBytes.
+	everComplete atomic.Bool `json:"-"`
+
 	mPiece *MemPiece `json:"-"`
 
 	cache *Cache `json:"-"`
@@ -102,6 +107,7 @@ func (p *Piece) MarkComplete() error {
 	// completing is not a candidate: an incomplete piece is never evictable.
 	runRecovered("evictNow", p.cache.evictNow)
 	p.completedAt.Store(time.Now().Unix())
+	p.everComplete.Store(true)
 	p.Complete.Store(true)
 	p.cache.dropPriority(p.Id)
 	return nil
