@@ -567,3 +567,58 @@ func TestErrorTextHoldsNoToken(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+// Without the 64-byte rule, r||0x00||s (65 bytes) would split at 32 and verify
+// as the valid (r, s), so only the length check refuses it.
+func TestES256SignatureLengthRuleIsWhatRefusesAPaddedSignature(t *testing.T) {
+	ec := newEC(t, "ec")
+	v, _ := newVerifier(t, newJWKS(t, ec), nil)
+	padded := func(s []byte) []byte { return append(append(append([]byte{}, s[:32]...), 0), s[32:]...) }
+	wantReason(t, v, req(mint(t, ec, nil, padded)), ReasonSignature)
+	wantReason(t, v, req(mint(t, ec, nil, func(s []byte) []byte { return s[:63] })), ReasonSignature)
+	// the same signature at its real length verifies, so the padding is the only difference
+	wantReason(t, v, req(mint(t, ec, nil, nil)), "")
+
+	h := sha256.Sum256([]byte("x"))
+	r, s, _ := ecdsa.Sign(rand.Reader, ec.ec, h[:])
+	good := append(r.FillBytes(make([]byte, 32)), s.FillBytes(make([]byte, 32))...)
+	k := key{alg: "ES256", ec: &ec.ec.PublicKey}
+	if !k.verify([]byte("x"), good) {
+		t.Fatal("a 64-byte signature must verify")
+	}
+	if k.verify([]byte("x"), append(append(append([]byte{}, good[:32]...), 0), good[32:]...)) {
+		t.Fatal("a 65-byte signature must not verify")
+	}
+}
+
+func TestEvenRSAExponentIsDropped(t *testing.T) {
+	rs := newRSA(t, "rs", 2048)
+	for _, e := range []int64{2, 65536} {
+		j := rs.jwk()
+		j["e"] = enc(big.NewInt(e).Bytes())
+		raw, _ := json.Marshal(map[string]any{"keys": []any{j, newEC(t, "other").jwk()}})
+		set, err := parseJWKS(raw)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, ok := set["rs"]; ok || len(set) != 1 {
+			t.Fatalf("e=%d: key kept: %v", e, set)
+		}
+		// a token signed by the matching private key finds no usable key
+		f := newJWKS(t)
+		f.setRaw(string(raw))
+		v, _ := newVerifier(t, f, nil)
+		wantReason(t, v, req(mint(t, rs, nil, nil)), ReasonUnknownKid)
+	}
+	// the odd exponent of the same key is accepted
+	if _, ok := rs.jwkKey(); !ok {
+		t.Fatal("the real key was dropped")
+	}
+}
+
+func (s *signer) jwkKey() (key, bool) {
+	b, _ := json.Marshal(s.jwk())
+	var j jwk
+	_ = json.Unmarshal(b, &j)
+	return j.key()
+}
