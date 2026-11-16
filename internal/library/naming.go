@@ -5,6 +5,7 @@
 package library
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -50,14 +51,29 @@ func SanitizeMovieName(s string) string {
 	return strings.Trim(s, "_")
 }
 
+// isASCIIDigits reports that s is non-empty and holds only the digits 0 to 9.
+func isASCIIDigits(s string) bool {
+	if s == "" {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		if s[i] < '0' || s[i] > '9' {
+			return false
+		}
+	}
+	return true
+}
+
 // BuildMovieFilename returns the stub name for a movie. The trailing 8 chars are the
 // tail of the info hash: that suffix is how an already-present title is recognised.
 func BuildMovieFilename(n MovieName) string {
 	// The year is the release date's, when the request carries one. A number in the
 	// title ("Blade Runner 2049", "Dune (2021)") belongs to the title as given and is
 	// not read a second time as the release year.
+	// Only four ASCII digits are a year. Anything else from the caller is dropped, so
+	// a release_date cannot put a separator, "..", or half a UTF-8 rune in the name.
 	year := ""
-	if len(n.ReleaseDate) >= 4 {
+	if len(n.ReleaseDate) >= 4 && isASCIIDigits(n.ReleaseDate[:4]) {
 		year = n.ReleaseDate[:4]
 	}
 
@@ -305,6 +321,11 @@ func WriteStub(path, streamURL string, size int64, hash, imdbID string) error {
 	}
 	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
 		return err
+	}
+	// An identical stub is left alone: a rewrite makes a new inode and mtime, which a
+	// scan or a media server reads as a change that never happened.
+	if old, err := os.ReadFile(path); err == nil && bytes.Equal(old, data) {
+		return nil
 	}
 	return atomicfile.WriteFile(path, data, 0644)
 }
