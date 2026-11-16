@@ -5,12 +5,14 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 
 	"flodni/internal/apiauth"
+	"flodni/internal/config"
 )
 
 func runAuth(args ...string) (code int, out, errOut string) {
@@ -107,4 +109,53 @@ func fakeAuthToken(c byte) string { return "fl_" + strings.Repeat(string(c), 43)
 func authHash(token string) string {
 	h := sha256.Sum256([]byte(token))
 	return hex.EncodeToString(h[:])
+}
+
+type failWriter struct{}
+
+func (failWriter) Write([]byte) (int, error) { return 0, io.ErrClosedPipe }
+
+func TestAuthNewTokenFailsWhenStdoutCannotBeWritten(t *testing.T) {
+	var e bytes.Buffer
+	if code := authMain([]string{"new-token", "--name", "a", "--scopes", "read"}, failWriter{}, &e); code != 1 {
+		t.Fatalf("exit %d, want 1", code)
+	}
+	if strings.Contains(e.String(), "store it now") {
+		t.Fatal("told the owner to store a token that was never delivered")
+	}
+}
+
+func TestAuthNewTokenTrimsScopesOnTheCLIPath(t *testing.T) {
+	code, out, _ := runAuth("new-token", "--name", "a", "--scopes", "webhook, read")
+	if code != 0 || !strings.Contains(out, `"scopes":["read","webhook"]`) {
+		t.Fatalf("exit %d out %q", code, out)
+	}
+}
+
+// startAuth is what Run calls: a refusal comes back as an error, so Run can exit.
+func TestStartAuthRefusesAndReports(t *testing.T) {
+	good := filepath.Join(t.TempDir(), "tokens.json")
+	if err := os.WriteFile(good, []byte(`{"tokens":[{"name":"a","scopes":["read"],"sha256":"`+authHash(fakeAuthToken('a'))+`"}]}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	loop := "http://127.0.0.1:8090"
+	for name, cfg := range map[string]config.Config{
+		"both set":      {APIToken: "x", AuthTokensFile: good, GoStormBaseURL: loop},
+		"missing file":  {AuthTokensFile: filepath.Join(t.TempDir(), "nope.json"), GoStormBaseURL: loop},
+		"remote engine": {AuthTokensFile: good, GoStormBaseURL: "http://10.0.0.5:8090"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			tok, err := startAuth(&cfg, nil)
+			if err == nil || tok != nil {
+				t.Fatalf("started: %v %v", tok, err)
+			}
+		})
+	}
+	tok, err := startAuth(&config.Config{AuthTokensFile: good, GoStormBaseURL: loop}, nil)
+	if err != nil || tok.Mode() != apiauth.ModeScoped {
+		t.Fatalf("scoped: %v %v", tok, err)
+	}
+	if tok, err := startAuth(&config.Config{}, nil); err != nil || tok.Mode() != apiauth.ModeOpen {
+		t.Fatalf("open: %v %v", tok, err)
+	}
 }

@@ -8,7 +8,9 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
+	"time"
 )
 
 // A valid-shaped token, built so no scanner reads it as a secret: "fl_" plus 43 characters.
@@ -393,5 +395,92 @@ func TestGenerateTokenRoundTrip(t *testing.T) {
 	tk2, _, _ := GenerateToken()
 	if tk == tk2 {
 		t.Fatal("two tokens are equal")
+	}
+}
+
+func TestLoadRefusesDuplicateKeys(t *testing.T) {
+	h := hashHex(fakeToken('a'))
+	cases := map[string]string{
+		"scopes twice":  `{"tokens":[{"name":"a","scopes":["webhook"],"scopes":["admin"],"sha256":"` + h + `"}]}`,
+		"scopes folded": `{"tokens":[{"name":"a","scopes":["webhook"],"Scopes":["admin"],"sha256":"` + h + `"}]}`,
+		"name twice":    `{"tokens":[{"name":"a","name":"b","scopes":["read"],"sha256":"` + h + `"}]}`,
+		"tokens twice":  `{"tokens":[` + entryJSON("a", `"read"`, h) + `],"tokens":[` + entryJSON("b", `"admin"`, hashHex(fakeToken('b'))) + `]}`,
+		"sha256 twice":  `{"tokens":[{"name":"a","scopes":["read"],"sha256":"` + h + `","sha256":"` + h + `"}]}`,
+	}
+	for name, body := range cases {
+		t.Run(name, func(t *testing.T) {
+			if _, err := loadFile(t, body); err == nil || !strings.Contains(err.Error(), "duplicate") {
+				t.Fatalf("err = %v, want a duplicate-key refusal", err)
+			}
+		})
+	}
+}
+
+func TestLoadDoesNotTrimScopes(t *testing.T) {
+	h := hashHex(fakeToken('a'))
+	for _, sc := range []string{`" admin "`, `"admin "`, `" read"`, `"Read"`} {
+		if _, err := loadFile(t, `{"tokens":[`+entryJSON("a", sc, h)+`]}`); err == nil {
+			t.Errorf("scope %s loaded", sc)
+		}
+	}
+}
+
+func TestLoadRefusesAFIFOWithoutHanging(t *testing.T) {
+	p := filepath.Join(t.TempDir(), "tokens.fifo")
+	if err := syscall.Mkfifo(p, 0o600); err != nil {
+		t.Skip("no fifo:", err)
+	}
+	done := make(chan error, 1)
+	go func() {
+		_, err := Load(LoadOptions{TokensFile: p, GoStormURL: "http://127.0.0.1:8090"})
+		done <- err
+	}()
+	select {
+	case err := <-done:
+		if err == nil || !strings.Contains(err.Error(), "regular") {
+			t.Fatalf("err = %v, want a not-a-regular-file refusal", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("Load hangs on a FIFO")
+	}
+}
+
+func TestValidShape(t *testing.T) {
+	body := strings.Repeat("a", 43)
+	cases := []struct {
+		s    string
+		want bool
+	}{
+		{"fl_" + body, true},
+		{"fl_" + strings.Repeat("A-_9", 10) + "abc", true},
+		{"", false},
+		{"fl_", false},
+		{"fl_" + body[:42], false},
+		{"fl_" + body + "a", false},
+		{"fx_" + body, false},
+		{"FL_" + body, false},
+		{"fl-" + body, false},
+		{"fl_" + body[:42] + "=", false},
+		{"fl_" + body[:42] + "+", false},
+		{"fl_" + body[:42] + "/", false},
+		{"fl_" + body[:42] + " ", false},
+		{"fl_" + body[:42] + "\n", false},
+		{"fl_" + body[:42] + "\u00e9", false},
+	}
+	for _, c := range cases {
+		if got := validShape(c.s); got != c.want {
+			t.Errorf("validShape(%q) = %v, want %v", c.s, got, c.want)
+		}
+	}
+}
+
+func TestReportJWTOn(t *testing.T) {
+	file := writeTokensFile(t, `{"tokens":[`+entryJSON("a", `"read"`, hashHex(fakeToken('a')))+`]}`)
+	tok, err := Load(LoadOptions{TokensFile: file, GoStormURL: "http://127.0.0.1:8090", JWTConfigured: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !tok.Report().JWT {
+		t.Fatal("jwt must read true when configured")
 	}
 }

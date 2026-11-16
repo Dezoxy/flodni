@@ -425,6 +425,7 @@ func LoadConfig() Config {
 			// json fills every key it can before it reports a type error, so the list is
 			// still enforced; keep its text so a save does not write null over it.
 			cfg.fileAllowedHosts = append([]string(nil), cfg.AllowedHosts...)
+			cfg.fileAuthTokensFile = cfg.AuthTokensFile
 			var raw map[string]json.RawMessage
 			if json.Unmarshal(cleanData, &raw) == nil {
 				if v, ok := raw["allowed_hosts"]; ok && string(v) != "null" && json.Unmarshal(v, new([]string)) != nil {

@@ -433,3 +433,31 @@ func TestStartupReportAuthDefaultsToOpen(t *testing.T) {
 		t.Fatalf("auth = %s", b)
 	}
 }
+
+// Until the gate lands, a scoped start says so in the report: the mode alone would read
+// as protected while the ports are open.
+func TestStartupReportAlarmsAScopedStartNotEnforced(t *testing.T) {
+	file := filepath.Join(t.TempDir(), "t.json")
+	if err := os.WriteFile(file, []byte(`{"tokens":[{"name":"a","scopes":["read"],"sha256":"`+authHash(fakeAuthToken('a'))+`"}]}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	scoped, err := apiauth.Load(apiauth.LoadOptions{TokensFile: file, GoStormURL: "http://127.0.0.1:8090"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	legacy, _ := apiauth.Load(apiauth.LoadOptions{APIToken: "x"})
+	has := func(t *apiauth.Tokens) bool {
+		for _, a := range buildStartupReport(startupFacts{auth: t}).Alarms {
+			if a == "auth_not_enforced" {
+				return true
+			}
+		}
+		return false
+	}
+	if !has(scoped) {
+		t.Error("scoped mode must raise auth_not_enforced")
+	}
+	if has(legacy) || has(nil) {
+		t.Error("open and legacy_token must not raise it")
+	}
+}

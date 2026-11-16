@@ -284,25 +284,12 @@ func Run() {
 	gc().LogConfig(logger)
 
 	// Decide the auth mode before anything listens. Any refusal stops the start: a
-	// bad token file never degrades to open mode (ADR 0004). The token and the
-	// hashes are not logged.
-	auth, authErr := apiauth.Load(apiauth.LoadOptions{
-		APIToken:   gc().APIToken,
-		TokensFile: gc().AuthTokensFile,
-		GoStormURL: gc().GoStormBaseURL,
-		Logger:     logger,
-		// auth_jwt is parsed by a later step; false until then.
-		JWTConfigured: false,
-	})
+	// bad token file never degrades to open mode (ADR 0004).
+	auth, authErr := startAuth(gc(), logger)
 	if authErr != nil {
 		logger.Error("[Auth] refusing to start: " + authErr.Error())
 		fmt.Fprintln(os.Stderr, "refusing to start: "+authErr.Error())
 		os.Exit(1)
-	}
-	if auth.Mode() == apiauth.ModeScoped {
-		// The file is loaded and validated, but the gate that enforces it is a later step
-		// (ADR 0004 step 3): say so rather than let the owner assume the ports are closed.
-		logger.Warn("[Auth] WARNING: auth_tokens_file is loaded but this build does not enforce it yet; the ports are as open as without it")
 	}
 	app.auth = auth
 	app.startup.noteAuth(auth)

@@ -430,3 +430,46 @@ func TestSaveKeepsTheFilesTokensFile(t *testing.T) {
 		}
 	}
 }
+
+// The env path differs from the file's: echoing the running (env) path or the file's own
+// saves, anything else is refused, and the file keeps its own value throughout.
+func TestStartupOnlyWithEnvAndFileOnDifferentPaths(t *testing.T) {
+	t.Setenv("FLODNI_AUTH_TOKENS_FILE", "/run/secrets/env.json")
+	h, path, _ := controlAPIServer(t, "", "")
+	if err := os.WriteFile(path, []byte(`{"log_level":"info","auth_tokens_file":"/etc/flodni/file.json"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for _, p := range []string{"/run/secrets/env.json", "/etc/flodni/file.json"} {
+		if code, resp := doControl(h, "/api/config", `{"auth_tokens_file":"`+p+`"}`, ""); code != http.StatusOK {
+			t.Fatalf("%s: %d %s", p, code, resp)
+		}
+		if got := fileAuthTokensFile(t, path); got != "/etc/flodni/file.json" {
+			t.Fatalf("after %s the file holds %q", p, got)
+		}
+	}
+	if code, _ := doControl(h, "/api/config", `{"auth_tokens_file":"/other.json"}`, ""); code != http.StatusForbidden {
+		t.Fatalf("a third path: %d, want 403", code)
+	}
+	if got := fileAuthTokensFile(t, path); got != "/etc/flodni/file.json" {
+		t.Fatalf("file holds %q", got)
+	}
+}
+
+// A deployment whose file names a tokens file (scoped on the next start) refuses a
+// posted path too, whatever the control token is.
+func TestStartupOnlyWhenTheFileNamesATokensFile(t *testing.T) {
+	h, path, _ := controlAPIServer(t, "tok", "tok")
+	if err := os.WriteFile(path, []byte(`{"log_level":"info","api_token":"tok","auth_tokens_file":"/etc/flodni/file.json"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	before, _ := os.ReadFile(path)
+	if code, _ := doControl(h, "/api/config", `{"auth_tokens_file":"/attacker.json"}`, "tok"); code != http.StatusForbidden {
+		t.Fatalf("status %d, want 403", code)
+	}
+	if code, _ := doControl(h, "/api/config", `{"log_level":"info"}`, "tok"); code != http.StatusOK {
+		t.Fatalf("an unrelated save: %d", code)
+	}
+	if got := fileAuthTokensFile(t, path); got != "/etc/flodni/file.json" {
+		t.Fatalf("file holds %q (was %s)", got, before)
+	}
+}

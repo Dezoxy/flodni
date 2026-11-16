@@ -5,8 +5,10 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"log/slog"
 
 	"flodni/internal/apiauth"
+	"flodni/internal/config"
 )
 
 const authUsage = `usage: flodni auth new-token --name NAME --scopes a,b
@@ -53,8 +55,34 @@ func authMain(args []string, out, errOut io.Writer) int {
 		_, _ = fmt.Fprintf(errOut, "auth: %v\n", err)
 		return 1
 	}
-	_, _ = fmt.Fprintf(out, "%s\n%s\n", token, entry)
+	if _, err := fmt.Fprintf(out, "%s\n%s\n", token, entry); err != nil {
+		_, _ = fmt.Fprintf(errOut, "auth: the token could not be written to stdout: %v\n", err)
+		return 1
+	}
 	_, _ = fmt.Fprintln(errOut, "Line 1 of stdout is the token: store it now, it is not shown again and Flodni keeps only its hash.")
 	_, _ = fmt.Fprintln(errOut, `Line 2 is the entry: add it to the "tokens" array of auth_tokens_file, then restart.`)
 	return 0
+}
+
+// startAuth decides the auth mode from the configuration (ADR 0004). An error is a
+// refusal to start and Run exits on it; the token and the hashes are never logged.
+func startAuth(cfg *config.Config, log *slog.Logger) (*apiauth.Tokens, error) {
+	auth, err := apiauth.Load(apiauth.LoadOptions{
+		APIToken:   cfg.APIToken,
+		TokensFile: cfg.AuthTokensFile,
+		GoStormURL: cfg.GoStormBaseURL,
+		Logger:     log,
+		// auth_jwt is parsed by a later step (ADR 0004 step 5); false until then.
+		JWTConfigured: false,
+	})
+	if err != nil {
+		return nil, err
+	}
+	if auth.Mode() == apiauth.ModeScoped && log != nil {
+		// The file is loaded and validated, but the gate that enforces it is step 3: say so
+		// rather than let the owner assume the ports are closed. The startup report
+		// carries the same fact as the auth_not_enforced alarm.
+		log.Warn("[Auth] WARNING: auth_tokens_file is loaded but this build does not enforce it yet; the ports are as open as without it")
+	}
+	return auth, nil
 }

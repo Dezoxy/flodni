@@ -17,6 +17,7 @@ import (
 	"os"
 	"regexp"
 	"strings"
+	"syscall"
 )
 
 // This file is the token store of ADR 0004: the scopes, the tokens file and its
@@ -80,15 +81,19 @@ func (s ScopeSet) Names() []string {
 // ParseScopes reads a comma-separated scope list. Every item must be a known scope
 // and the list must not be empty.
 func ParseScopes(list string) (ScopeSet, error) {
-	return scopesFromNames(strings.Split(list, ","))
+	names := strings.Split(list, ",")
+	for i := range names {
+		names[i] = strings.TrimSpace(names[i]) // the command line only; the file is exact
+	}
+	return scopesFromNames(names)
 }
 
 func scopesFromNames(names []string) (ScopeSet, error) {
 	var set ScopeSet
 	for _, n := range names {
-		bit := scopeBit(Scope(strings.TrimSpace(n)))
+		bit := scopeBit(Scope(n))
 		if bit == 0 {
-			return 0, fmt.Errorf("unknown scope %q (known: %s)", strings.TrimSpace(n), knownScopes())
+			return 0, fmt.Errorf("unknown scope %q (known: %s)", n, knownScopes())
 		}
 		set |= bit
 	}
@@ -249,8 +254,9 @@ type LoadOptions struct {
 	TokensFile string // auth_tokens_file, after the environment override
 	GoStormURL string // gostorm_url, checked in scoped mode
 	// JWTConfigured is true when an auth_jwt block is set. The block itself is parsed
-	// by a later step; until then the daemon passes false, and the refusal below
-	// (auth_jwt without a tokens file) is already in force for it.
+	// by a later step (ADR 0004 step 5); until the daemon passes the real value the
+	// refusal below (auth_jwt without a tokens file) cannot fire in a running daemon,
+	// and only the tests exercise it.
 	JWTConfigured bool
 	Logger        *slog.Logger // for the one warning; nil logs nothing
 }
@@ -311,18 +317,21 @@ type tokensFile struct {
 }
 
 func readTokensFile(path string, logger *slog.Logger) ([]Entry, error) {
-	f, err := os.Open(path)
+	// O_NONBLOCK: opening a FIFO with no writer must not block the start forever.
+	f, err := os.OpenFile(path, os.O_RDONLY|syscall.O_NONBLOCK, 0)
 	if err != nil {
 		return nil, err
 	}
 	defer func() { _ = f.Close() }() // read-only
-	if fi, err := f.Stat(); err == nil {
-		if fi.IsDir() {
-			return nil, errors.New("is a directory")
-		}
-		if fi.Mode().Perm()&0o022 != 0 && logger != nil {
-			logger.Warn("[Auth] the tokens file is writable by group or others", "mode", fi.Mode().Perm().String())
-		}
+	fi, err := f.Stat()
+	if err != nil {
+		return nil, err
+	}
+	if !fi.Mode().IsRegular() {
+		return nil, errors.New("is not a regular file")
+	}
+	if fi.Mode().Perm()&0o022 != 0 && logger != nil {
+		logger.Warn("[Auth] the tokens file is writable by group or others", "mode", fi.Mode().Perm().String())
 	}
 	data, err := io.ReadAll(io.LimitReader(f, maxFileBytes+1))
 	if err != nil {
@@ -337,10 +346,68 @@ func readTokensFile(path string, logger *slog.Logger) ([]Entry, error) {
 	if err := dec.Decode(&file); err != nil {
 		return nil, fmt.Errorf("parse: %w%s", err, lineOf(data, err))
 	}
+	if err := rejectDuplicateKeys(data); err != nil {
+		return nil, err
+	}
 	if _, err := dec.Token(); err != io.EOF {
 		return nil, errors.New("parse: trailing data after the JSON object")
 	}
 	return validateEntries(file.Tokens)
+}
+
+// rejectDuplicateKeys refuses an object that repeats a key. encoding/json keeps the last
+// one and matches keys without regard to case, so {"scopes":["webhook"],"scopes":["admin"]}
+// would load as admin; the keys are compared folded to lower case for the same reason.
+// It scans the first JSON value only, and the data has already decoded cleanly.
+func rejectDuplicateKeys(data []byte) error {
+	type frame struct {
+		obj    bool
+		wantKy bool
+		seen   map[string]bool
+	}
+	var stack []*frame
+	valueDone := func() {
+		if n := len(stack); n > 0 && stack[n-1].obj {
+			stack[n-1].wantKy = true
+		}
+	}
+	dec := json.NewDecoder(bytes.NewReader(data))
+	for {
+		tok, err := dec.Token()
+		if err != nil {
+			return nil // the decode above reported anything malformed
+		}
+		d, isDelim := tok.(json.Delim)
+		if n := len(stack); n > 0 && stack[n-1].obj && stack[n-1].wantKy && !isDelim {
+			key, _ := tok.(string)
+			key = strings.ToLower(key)
+			if stack[n-1].seen[key] {
+				return fmt.Errorf("parse: duplicate key %q", key)
+			}
+			stack[n-1].seen[key] = true
+			stack[n-1].wantKy = false
+			continue
+		}
+		if isDelim {
+			switch d {
+			case '{':
+				stack = append(stack, &frame{obj: true, wantKy: true, seen: map[string]bool{}})
+			case '[':
+				stack = append(stack, &frame{})
+			default:
+				stack = stack[:len(stack)-1]
+				if len(stack) == 0 {
+					return nil
+				}
+				valueDone()
+			}
+			continue
+		}
+		if len(stack) == 0 {
+			return nil
+		}
+		valueDone()
+	}
 }
 
 // lineOf names the line of a syntax error, so a mistake in the file can be found.
