@@ -153,7 +153,8 @@ day to day.
 | the panel behind an identity-aware proxy | the proxy's assertion (below), which is `admin` |
 | the break-glass credential | `admin`, kept offline |
 
-That is six tokens plus the break-glass one. The break-glass `admin` token is
+`GET /api/library/list` needs `read`, not `library`. That is six tokens plus the
+break-glass one. The break-glass `admin` token is
 also the way into the panel when the identity provider is down.
 
 A configuration that uses the tokens file and the proxy sign-in looks like this
@@ -972,7 +973,8 @@ the places they were first seen (the stale cache priorities, now dropped).
   reached: the refill decisions are the ones the engine made before. To A/B
   it on one swarm, run a period with it off and a period with it on, same
   library and viewers, and compare `flodni_read_stalls_total`,
-  `flodni_session_first_byte_seconds` and the sessions' `stalls` and
+  `flodni_session_first_byte_seconds`, `flodni_readahead_refetched_bytes_total`
+  and the sessions' `stalls` and
   `max_stall_ms`. The
   decisions are pinned in `internal/anacrolix-torrent/refill_flagoff_test.go`
   (switch off) and `refill_v2_test.go` (switch on).
