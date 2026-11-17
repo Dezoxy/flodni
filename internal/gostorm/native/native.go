@@ -806,3 +806,52 @@ func convertStatusToStats(st *state.TorrentStatus) *TorrentStats {
 		Downloaded:    st.LoadedSize,
 	}
 }
+
+// FilePieceMap is the engine's view of the pieces under one file from a read position:
+// Complete[k] says whether piece First+k is verified complete. PieceLen is the torrent's
+// piece length and FileOffset where the file starts inside the torrent, so file offset x
+// lies in piece (FileOffset+x)/PieceLen.
+type FilePieceMap struct {
+	PieceLen   int64
+	FileOffset int64
+	First      int
+	Complete   []bool
+}
+
+// FilePieces snapshots which pieces cover file fileID's bytes [from, limit), or nil when the
+// torrent is not hydrated, has no info yet, or has no such file. It never wakes a torrent
+// (PeekTorrent). The piece bitmap is read in one call under the engine's client read lock.
+func FilePieces(hash string, fileID int, from, limit int64) *FilePieceMap {
+	if from < 0 || limit <= from {
+		return nil
+	}
+	t := torr.PeekTorrent(hash)
+	if t == nil || t.Torrent == nil {
+		return nil
+	}
+	info := t.Torrent.Info()
+	if info == nil || info.PieceLength <= 0 {
+		return nil
+	}
+	var path string
+	for _, fs := range t.Status().FileStats {
+		if fs != nil && fs.Id == fileID {
+			path = fs.Path
+			break
+		}
+	}
+	if path == "" {
+		return nil
+	}
+	for _, f := range t.Files() {
+		if f.Path() != path {
+			continue
+		}
+		pl := info.PieceLength
+		first := int((f.Offset() + from) / pl)
+		last := int((f.Offset() + limit - 1) / pl)
+		return &FilePieceMap{PieceLen: pl, FileOffset: f.Offset(), First: first,
+			Complete: t.Torrent.CompletePieces(first, last-first+1)}
+	}
+	return nil
+}

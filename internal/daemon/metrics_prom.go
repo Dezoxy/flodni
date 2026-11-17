@@ -134,6 +134,7 @@ func collectProm(w *promtext.Writer) {
 	collectProcessProm(w)
 	w.Gauge("flodni_sessions_open", "Sessions open now: the open list of /api/sessions.",
 		promSample(int64(openSessionCount())))
+	collectSessionAheadProm(w)
 
 	collectWarmupProm(w)
 	collectPlaybackProm(w)
