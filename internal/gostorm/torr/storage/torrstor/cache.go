@@ -72,6 +72,12 @@ type Cache struct {
 	cleanTrigger chan struct{} // V227: Rate-limited cleanup trigger (never closed — use cleanStop)
 	cleanStop    chan struct{} // V280: Closed on Cache.Close() to stop the goroutine
 
+	// lastStrandedNS is the last dropStrandedPartials scan.
+	lastStrandedNS atomic.Int64
+	// forgetPartial makes the torrent forget a piece's chunks; nil means c.torrent's
+	// ForgetPartialPiece. A seam for tests: the engine's dirty bits are not reachable from here.
+	forgetPartial func(id int) bool
+
 	// V279: Track which pieces have non-None priority set by us.
 	// clearPriority() iterates this (~25 entries) instead of all c.pieces (~512).
 	// Eliminates O(N_cached) PieceState(rLock) calls per cleanup cycle.
@@ -397,9 +403,11 @@ func (c *Cache) cleanPieces() {
 	// would block up to 1s on waitAvailable() before priorities were updated.
 	c.refreshPriorities()
 
+	now := time.Now()
+	c.dropStrandedPartials(now)
+
 	// V138: Throttle the cleaner's eviction to at most once per second, unless we are near
 	// capacity (>90%). MarkComplete evicts through evictNow and skips this throttle.
-	now := time.Now()
 	if now.UnixNano()-c.lastCleanNS.Load() < int64(time.Second) && atomic.LoadInt64(&c.filled) < (c.capacity*9)/10 {
 		return
 	}
