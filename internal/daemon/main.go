@@ -327,6 +327,9 @@ func Run() {
 	// Request refill v2 (opt-in, off by default, startup-only): read once, before the engine
 	// builds its client.
 	torr.EngineRefillV2 = gc().EngineRefillV2
+	// Cold-start connection boost (opt-in, off by default, startup-only): read once, before
+	// the first torrent wakes.
+	torr.EngineColdBoost = gc().EngineColdBoost
 	go func() {
 		logger.Info("Starting Embedded GoStorm Engine...")
 		server.Start() // Starts Web Server on 8090 and Engine

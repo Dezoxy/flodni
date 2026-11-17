@@ -251,6 +251,10 @@ func (c *NativeClient) Wake(ctx context.Context, magnetUrl string, fileIdx int) 
 		// contention (PeerConns snapshot) that briefly stalled the pump.
 		torr.SaveMetadataIfMissing(t)
 
+		// engine_cold_boost (off by default): more connections until data flows. A no-op
+		// with the switch off, and for a wrapper that already had its boost.
+		t.BoostColdStart()
+
 		// Optimistic active update
 		c.activeHashes.Store(hash, true)
 	}

@@ -241,6 +241,12 @@ type Config struct {
 	// always ran.
 	EngineRefillV2 bool `json:"engine_refill_v2"`
 
+	// EngineColdBoost is an opt-in switch adapted from upstream: a torrent that wakes with a
+	// per-torrent connection limit below 35 gets 35 until 1 MiB of useful data has arrived or
+	// 30 s have passed, then the configured limit comes back (internal/gostorm/torr/coldboost.go).
+	// Off unless the owner turns it on, and read once at start: a change needs a restart.
+	EngineColdBoost bool `json:"engine_cold_boost"`
+
 	// PlaybackWebhookWarnDays is the window of the "no play webhook" warning
 	// (internal/daemon/webhook_status.go): it is raised when a reader session closed unconfirmed in the
 	// last N days and no play webhook matched a file in that time. 0 turns the warning
