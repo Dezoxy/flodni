@@ -78,6 +78,7 @@ type MkvHandle struct {
 	seqAdvances     atomic.Int32 // consecutive sequential streaming reads, feeds the promotion below
 	budgetHold      budgetHold   // reader budget: this handle's wait for a webhook (reader_budget.go)
 	wakeRefused     atomic.Bool  // the engine refused to wake this handle's torrent: every read answers EIO
+	refDropped      atomic.Bool  // this handle's pump reference and open count are dropped (Release or the sweep); an attach clears it
 	released        atomic.Bool  // Release ran: a second call (kernel and orphan sweep) must change nothing
 	openedAt        time.Time    // set once at Open; who opened first decides a takeover (mayTakeOverStreamingPrimary)
 	lastRead        atomic.Int64 // UnixNano of the last read, primary or not; read without a lock by activeStreamingPrimary
@@ -607,6 +608,7 @@ func (h *MkvHandle) readInner(fuseCtx context.Context, dest []byte, off int64) (
 						select {
 						case masterDataSemaphore <- struct{}{}:
 							h.hasSlot.Store(true)
+							h.refDropped.Store(false)
 							upReader := nativeBridge.NewStreamReader(h.hash, h.fileID, h.size)
 							h.nativeReader = upReader
 							pumpCtx, pumpCancel := context.WithCancel(context.Background())
@@ -692,7 +694,9 @@ pumpSlotResolved:
 	fetchHandedOff := false
 
 	// Dedup concurrent misses in the same chunk: leader fetches, followers wait and copy.
-	if h.hash != "" {
+	// A probe does not lead the flight: its fetch fills no cache, so a player miss in the same
+	// chunk waiting behind it would wait for nothing. It fetches on its own.
+	if h.hash != "" && !probe {
 		flightChunk := raCache.ChunkSize(h.path)
 		flightKey := fmt.Sprintf("%s:%d", h.path, (off/flightChunk)*flightChunk)
 		newFlight := &fetchFlight{done: make(chan struct{})}
@@ -966,7 +970,21 @@ func (h *MkvHandle) Release(fuseCtx context.Context) syscall.Errno {
 	}
 	ttffReleaseClose(h.path)
 	logger.Info(fmt.Sprintf("=== RELEASE VIRTUAL === path=%s", h.path), "path", h.path)
+	return h.releaseResources()
+}
 
+// sweepOrphan is the orphan sweep's cleanup for a handle idle for an hour. It frees what
+// Release frees but leaves Release's latch alone: the handle can still read (a pump that
+// exited lets it re-attach and take a new reference) and the kernel's own Release must then
+// drop that reference, once.
+func (h *MkvHandle) sweepOrphan() {
+	ttffReleaseClose(h.path)
+	_ = h.releaseResources()
+}
+
+// releaseResources is Release's work. The pump reference and the open count are dropped once
+// per attach (refDropped); the rest may run twice (the sweep, then the kernel's Release).
+func (h *MkvHandle) releaseResources() syscall.Errno {
 	// Delete from activeHandles here, not at the end: the early returns below (probe
 	// without slot, replaced pump) would otherwise leak this entry, and both the live
 	// handle checks (anyLiveHandleFor*) and cleanup's activePaths trust the map.
@@ -983,6 +1001,9 @@ func (h *MkvHandle) Release(fuseCtx context.Context) syscall.Errno {
 		// Only decrement if this handle acquired a slot; probe/header reads must not decrement.
 		if !h.hasSlot.Load() {
 			return 0
+		}
+		if !h.refDropped.CompareAndSwap(false, true) {
+			return 0 // the sweep dropped it, and nothing attached since
 		}
 		globalOpenTracker.Dec(h.hash, h.path)
 		if !ownsPumpState(h.pumpState, ps) {

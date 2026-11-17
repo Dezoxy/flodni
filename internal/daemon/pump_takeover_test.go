@@ -23,7 +23,8 @@ func TestASecondViewerOpenedBeforeTheConfirmationTakesThePump(t *testing.T) {
 	sim.settle()
 	a.readRange(probeAt, 40*probeStep, probeStep)
 	b := sim.open("B")
-	sim.confirm()
+	a.read(probeAt+40*probeStep, probeStep) // A keeps reading after B opened
+	sim.play()
 
 	streamFar(b, 700*mb, 16)
 	sim.settle()
@@ -35,21 +36,35 @@ func TestASecondViewerOpenedBeforeTheConfirmationTakesThePump(t *testing.T) {
 	}
 }
 
-// The same viewer reopening, or a second one, once the primary went quiet: nothing watches
-// through it any more, so the next handle that streams takes the pump whenever it opened.
+// streamAlongside has b read n sequential steps from off while the player a keeps reading:
+// one read of a after every four of b's. next is a's next offset and advances.
+func streamAlongside(a, b *simHandle, off int64, n int, next *int64) {
+	for i := 0; i < n; i++ {
+		b.read(off+int64(i)*probeStep, probeStep)
+		if i%4 == 3 {
+			a.read(*next, probeStep)
+			*next += probeStep
+		}
+	}
+}
+
+// A second handle takes the pump once the primary has really gone quiet, however it opened:
+// nothing watches through the primary any more, so a reopen or a second player may have it.
 func TestAPlayerWhosePrimaryWentQuietTakesThePump(t *testing.T) {
 	sim := newPumpSim(t, "/test/takeover-quiet.mkv", probeSize, probeAt, probeFetch)
+	sim.shortWindow(2)
 	a := sim.open("A")
 	sim.settle()
 	a.readRange(probeAt, 40*probeStep, probeStep)
-	b := sim.open("B") // after the confirmation: not the player of that session
+	b := sim.open("B") // after the session started: not that session's player
+	next := probeAt + 40*probeStep
 
-	streamFar(b, 700*mb, 16)
+	streamAlongside(a, b, 700*mb, 16, &next)
 	if got := sim.primaryOwner(); got != "[A]" {
 		t.Fatalf("primary owner = %s with A still reading, want [A]", got)
 	}
 
-	a.h.lastRead.Store(time.Now().Add(-2 * primaryActiveWindow()).UnixNano())
+	time.Sleep(2500 * time.Millisecond) // A goes quiet past the window, for real
 	b.readRange(700*mb+16*probeStep, 16*probeStep, probeStep)
 	if got := sim.primaryOwner(); got != "[B]" {
 		t.Errorf("primary owner = %s, want [B] once A went quiet", got)
@@ -57,26 +72,29 @@ func TestAPlayerWhosePrimaryWentQuietTakesThePump(t *testing.T) {
 }
 
 // A buffered player goes quiet between bursts. Three seconds is inside the window: a probe
-// arriving then still defers to the primary, and the resume position stays the player's.
+// that opens in the lull still defers once the player reads again, and the resume position
+// stays the player's.
 func TestAProbeArrivingWhileThePrimaryIsBrieflyQuietLeavesItAlone(t *testing.T) {
 	sim := newPumpSim(t, "/test/takeover-brief-quiet.mkv", probeSize, probeAt, probeFetch)
 	a := sim.open("A")
 	sim.settle()
 	a.readRange(probeAt, 40*probeStep, probeStep)
-	last := probeAt + 39*probeStep
-	a.h.lastRead.Store(time.Now().Add(-3 * time.Second).UnixNano())
 	if 3*time.Second >= primaryActiveWindow() {
 		t.Fatalf("setup: 3 s is not inside the window (%v)", primaryActiveWindow())
 	}
+	time.Sleep(3 * time.Second)
 	b := sim.open("B")
+	next := probeAt + 40*probeStep
+	a.read(next, probeStep) // the player's next burst
+	next += probeStep
 
-	streamFar(b, 700*mb, 16)
+	streamAlongside(a, b, 700*mb, 16, &next)
 	b.release()
 	if got := sim.primaryOwner(); got != "[A]" {
 		t.Errorf("primary owner = %s, want [A]: a probe took the primary from a briefly quiet player", got)
 	}
-	if got := sim.resumeOff(); got != last {
-		t.Errorf("persisted resume position = %d MiB, want A's %d MiB", got/mb, last/mb)
+	if got, want := sim.resumeOff(), next-probeStep; got != want {
+		t.Errorf("persisted resume position = %d MiB, want A's %d MiB", got/mb, want/mb)
 	}
 	if got := atomic.LoadInt64(&sim.pumpState().playerOff); got != 0 {
 		t.Errorf("shared player position = %d MiB, want it untouched", got/mb)
@@ -95,6 +113,7 @@ func TestAProbeReadDoesNotFillTheSharedCache(t *testing.T) {
 	sim.settle()
 	a.readRange(probeAt, 40*probeStep, probeStep)
 	b := sim.open("B")
+	a.read(probeAt+40*probeStep, probeStep) // the player keeps reading after B opened
 
 	b.read(600*mb, probeStep)
 	b.read(600*mb+probeStep, probeStep)

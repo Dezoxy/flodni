@@ -894,8 +894,9 @@ func startHandleGC() {
 
 				if idle > 1*time.Hour {
 					logger.Info(fmt.Sprintf("[V239] Force closing orphan handle (idle 1h): %s", path), "path", path)
-					// We simulate a FUSE Release to cleanup all resources
-					_ = h.Release(context.Background())
+					// Drop the handle's resources without spending the kernel Release's
+					// latch: the handle may read again, and the real Release must still run.
+					h.sweepOrphan()
 					count++
 				}
 				return true

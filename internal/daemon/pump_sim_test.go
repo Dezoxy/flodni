@@ -56,7 +56,7 @@ func newPumpSim(t *testing.T, path string, size, resumeAt int64, fetchLatency ti
 		return len(p), nil
 	}
 	app.playbackRegistry.Store(path, &PlaybackState{
-		Path: path, Hash: testHash, IsHealthy: true, ConfirmedAt: time.Now(), OpenedAt: time.Now(), LastSeekOff: resumeAt,
+		Path: path, Hash: testHash, IsHealthy: true, ConfirmedAt: time.Now(), SessionStart: time.Now(), OpenedAt: time.Now(), LastSeekOff: resumeAt,
 	})
 	t.Cleanup(func() {
 		if v, ok := app.activePumps.Load(path); ok {
@@ -64,10 +64,7 @@ func newPumpSim(t *testing.T, path string, size, resumeAt int64, fetchLatency ti
 		}
 		// The pump returns its slot (hasSlot false) from its last defer, after its final
 		// log line: waiting for the registry entry alone leaves it reading restored globals.
-		waitUntil(t, "the pump to end", func() bool {
-			_, live := app.activePumps.Load(path)
-			return !live && (len(s.handles) == 0 || !s.handles[0].h.hasSlot.Load())
-		})
+		waitUntil(t, "the pump to end", s.pumpGone)
 		for _, sh := range s.handles {
 			app.activeHandles.Delete(sh.h)
 		}
@@ -78,17 +75,57 @@ func newPumpSim(t *testing.T, path string, size, resumeAt int64, fetchLatency ti
 	return s
 }
 
-// confirm is the media server's play webhook arriving now: every handle opened so far
-// predates it, every later one follows it.
-func (s *pumpSim) confirm() {
+// play is the media server's play webhook arriving now: it starts a session, so every handle
+// opened so far predates it and every later one follows it.
+func (s *pumpSim) play() {
+	ps := s.playback()
+	ps.mu.Lock()
+	ps.ConfirmedAt, ps.SessionStart = time.Now(), time.Now()
+	ps.mu.Unlock()
+}
+
+// resume is a resume webhook after a pause: it confirms the playback again but starts no session.
+func (s *pumpSim) resume() {
+	ps := s.playback()
+	ps.mu.Lock()
+	ps.ConfirmedAt = time.Now()
+	ps.mu.Unlock()
+}
+
+func (s *pumpSim) playback() *PlaybackState {
 	v, ok := app.playbackRegistry.Load(s.path)
 	if !ok {
 		s.t.Fatal("no playback registered")
 	}
-	ps := v.(*PlaybackState)
-	ps.mu.Lock()
-	ps.ConfirmedAt = time.Now()
-	ps.mu.Unlock()
+	return v.(*PlaybackState)
+}
+
+// shortWindow sets warm_start_idle_seconds, which is how long a primary may be quiet and
+// still count as watching, so a test can let one go quiet for real in about a second.
+func (s *pumpSim) shortWindow(seconds int) {
+	cfg := *gc()
+	cfg.WarmStartIdleSeconds = seconds
+	globalConfig.Store(&cfg)
+}
+
+// endPump cancels the shared pump and waits until it has gone, as a pump that reached EOF has.
+func (s *pumpSim) endPump() {
+	s.t.Helper()
+	s.pumpState().cancel()
+	waitUntil(s.t, "the pump to end", s.pumpGone)
+}
+
+func (s *pumpSim) pumpGone() bool {
+	if _, live := app.activePumps.Load(s.path); live {
+		return false
+	}
+	for _, sh := range s.handles {
+		// A creator clears hasSlot from the pump's last defer; an attached handle never does.
+		if !sh.h.isWatching && sh.h.hasSlot.Load() {
+			return false
+		}
+	}
+	return true
 }
 
 // open mirrors VirtualMkvNode.Open for a native file: a fresh handle, the pump started or

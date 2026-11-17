@@ -21,8 +21,11 @@ type PlaybackState struct {
 	ImdbID      string // IMDB ID from MKV line 4, used for webhook matching
 	OpenedAt    time.Time
 	ConfirmedAt time.Time // Set when Plex webhook arrives
-	IsHealthy   bool      // Confirmed by Plex
-	IsStopped   bool      // Set on explicit media.stop webhook
+	// SessionStart is when a media.play webhook last started a session for this file. Resume,
+	// pause and stop leave it alone: it is what says which handles opened before the player.
+	SessionStart time.Time
+	IsHealthy    bool // Confirmed by Plex
+	IsStopped    bool // Set on explicit media.stop webhook
 	// V750: Inferred playback detection (self-healing when webhook is lost)
 	ReadCount   int64
 	LastSeekOff int64
@@ -75,11 +78,12 @@ func (ps *PlaybackState) LastSignOfLife() time.Time {
 	return ps.OpenedAt
 }
 
-// confirmedAt is when the media server's webhook confirmed the playback, zero if none did.
-func (ps *PlaybackState) confirmedAt() time.Time {
+// sessionStartedAt is when a play webhook last started a session for the file, zero if none
+// did (a restart, or a playback only inferred from reads).
+func (ps *PlaybackState) sessionStartedAt() time.Time {
 	ps.mu.RLock()
 	defer ps.mu.RUnlock()
-	return ps.ConfirmedAt
+	return ps.SessionStart
 }
 
 func (ps *PlaybackState) GetStatus() bool {

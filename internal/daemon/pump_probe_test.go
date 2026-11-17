@@ -69,6 +69,8 @@ func runProbeScenario(t *testing.T, path string, probeFrom, probeLen int64) *pro
 
 	run.b = sim.open("B")
 	aNext := probeAt + 40*probeStep
+	run.a.read(aNext, probeStep) // the player keeps reading: it reads after B opened
+	aNext += probeStep
 	run.b.readRange(0, 1*mb, probeStep)
 	for i := int64(0); i < 4; i++ {
 		run.b.readRange(probeFrom+i*(probeLen/4), probeLen/4, probeStep)
