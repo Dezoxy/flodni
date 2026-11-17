@@ -140,8 +140,9 @@ func TestRefetchedBytesAndStrandedPartial(t *testing.T) {
 		t.Errorf("stranded = %d, want %d", got, want)
 	}
 
-	// Seek to 12 MiB: window 9..14 takes in 10, 11 and 13 and leaves 21 behind.
-	if _, err := r.Seek(12*mib, 0); err != nil {
+	// Seek to 10 MiB: the window is the readahead (the 5.1 MiB protected share) ahead of the
+	// reader and nothing behind it, pieces 10..15. It takes in 10, 11 and 13 and leaves 21 behind.
+	if _, err := r.Seek(10*mib, 0); err != nil {
 		t.Fatal(err)
 	}
 	if got, want := c.strandedPartialBytes(), mib/2; got != want {

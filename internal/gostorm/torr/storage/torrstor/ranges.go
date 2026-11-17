@@ -148,3 +148,24 @@ func perReaderReadahead(total int64, readers int) int64 {
 	}
 	return ra
 }
+
+// protectedWindow returns a reader's eviction-protected byte range around cur. The forward side
+// covers the readahead actually requested: protecting less let the band between the two be
+// fetched with deadlines and then evicted as the oldest complete pieces (about 11% re-download
+// with 4-8 MiB pieces). The whole window is capped at protected, the share of the cache the
+// reader may pin, so protection never exceeds what the cache can hold; what the readahead
+// leaves of it goes behind cur. Until the first readahead is set (0) the percentage prc applies.
+// Adapted from upstream Tiramisu 42658e1.
+func protectedWindow(cur, protected, prc, readahead int64) (begin, end int64) {
+	forward := protected * prc / 100
+	if readahead > 0 {
+		forward = readahead
+	}
+	if forward > protected {
+		forward = protected
+	}
+	if forward < 0 {
+		forward = 0
+	}
+	return cur - (protected - forward), cur + forward
+}
