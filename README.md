@@ -979,20 +979,25 @@ the places they were first seen (the stale cache priorities, now dropped).
   decisions are pinned in `internal/anacrolix-torrent/refill_flagoff_test.go`
   (switch off) and `refill_v2_test.go` (switch on).
 - **`engine_cold_boost`** in `config.json` (default `false`, read once at
-  start: a change needs a restart). When a torrent wakes with a per-torrent
-  connection limit below 35 (the default is 25), the limit is raised to 35
-  until 1 MiB of useful data has arrived or 30 s have passed, then the
-  configured limit is restored exactly once (also when the torrent closes
-  during the boost). The check runs on the once-a-second stats tick, so the
-  boost ends within a second of either condition. It helps a swarm with more
-  peers than the limit, where a cold start waits for one of them to unchoke
-  the torrent; it does little for a small private swarm that has fewer peers
-  than the limit anyway. A limit of 35 or more is left alone. It adds no peer
-  source: discovery is unchanged, so a private torrent stays private. To A/B
-  it, run a period with it off and a period with it on, same library and
-  viewers, and compare `flodni_session_first_byte_seconds` and
-  `flodni_read_stalls_total` for sessions that wake a torrent. With the switch
-  off the code is not reached. Pinned in `internal/gostorm/torr/coldboost_test.go`.
+  start: a change needs a restart). When a player starts reading a file, that
+  is the primary handle's first read past the header region (the SSD head
+  window), the torrent's per-connection limit is raised from the configured
+  value to 35 if it is below 35 (the default is 25), until 1 MiB of useful
+  data has arrived or 30 s have passed. Then the configured limit is restored
+  exactly once, also when the torrent closes during the boost. Library scans,
+  warm on add, probe handles, header reads and tail probes never start it,
+  and a later seek on the same handle does not start it again. The end is
+  checked on the once-a-second stats tick, so the boost ends within a second
+  of either condition. It helps a swarm with more peers than the limit, where
+  a cold start waits for one of them to unchoke the torrent; it does little
+  for a small private swarm that has fewer peers than the limit anyway. A
+  limit of 35 or more is left alone. It adds no peer source: discovery is
+  unchanged, so a private torrent stays private. To A/B it, run a period with
+  it off and a period with it on, same library and viewers, and compare
+  `flodni_session_first_byte_seconds` and `flodni_read_stalls_total`. With the
+  switch off the code is not reached. Pinned in
+  `internal/gostorm/torr/coldboost_test.go` (the engine side) and
+  `internal/daemon/coldboost_handle_test.go` (when it starts).
 
 ## Readability record
 

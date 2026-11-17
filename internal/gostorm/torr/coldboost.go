@@ -106,7 +106,8 @@ func (t *Torrent) setConns(n int) {
 	}
 }
 
-// BoostColdStart starts the boost for a torrent that has just woken. It does nothing unless
+// BoostColdStart starts the boost when a player starts reading the torrent; the daemon decides
+// when (internal/daemon/coldboost_handle.go). It does nothing unless
 // engine_cold_boost is on, and nothing the second time for the same wrapper.
 func (t *Torrent) BoostColdStart() {
 	if !EngineColdBoost || t == nil {
