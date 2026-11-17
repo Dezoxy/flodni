@@ -74,13 +74,10 @@ var (
 	btsetsMu sync.RWMutex
 )
 
-func SetBTSets(sets *BTSets) {
-	btsetsMu.Lock()
-	defer btsetsMu.Unlock()
-
-	if ReadOnly {
-		return
-	}
+// Normalize clamps sets to the values the engine accepts, the same way SetBTSets does
+// before it stores them. It is pure: a caller that compares a request with the stored
+// settings normalizes the request first, or a defaulted field reads as a change.
+func Normalize(sets *BTSets) {
 	// V301: Failsafe checks - only set defaults if the value is truly missing/invalid (<= 0)
 	if sets.CacheSize <= 0 {
 		sets.CacheSize = 128 * 1024 * 1024
@@ -105,6 +102,16 @@ func SetBTSets(sets *BTSets) {
 	if sets.PreloadCache > 100 {
 		sets.PreloadCache = 100
 	}
+}
+
+func SetBTSets(sets *BTSets) {
+	btsetsMu.Lock()
+	defer btsetsMu.Unlock()
+
+	if ReadOnly {
+		return
+	}
+	Normalize(sets)
 
 	if sets.TorrentsSavePath == "" {
 		sets.UseDisk = false
@@ -152,10 +159,8 @@ func SetBTSets(sets *BTSets) {
 	tdb.Set("Settings", "BitTorr", buf)
 }
 
-func SetDefaultConfig() {
-	btsetsMu.Lock()
-	defer btsetsMu.Unlock()
-
+// DefaultBTSets is what "reset to defaults" stores.
+func DefaultBTSets() *BTSets {
 	sets := new(BTSets)
 	sets.CacheSize = 128 * 1024 * 1024 // 128 MB
 	sets.PreloadCache = 0
@@ -170,6 +175,14 @@ func SetDefaultConfig() {
 	sets.ShowFSActiveTorr = true
 	sets.StoreSettingsInJson = true
 	sets.AggressivePeerManagement = true
+	return sets
+}
+
+func SetDefaultConfig() {
+	btsetsMu.Lock()
+	defer btsetsMu.Unlock()
+
+	sets := DefaultBTSets()
 	BTsets = sets
 	if !ReadOnly {
 		buf, err := json.Marshal(BTsets)
@@ -179,6 +192,16 @@ func SetDefaultConfig() {
 		}
 		tdb.Set("Settings", "BitTorr", buf)
 	}
+}
+
+// Snapshot returns a copy of the stored settings (the zero value before they load).
+func Snapshot() BTSets {
+	btsetsMu.RLock()
+	defer btsetsMu.RUnlock()
+	if BTsets == nil {
+		return BTSets{}
+	}
+	return *BTsets
 }
 
 // GetResponsiveMode returns the current ResponsiveMode setting with mutex protection.
@@ -211,10 +234,9 @@ func loadBTSets() {
 	if len(buf) > 0 {
 		err := json.Unmarshal(buf, &BTsets)
 		if err == nil {
-			if BTsets.ReaderReadAHead < 5 {
-				BTsets.ReaderReadAHead = 5
-			}
-			// V301: Do NOT override TorrentDisconnectTimeout here if already loaded from DB
+			// The same clamps a save applies: an unnormalized legacy or hand-edited store
+			// would otherwise make the first save a CLIENT diff made of defaults alone.
+			Normalize(BTsets)
 			return
 		}
 		log.TLogln("Error unmarshal btsets", err)

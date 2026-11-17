@@ -24,15 +24,34 @@ func NewStorage(capacity int64) *Storage {
 	return stor
 }
 
+// SetCapacity changes the size caches opened from now on get. A cache that is already
+// open keeps the size it was opened with: its eviction, window and prefetch maths read
+// the size without a lock and derive values from it at Init.
+func (s *Storage) SetCapacity(capacity int64) {
+	s.mu.Lock()
+	s.capacity = capacity
+	s.mu.Unlock()
+}
+
+// Capacity is the size caches opened from now on get.
+func (s *Storage) Capacity() int64 {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.capacity
+}
+
 func (s *Storage) OpenTorrent(info *metainfo.Info, infoHash metainfo.Hash) (ts.TorrentImpl, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	ch := NewCache(s.capacity, s)
+	capacity := s.capacity
+	ch := NewCache(capacity, s)
 	ch.Init(info, infoHash)
 	s.caches[infoHash] = ch
 
+	// The size this cache was opened with, so the engine's request strategy and the cache
+	// agree after a SetCapacity.
 	capFunc := func() (int64, bool) {
-		return s.capacity, true
+		return capacity, true
 	}
 
 	return ts.TorrentImpl{
