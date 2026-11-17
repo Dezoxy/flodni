@@ -324,6 +324,9 @@ func Run() {
 	torr.HoldExpiry = keepaliveHold
 	// Redial of a dropped only peer (opt-in, off by default): the engine asks when a peer drops.
 	torr.RedialDroppedPeer = func() bool { return gc().RedialDroppedPeer }
+	// Request refill v2 (opt-in, off by default, startup-only): read once, before the engine
+	// builds its client.
+	torr.EngineRefillV2 = gc().EngineRefillV2
 	go func() {
 		logger.Info("Starting Embedded GoStorm Engine...")
 		server.Start() // Starts Web Server on 8090 and Engine
@@ -749,9 +752,12 @@ func Run() {
 	// Control server: metrics, dashboard API and the library API.
 	// WriteTimeout bounds the slowest handler, POST /api/library/add. Worst
 	// case from internal/library: the .torrent upload (30 s, gostorm client
-	// timeout) + AddTorrent (30 s) + the metadata wait (maxMetadataWait 300 s,
-	// plus one 30 s poll and one 3 s sleep past the deadline) + the replacement
-	// read (replacementReadTimeout 60 s) + a cleanup RemoveTorrent (30 s) = 483 s.
+	// timeout) + the engine add (at most 120 s: the add waits for the metadata
+	// and saves the record, bounded by the caller's metadata_wait plus 5 s) +
+	// the metadata poll (maxMetadataWait 300 s, plus one 30 s poll and one 3 s
+	// sleep past the deadline; an add that answered has the metadata, so this
+	// is a ceiling, not a typical cost) + the replacement read
+	// (replacementReadTimeout 60 s) + a cleanup RemoveTorrent (30 s) = 573 s.
 	// 600 s leaves margin. Waiting on another add of the same hash is not
 	// counted: that client is cut off, the add itself still completes.
 	// ReadTimeout covers the body, capped at 1 MiB (maxBodyBytes): 60 s is
@@ -835,35 +841,10 @@ func Run() {
 	// Crea root node virtuale
 	rootData := &VirtualMkvRoot{sourcePath: source}
 
-	// Enable attribute caching from config
-	attrTimeout := time.Duration(gc().AttrTimeoutSeconds * float64(time.Second))
-	entryTimeout := time.Duration(gc().EntryTimeoutSeconds * float64(time.Second))
-	negativeTimeout := time.Duration(gc().NegativeTimeoutSeconds * float64(time.Second))
-
-	// go-fuse checks out ~MaxWrite per in-flight request; 0 leaves that unbounded.
-	// Past the cap it stops reading /dev/fuse, so this trades RAM for latency.
-	maxInflight := int(gc().FuseMaxInflightMB * 1024 * 1024)
-
-	server, err = fs.Mount(mount, rootData, &fs.Options{
-		AttrTimeout: &attrTimeout, EntryTimeout: &entryTimeout,
-		NegativeTimeout: &negativeTimeout,
-		MountOptions: fuse.MountOptions{
-			MaxInflightRequestBytes: maxInflight,
-			AllowOther:              true,
-			MaxBackground:           gc().ConcurrencyLimit,
-			// MaxWrite:                 1024 * 1024,
-			MaxWrite: 4 * 1024 * 1024, // Samba Turbo: 4MB write buffer
-			// MaxReadAhead:             1024 * 1024,
-			MaxReadAhead:             4 * 1024 * 1024, // Samba Turbo: 4MB read-ahead
-			RememberInodes:           true,            // ENABLED: safe with explicit cache control
-			ExplicitDataCacheControl: true,            // attribute-driven invalidation only, not open-time
-			SyncRead:                 false,           // ENABLED ASYNC READS for 4K performance
-			// NFS Export: Stable filesystem identification
-			FsName: "flodni",
-		},
-		UID: gc().UID, // Default file ownership: pi user (1000)
-		GID: gc().GID, // Default file ownership: pi group (1000)
-	})
+	if w := fuseTTLWarning(gc()); w != "" {
+		logger.Warn(w)
+	}
+	server, err = fs.Mount(mount, rootData, fuseOptions(gc()))
 	if err != nil {
 		logger.Error("FUSE mount failed", "err", err)
 		os.Exit(1)
