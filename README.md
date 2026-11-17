@@ -2330,6 +2330,26 @@ file of that length (by name if several); else the open fails with `EIO`.
   stored list whose stale stub shares its index with another file's warm head
   of a plausible length; `GET /api/library/audit` lists such stubs.
 
+## FUSE mount options
+
+Startup-only: the mount is made once, so a save from the Control Panel changes
+them at the next start. A timeout outside its range refuses the start (and the
+save). The reasoning, and what Flodni leaves to the host, is
+[ADR 0005](docs/architecture/decisions/0005-fuse-timeouts-splice-readahead.md).
+
+| Key | Values | Default |
+| --- | --- | --- |
+| `attr_timeout_seconds` | seconds, 0 to 60 | `1` |
+| `entry_timeout_seconds` | seconds, 0 to 60 | `1` |
+| `negative_timeout_seconds` | seconds, 0 to 60 | `0` |
+| `fuse_disable_splice` | `true`, `false` | `false` |
+
+Flodni does not invalidate the kernel's cached names when a stub is removed or
+replaced, so an `attr_timeout_seconds` or `entry_timeout_seconds` above 1 can
+keep a removed stub visible for that long. Start logs a `[Config] WARNING` line
+when either is above the default. The kernel's readahead is host policy: Flodni
+never writes it.
+
 ## Logging
 
 The daemon logs through `log/slog` (`internal/flog`). The default output is

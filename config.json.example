@@ -10,6 +10,7 @@
   "entry_timeout_seconds": 1,
   "negative_timeout_seconds": 0,
   "fuse_max_inflight_mb": 0,
+  "fuse_disable_splice": false,
   "max_retry_attempts": 6,
   "retry_delay_ms": 500,
   "preload_workers_count": 4,
