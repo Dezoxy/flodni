@@ -752,9 +752,12 @@ func Run() {
 	// Control server: metrics, dashboard API and the library API.
 	// WriteTimeout bounds the slowest handler, POST /api/library/add. Worst
 	// case from internal/library: the .torrent upload (30 s, gostorm client
-	// timeout) + AddTorrent (30 s) + the metadata wait (maxMetadataWait 300 s,
-	// plus one 30 s poll and one 3 s sleep past the deadline) + the replacement
-	// read (replacementReadTimeout 60 s) + a cleanup RemoveTorrent (30 s) = 483 s.
+	// timeout) + the engine add (at most 120 s: the add waits for the metadata
+	// and saves the record, bounded by the caller's metadata_wait plus 5 s) +
+	// the metadata poll (maxMetadataWait 300 s, plus one 30 s poll and one 3 s
+	// sleep past the deadline; an add that answered has the metadata, so this
+	// is a ceiling, not a typical cost) + the replacement read
+	// (replacementReadTimeout 60 s) + a cleanup RemoveTorrent (30 s) = 573 s.
 	// 600 s leaves margin. Waiting on another add of the same hash is not
 	// counted: that client is cut off, the add itself still completes.
 	// ReadTimeout covers the body, capped at 1 MiB (maxBodyBytes): 60 s is

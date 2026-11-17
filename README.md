@@ -324,6 +324,20 @@ marked "every mode". Read these before the first start of v0.3.0:
 - The library add and inspect routes accept only a `magnet:` link whose first
   `xt` is an anchored 40-hex or 32-base32 hash, in every mode; any other link,
   `http(s)` and `file:` included, is 400 before the engine is called.
+- `POST /torrents` (the engine port) no longer reads a `file:` path: the
+  link is refused as an unknown scheme. An `http(s)` link is the only fetch an
+  add makes: at most 10 MiB, 60 s in all, up to 3 redirects and only on the
+  host it started at (a redirect to a `magnet:` link still works). The poster
+  check has one 10 s deadline in total, HEAD and GET fallback together, and the
+  same redirect rule.
+- With `save_to_db` set, `POST /torrents` answers only after the record is
+  saved: 200 when it is, 504 when no metadata arrived before the timeout (the
+  optional `metadata_wait`, in seconds, bounds it), 500 when the save failed (a
+  JSON `error` says which). Without `save_to_db` it answers at once, as before.
+  `POST /torrent/upload` with `save` still saves in the background. The library
+  add sends its `metadata_wait` on, so a dead swarm answers 504 "no metadata"
+  within about that wait plus 5 s, as before, not 502; the add call is capped at
+  2 minutes (it was 30 s per call before the engine waited for the record).
 - The engine answers 404, not a 307 redirect, to `POST /torrents/` with a
   trailing slash, in every mode.
 - Scoped mode, once chosen: both ports deny by default, a wrong bearer is
@@ -2468,6 +2482,8 @@ scraper on the same host or Docker network.
 | `flodni_fetch_dedup_total` | counter | none | Concurrent fetches of one chunk that shared a single fetch. |
 | `flodni_engine_short_reads_total` | counter | `path` | Engine reads that ended short and were reported as success: `stream` (the sequential reader) or `fetch` (the stateless block fetch behind the FUSE fallback). 0 from start. |
 | `flodni_engine_short_read_repairs_total` | counter | `result` | Outcome of the stream reader's refill loop, per read that needed it: `repaired` after a reconnect, `unfilled` when a gap stayed. |
+| `flodni_readahead_refetched_bytes_total` | counter | none | Bytes the engine fetched again for a piece that had completed and been evicted from the in-memory piece cache (kept per torrent while it is open). Counted, not acted on: the baseline for judging eviction. 0 from start. |
+| `flodni_readahead_stranded_partial_bytes` | gauge | none | Bytes held by partially written pieces outside every reader's protected window, over open torrents. Such a piece is not evictable, so after a seek the bytes stay until the piece is fetched to the end. Sampled at scrape under each cache's reader read lock; no engine lock. Alert on a value that stays high with no one playing. |
 | `flodni_engine_peer_redials_total` | counter | none | Peers the opt-in redial (`redial_dropped_peer`) added back to a private torrent after its only connected peer dropped. 0 with the switch off. See Engine stall gaps. |
 | `flodni_engine_db_write_errors_total` | counter | `op` | Engine database (`config.db`) commits that failed, by `op`: `set` (a record save), `rem` (a removal) or `clear`. Each is a record not saved or not removed; alert on any increase. All three present from 0. See Engine state and backup. |
 | `flodni_engine_hedge_triggers_total` | counter | none | Tail-hedge duplicate requests the engine fired. A process counter: unlike `hedge_trigger_count` in `/metrics`, it does not fall when a torrent expires. |

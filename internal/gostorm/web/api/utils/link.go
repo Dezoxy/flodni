@@ -1,15 +1,17 @@
 package utils
 
 import (
+	"bytes"
 	"encoding/base32"
 	"encoding/hex"
 	"errors"
+	"flodni/internal/gostorm/fetch"
 	"flodni/internal/gostorm/torrshash"
 	"fmt"
+	"io"
 	"mime/multipart"
 	"net/http"
 	"net/url"
-	"runtime"
 	"strings"
 	"time"
 
@@ -50,8 +52,6 @@ func ParseLink(link string) (*torrent.TorrentSpec, error) {
 		return fromHttp(urlLink.String())
 	case "":
 		return fromMagnet("magnet:?xt=urn:btih:" + urlLink.Path)
-	case "file":
-		return fromFile(urlLink.Path)
 	default:
 		err = fmt.Errorf("unknown scheme: %s", urlLink.Scheme)
 	}
@@ -97,8 +97,8 @@ func magnetHash(link string) (string, bool) {
 }
 
 // LinkHash returns the info hash a link names, from its text alone: a magnet, a
-// torrs:// token or a bare hash. It never fetches or reads anything. An http(s) or
-// file: link has no hash until it is fetched, so ok is false for it.
+// torrs:// token or a bare hash. It never fetches or reads anything. An http(s)
+// link has no hash until it is fetched, so ok is false for it.
 func LinkHash(link string) (string, bool) {
 	if strings.HasPrefix(link, "torrs://") || (len(link) > 45 && torrshash.IsBase62(link)) {
 		spec, _, err := ParseTorrsHash(link)
@@ -167,14 +167,21 @@ func ParseTorrsHash(token string) (*torrent.TorrentSpec, *torrshash.TorrsHash, e
 	}, th, nil
 }
 
+// maxHTTPBody caps the .torrent an http(s) link may deliver. The upload route has no cap
+// of its own to match, so this is 10 MiB: a .torrent of a very large multi-file release
+// is a few MiB.
+const maxHTTPBody = 10 << 20
+
+// httpFetchTimeout bounds the whole fetch: connect, redirects and body.
+var httpFetchTimeout = 60 * time.Second
+
 func fromHttp(link string) (*torrent.TorrentSpec, error) {
 	req, err := http.NewRequest("GET", link, nil)
 	if err != nil {
 		return nil, err
 	}
 
-	client := new(http.Client)
-	client.Timeout = time.Duration(time.Second * 60)
+	client := fetch.NewClient(httpFetchTimeout)
 	req.Header.Set("User-Agent", "DWL/1.1.1 (Torrent)")
 
 	resp, err := client.Do(req)
@@ -191,7 +198,15 @@ func fromHttp(link string) (*torrent.TorrentSpec, error) {
 		return nil, errors.New(resp.Status)
 	}
 
-	minfo, err := metainfo.Load(resp.Body)
+	// One byte past the cap tells a body that fits from one that does not.
+	body, err := io.ReadAll(io.LimitReader(resp.Body, maxHTTPBody+1))
+	if err != nil {
+		return nil, err
+	}
+	if len(body) > maxHTTPBody {
+		return nil, fmt.Errorf("torrent file too large: over %d bytes", maxHTTPBody)
+	}
+	minfo, err := metainfo.Load(bytes.NewReader(body))
 	if err != nil {
 		return nil, err
 	}
@@ -202,29 +217,6 @@ func fromHttp(link string) (*torrent.TorrentSpec, error) {
 	// mag := minfo.Magnet(info.Name, minfo.HashInfoBytes())
 	mag := minfo.Magnet(nil, &info)
 
-	return &torrent.TorrentSpec{
-		InfoBytes:   minfo.InfoBytes,
-		Trackers:    [][]string{mag.Trackers},
-		DisplayName: info.Name,
-		InfoHash:    minfo.HashInfoBytes(),
-	}, nil
-}
-
-func fromFile(path string) (*torrent.TorrentSpec, error) {
-	if runtime.GOOS == "windows" && strings.HasPrefix(path, "/") {
-		path = strings.TrimPrefix(path, "/")
-	}
-	minfo, err := metainfo.LoadFromFile(path)
-	if err != nil {
-		return nil, err
-	}
-	info, err := minfo.UnmarshalInfo()
-	if err != nil {
-		return nil, err
-	}
-
-	// mag := minfo.Magnet(info.Name, minfo.HashInfoBytes())
-	mag := minfo.Magnet(nil, &info)
 	return &torrent.TorrentSpec{
 		InfoBytes:   minfo.InfoBytes,
 		Trackers:    [][]string{mag.Trackers},

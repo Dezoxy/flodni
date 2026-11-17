@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"sync"
 	"testing"
+	"time"
 )
 
 // authRecorder answers every route with just enough for the client to succeed
@@ -109,5 +110,25 @@ func TestAddTorrentAsksTheEngineToSave(t *testing.T) {
 	}
 	if _, stale := body["save"]; stale {
 		t.Errorf("body carries the unread key \"save\": %v", body)
+	}
+}
+
+// The engine's add now answers once the record is saved, which can take the whole metadata
+// wait: the client's general 30 s limit must not cut that short.
+func TestAddTorrentWaitsLongerThanTheGeneralTimeout(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		time.Sleep(400 * time.Millisecond)
+		_, _ = w.Write([]byte(`{"hash":"` + testHash + `"}`))
+	}))
+	defer srv.Close()
+	c := NewGoStormClient(srv.URL, "")
+	c.httpClient.Timeout = 100 * time.Millisecond // the general limit, shrunk
+	c.addTimeout = 5 * time.Second
+	if _, confirmed, err := c.AddTorrentConfirmed(context.Background(), "magnet:?xt=urn:btih:"+testHash, "t"); err != nil || !confirmed {
+		t.Fatalf("confirmed %v, err %v", confirmed, err)
+	}
+	c.addTimeout = 100 * time.Millisecond
+	if _, _, err := c.AddTorrentConfirmed(context.Background(), "magnet:?xt=urn:btih:"+testHash, "t"); err == nil {
+		t.Fatal("an add that outlasts its own limit succeeded")
 	}
 }
