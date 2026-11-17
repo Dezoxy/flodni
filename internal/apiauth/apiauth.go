@@ -181,6 +181,18 @@ func hostAllowed(r *http.Request, allowed map[string]bool) bool {
 }
 
 func gate(p profile, token string, logger *slog.Logger, next http.Handler, opts []Option) http.Handler {
+	h := newGate(p, token, logger, next, opts)
+	if p.server != Control {
+		return h // the engine port is out of scope here
+	}
+	var o options
+	for _, opt := range opts {
+		opt(&o)
+	}
+	return withSecurityHeaders(o.panelHTTPS, h)
+}
+
+func newGate(p profile, token string, logger *slog.Logger, next http.Handler, opts []Option) http.Handler {
 	var o options
 	for _, opt := range opts {
 		opt(&o)

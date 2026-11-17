@@ -80,8 +80,7 @@ func originMatchesHost(r *http.Request, panelHTTPS bool) bool {
 	if vals[0] != u.Scheme+"://"+u.Host {
 		return false
 	}
-	fwd, _, _ := strings.Cut(r.Header.Get("X-Forwarded-Proto"), ",") // the first hop's word
-	if scheme != "https" && (panelHTTPS || r.TLS != nil || strings.EqualFold(strings.TrimSpace(fwd), "https")) {
+	if scheme != "https" && knownHTTPS(r, panelHTTPS) {
 		return false
 	}
 	oHost, oPort := strings.TrimSuffix(strings.ToLower(u.Hostname()), "."), u.Port()
