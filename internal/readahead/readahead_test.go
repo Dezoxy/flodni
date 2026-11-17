@@ -345,3 +345,47 @@ func TestEvictionsCountsPutDrops(t *testing.T) {
 		t.Fatalf("overwrite changed evictions to %d", got)
 	}
 }
+
+func TestCoveredRun(t *testing.T) {
+	c := newTestCache(t, 1<<20)
+	c.Put("a", 0, testBase-1, pattern(testBase, 1))
+	c.Put("a", testBase, 2*testBase-1, pattern(testBase, 2))
+	c.Put("a", 3*testBase, 3*testBase+99, pattern(100, 3)) // after a gap, partly filled
+
+	tests := []struct {
+		name       string
+		off, limit int64
+		want       int64
+	}{
+		{"across two chunks to the gap", 10, 10 * testBase, 2*testBase - 10},
+		{"capped by limit", 10, 100, 90},
+		{"inside the second chunk", testBase + 5, 10 * testBase, testBase - 5},
+		{"a gap gives nothing", 2 * testBase, 10 * testBase, 0},
+		{"a partly filled chunk ends at its end", 3 * testBase, 10 * testBase, 100},
+		{"unknown path", 0, 10, 0},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			p := "a"
+			if tt.name == "unknown path" {
+				p = "b"
+			}
+			if got := c.CoveredRun(p, tt.off, tt.limit); got != tt.want {
+				t.Fatalf("got %d, want %d", got, tt.want)
+			}
+		})
+	}
+}
+
+// Asking never refreshes the LRU stamp: the metrics scrape must not keep chunks alive.
+func TestCoveredRunLeavesLastAccess(t *testing.T) {
+	c := newTestCache(t, 1<<20)
+	c.Put("a", 0, testBase-1, pattern(testBase, 1))
+	s := c.getShard("a")
+	b := s.buffers[c.chunkKey("a", 0)]
+	b.lastAccess = 42
+	c.CoveredRun("a", 0, testBase)
+	if b.lastAccess != 42 {
+		t.Fatalf("lastAccess changed to %d", b.lastAccess)
+	}
+}

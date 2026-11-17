@@ -4,7 +4,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
-	"sort"
 	"strconv"
 	"sync"
 	"time"
@@ -158,21 +157,6 @@ func (r *sessionRing) newestFirst() []sessionRecord {
 	return out
 }
 
-func openSessionRecords() []sessionRecord {
-	out := []sessionRecord{}
-	sessions.Range(func(_, val any) bool {
-		out = append(out, val.(*TTFFSession).record(time.Time{}, false))
-		return true
-	})
-	sort.Slice(out, func(i, j int) bool {
-		if out[i].OpenedAt != out[j].OpenedAt {
-			return out[i].OpenedAt < out[j].OpenedAt
-		}
-		return out[i].Path < out[j].Path
-	})
-	return out
-}
-
 func filterSessions(in []sessionRecord, outcome string, limit int) []sessionRecord {
 	out := []sessionRecord{}
 	for _, r := range in {
@@ -212,13 +196,16 @@ func handleSessions(w http.ResponseWriter, r *http.Request) {
 		}
 		limit = min(n, sessionRingSize)
 	}
-	open := openSessionRecords()
+	open := openSessionViews(time.Now())
+	if outcome != "" && outcome != outcomeOpen {
+		open = []sessionView{}
+	}
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(struct {
-		Open   []sessionRecord `json:"open"`
+		Open   []sessionView   `json:"open"`
 		Closed []sessionRecord `json:"closed"`
 	}{
-		Open:   filterSessions(open, outcome, len(open)),
+		Open:   open,
 		Closed: filterSessions(closedSessions.newestFirst(), outcome, limit),
 	})
 }
