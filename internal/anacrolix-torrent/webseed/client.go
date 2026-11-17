@@ -77,6 +77,7 @@ type RequestResult struct {
 func (ws *Client) NewRequest(r RequestSpec) Request {
 	ctx, cancel := context.WithCancel(context.Background())
 	var requestParts []requestPart
+	var buildErr error
 	if !ws.fileIndex.Locate(r, func(i int, e segments.Extent) bool {
 		req, err := newRequest(
 			ctx,
@@ -84,7 +85,9 @@ func (ws *Client) NewRequest(r RequestSpec) Request {
 			ws.PathEscaper,
 		)
 		if err != nil {
-			panic(err)
+			// A malformed url-list entry fails the request, not the process.
+			buildErr = fmt.Errorf("creating request for file %v: %w", i, err)
+			return false
 		}
 		part := requestPart{
 			req:                 req,
@@ -103,8 +106,14 @@ func (ws *Client) NewRequest(r RequestSpec) Request {
 		}
 		requestParts = append(requestParts, part)
 		return true
-	}) {
+	}) && buildErr == nil {
 		panic("request out of file bounds")
+	}
+	if buildErr != nil {
+		cancel()
+		req := Request{cancel: cancel, Result: make(chan RequestResult, 1)}
+		req.Result <- RequestResult{Err: buildErr}
+		return req
 	}
 	req := Request{
 		cancel: cancel,
@@ -148,7 +157,8 @@ func recvPartResult(ctx context.Context, buf io.Writer, part requestPart) error 
 	}
 	switch result.resp.StatusCode {
 	case http.StatusPartialContent:
-		copied, err := io.Copy(buf, body)
+		// One byte past the range is enough to see it exceeded: never buffer the rest.
+		copied, err := io.Copy(buf, io.LimitReader(body, part.e.Length+1))
 		if err != nil {
 			return err
 		}

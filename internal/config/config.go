@@ -233,6 +233,14 @@ type Config struct {
 	// is involved. Off unless the owner turns it on; read when a peer drops.
 	RedialDroppedPeer bool `json:"redial_dropped_peer"`
 
+	// EngineRefillV2 is an opt-in switch for the engine's request-refill changes adapted from
+	// upstream (internal/anacrolix-torrent, ClientConfig.RefillV2): a cap on the candidates a
+	// refill sorts, a steal of requests from a holder that delivers nothing, a refill at half a
+	// queue instead of an empty one, and released timers. Off unless the owner turns it on, and
+	// read once at start: a change needs a restart. With it off the engine runs the code it
+	// always ran.
+	EngineRefillV2 bool `json:"engine_refill_v2"`
+
 	// PlaybackWebhookWarnDays is the window of the "no play webhook" warning
 	// (internal/daemon/webhook_status.go): it is raised when a reader session closed unconfirmed in the
 	// last N days and no play webhook matched a file in that time. 0 turns the warning
