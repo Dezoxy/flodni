@@ -33,8 +33,8 @@ func StrandedPartialBytes() int64 {
 }
 
 // strandedPartialBytes sums the Size of pieces that are partly written (Size > 0, not complete)
-// and in no active reader's window. Such a piece can never be evicted (pieceEvictable), so after a
-// seek its bytes stay in the cache until the same piece is fetched to the end.
+// and in no active reader's window. Such a piece is never evicted (pieceEvictable); after a seek
+// its bytes stay until dropStrandedPartials frees them or the piece is fetched to the end.
 //
 // Locks: this cache's muReaders for reading, held for the whole sample (the same read lock the
 // read path takes in refreshPriorities and getRemPieces; it waits only behind Close, CloseReader
@@ -48,16 +48,7 @@ func (c *Cache) strandedPartialBytes() int64 {
 	if c.isClosed.Load() || c.pieces == nil {
 		return 0
 	}
-	ranges := make([]Range, 0, len(c.readers))
-	for r := range c.readers {
-		r.mu.Lock()
-		use := r.isUse
-		r.mu.Unlock()
-		if use {
-			ranges = append(ranges, r.getPiecesRange())
-		}
-	}
-	ranges = mergeRange(ranges)
+	ranges := c.windowsLocked()
 	var total int64
 	for id, p := range c.pieces {
 		sz := atomic.LoadInt64(&p.Size)
