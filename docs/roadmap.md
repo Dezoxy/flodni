@@ -827,8 +827,7 @@ built in v0.3.0; ADR 0004 is Accepted and implemented.
 From a review of upstream Tiramisu v1.11.9 to v1.11.11 (eleven commits) against
 Flodni's diverged tree. Each step says whether Flodni still has the code path
 upstream fixed; that is a read of the code, not a reproduction. Port with
-upstream's tests where they exist, test first. Steps 1 to 5 and 7 are built;
-step 6 is in progress.
+upstream's tests where they exist, test first. Steps 1 to 7 are built.
 
 Order. The step numbers stay stable because other changes refer to them; the
 order of work follows what a deployment gains. Step 1 first (a peer port
@@ -872,13 +871,13 @@ symlinks from a real filesystem; kept for correctness), and step 7 last.
    once the diverged `piece` fields it needs are confirmed. Add a metric of
    partial-piece bytes held after a seek, alertable; measure before porting.
    Built (#241).
-6. **Keep probe reads from moving the pump.** A media server's probe and
-   analysis reads on a file someone is watching move the pump and take the
+6. **Keep probe reads from moving the pump.** [FINISHED] A media server's probe
+   and analysis reads on a file someone is watching move the pump and take the
    primary stream. First the two small safety parts: an idempotent handle
    release and interrupting the pump reader when the request context ends. The
    header-read and takeover logic only behind a simulator seam that drives the
    handle and pump code without the engine; Flodni's pump has diverged and
-   resume positions depend on it.
+   resume positions depend on it. Built (#237).
 7. **Measure first, then decide.** [FINISHED] Request refill (a candidate cap,
    stealing from stalled holders, half-queue refill) touches the same functions
    as Flodni's adaptive pipeline, so it is a performance project with a

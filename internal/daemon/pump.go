@@ -40,6 +40,7 @@ func (h *MkvHandle) attachToExistingPump(ps *NativePumpState) bool {
 		return false
 	}
 	h.hasSlot.Store(true)
+	h.refDropped.Store(false)
 	h.pumpState = ps
 	h.isWatching = true
 	h.nativeReader = ps.reader
@@ -126,6 +127,7 @@ func (h *MkvHandle) startNativePump(finalHash string, fileIdx int) {
 		newRefs := atomic.AddInt32(&ps.refCount, 1)
 		h.mu.Lock()
 		h.hasSlot.Store(true)
+		h.refDropped.Store(false)
 		h.pumpState = ps
 		h.isWatching = true
 		h.nativeReader = ps.reader
@@ -134,7 +136,7 @@ func (h *MkvHandle) startNativePump(finalHash string, fileIdx int) {
 		globalOpenTracker.Inc(h.hash, h.path)
 		// Primary reconnect (refCount 0→1): inherit player position.
 		// Secondary handles (Plex probes at arbitrary offsets): no inheritance.
-		if newRefs == 1 {
+		if newRefs == 1 && !h.shadowsActivePlayer() {
 			becomePrimary(h)
 			if curPos := atomic.LoadInt64(&ps.playerOff); curPos > 0 {
 				atomic.StoreInt64(&h.lastOff, curPos)
@@ -158,13 +160,14 @@ func (h *MkvHandle) startNativePump(finalHash string, fileIdx int) {
 			newRefs := atomic.AddInt32(&ps.refCount, 1)
 			h.mu.Lock()
 			h.hasSlot.Store(true)
+			h.refDropped.Store(false)
 			h.pumpState = ps
 			h.isWatching = true
 			h.nativeReader = ps.reader
 			h.pumpCancel = ps.cancel
 			h.mu.Unlock()
 			globalOpenTracker.Inc(h.hash, h.path)
-			if newRefs == 1 {
+			if newRefs == 1 && !h.shadowsActivePlayer() {
 				becomePrimary(h)
 				if curPos := atomic.LoadInt64(&ps.playerOff); curPos > 0 {
 					atomic.StoreInt64(&h.lastOff, curPos)
@@ -175,7 +178,12 @@ func (h *MkvHandle) startNativePump(finalHash string, fileIdx int) {
 		}
 
 		h.hasSlot.Store(true)
-		becomePrimary(h) // pump creator is always primary
+		h.refDropped.Store(false)
+		// The pump's creator is its primary, unless a player is watching through another handle
+		// (a probe that opens while no pump is registered must not take the primary this way).
+		if !h.shadowsActivePlayer() {
+			becomePrimary(h)
+		}
 		// Capture the reader now and pass it to the pump goroutine: re-reading h.nativeReader
 		// inside the goroutine raced with Release setting it to nil, and the resulting early
 		// return (before the teardown defer) leaked the master slot.
@@ -318,6 +326,12 @@ func (h *MkvHandle) nativePump(ctx context.Context, pumpReader streamReader, sta
 		logger.Info(fmt.Sprintf("[Pump] reader is nil at startup for %s", filepath.Base(h.path)), "file", filepath.Base(h.path))
 		return
 	}
+
+	// ctx is checked only at the top of the loop; without this a cancelled pump blocked in
+	// ReadAt keeps its slot and keeps downloading until the stream times out.
+	// Adapted from upstream Tiramisu 2c6300e.
+	stopInterruptOnCancel := context.AfterFunc(ctx, pumpReader.Interrupt)
+	defer stopInterruptOnCancel()
 
 	if h.hash == "" {
 		// Late hash resolution for handles where Open() didn't complete it.
@@ -706,10 +720,16 @@ func advanceProvesStreaming(prevOff, off, readLen, size, tolerance, streamingThr
 const primaryProofReads = 3 // consecutive sequential reads before a handle drives the pump
 
 func (h *MkvHandle) promoteIfStreaming(prevOff, off int64, readLen int) {
+	advance := prevOff >= 0 && advanceProvesStreaming(prevOff, off, int64(readLen), h.size, gc().SequentialTolerance, gc().StreamingThreshold)
+	if !advance {
+		h.seqRun.Store(0)
+	} else if h.seqRun.Add(1) >= primaryProofReads {
+		h.streamedOnce.Store(true)
+	}
 	if h.isPrimaryHandle.Load() || h.hash == "" || prevOff < 0 {
 		return
 	}
-	if !advanceProvesStreaming(prevOff, off, int64(readLen), h.size, gc().SequentialTolerance, gc().StreamingThreshold) {
+	if !advance {
 		h.seqAdvances.Store(0)
 		return
 	}
@@ -724,6 +744,11 @@ func (h *MkvHandle) promoteIfStreaming(prevOff, off int64, readLen int) {
 	}
 	ps, ok := val.(*PlaybackState)
 	if !ok || !(ps.GetStatus() || ps.IsInferredPlayback()) {
+		return
+	}
+	// A second sequential reader (a media analysis, a thumbnail pass) must not take the pump
+	// from a player that is watching. Adapted from upstream Tiramisu 49533ee.
+	if inc := activeStreamingPrimary(h.path, h); inc != nil && h.defersTo(inc, ps.sessionStartedAt()) {
 		return
 	}
 	if becomePrimary(h) {
@@ -798,6 +823,88 @@ func shouldInterruptPump(prevOff, off, budget int64, tailServed bool) bool {
 		return false
 	}
 	return shouldInterruptForSeek(prevOff, off, budget)
+}
+
+// primaryActiveWindow is how recently a primary that has streamed must have read to count as a
+// player that is watching: the configured warm_start_idle_seconds, the idle time after which
+// the read path already treats a handle as starting afresh. A buffered player goes quiet for
+// seconds between bursts; once it is quiet for longer nothing watches through its primary and
+// it is up for taking, which is what a reopen or a seek through another handle needs.
+func primaryActiveWindow() time.Duration {
+	if n := gc().WarmStartIdleSeconds; n > 0 {
+		return time.Duration(n) * time.Second
+	}
+	return 6 * time.Second
+}
+
+// activeStreamingPrimary returns the primary handle on path, other than except, that has
+// streamed like a player and read within primaryActiveWindow, or nil. A stale probe primary
+// (header and Cues only) never streamed, so it never blocks the real player. It takes no lock:
+// the read path calls it for every read of a non-primary handle.
+func activeStreamingPrimary(path string, except *MkvHandle) *MkvHandle {
+	var found *MkvHandle
+	now := time.Now().UnixNano()
+	app.activeHandles.Range(func(key, _ interface{}) bool {
+		other, ok := key.(*MkvHandle)
+		if !ok || other == except || other.path != path || !other.isPrimaryHandle.Load() || !other.streamedOnce.Load() {
+			return true
+		}
+		if now-other.lastRead.Load() <= int64(primaryActiveWindow()) {
+			found = other
+			return false
+		}
+		return true
+	})
+	return found
+}
+
+// mayTakeOverStreamingPrimary reports whether h is the successor of inc, a primary that is
+// watching: the player of the session, opened after inc and no later than the play webhook
+// that started the session (sessionStart, set by media.play only; resume, pause and stop leave
+// it alone). An analysis started during a session opens after that play; when the analysis ran
+// first, the player opens after it and before the webhook.
+//
+// Anything else waits for inc to go quiet (activeStreamingPrimary is nil then) or to be
+// released. A reopen that leaves the old handle open is served as a probe until then: a
+// buffered player goes silent between bursts all the time, and a probe opening in such a lull
+// must never be able to write the resume position.
+func mayTakeOverStreamingPrimary(h, inc *MkvHandle, sessionStart time.Time) bool {
+	return !h.openedAt.IsZero() && h.openedAt.After(inc.openedAt) && !h.openedAt.After(sessionStart)
+}
+
+// defersTo reports whether h must leave the primary to inc, a primary that is watching. An
+// incumbent that opened after h never wins this way: h is the older handle, and if it reads
+// again it is the player returning (after a pause, say) and retakes the primary on the normal
+// rules, a sequential proof or a seek.
+func (h *MkvHandle) defersTo(inc *MkvHandle, sessionStart time.Time) bool {
+	if inc.openedAt.After(h.openedAt) {
+		return false
+	}
+	return !mayTakeOverStreamingPrimary(h, inc, sessionStart)
+}
+
+func (h *MkvHandle) sessionStart() time.Time {
+	if val, ok := app.playbackRegistry.Load(h.path); ok {
+		if ps, ok := val.(*PlaybackState); ok {
+			return ps.sessionStartedAt()
+		}
+	}
+	return time.Time{}
+}
+
+// shadowsActivePlayer reports whether h is a second handle on a file whose primary is watching
+// and h is not the player's successor (a probe). Such a handle never takes the primary, never
+// interrupts or moves the pump and never fills the shared read-ahead cache (which would evict
+// the primary's next chunks, oldest first).
+func (h *MkvHandle) shadowsActivePlayer() bool {
+	if h.isPrimaryHandle.Load() {
+		return false
+	}
+	inc := activeStreamingPrimary(h.path, h)
+	if inc == nil {
+		return false
+	}
+	return h.defersTo(inc, h.sessionStart())
 }
 
 // primaryProofFor returns how many consecutive sequential reads a challenger must show before it
