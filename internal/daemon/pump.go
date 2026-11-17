@@ -459,16 +459,7 @@ func (h *MkvHandle) nativePump(ctx context.Context, pumpReader streamReader, sta
 
 		// Sync to primary handles only; secondary metadata probes cause false 10GB+ jumps.
 		now := time.Now()
-		playerOff := int64(0)
-		app.activeHandles.Range(func(key, value interface{}) bool {
-			handle := key.(*MkvHandle)
-			if handle.path == h.path && handle.isPrimaryHandle.Load() {
-				if off := atomic.LoadInt64(&handle.lastOff); off > playerOff {
-					playerOff = off
-				}
-			}
-			return true
-		})
+		playerOff := primaryFollowOffset(h.path)
 
 		// Snap pump to player position when seek gap exceeds budget, aligned to chunk boundary.
 		jumpThreshold := int64(gc().ReadAheadBudget)
@@ -552,6 +543,16 @@ func (h *MkvHandle) nativePump(ctx context.Context, pumpReader streamReader, sta
 				sharedState.interruptPending.Store(false)
 				continue
 			}
+			// The primary is still far from the end (it went to the tail for its index and came
+			// back, say): the pump goes with it rather than end behind it.
+			if to, ok := eofReanchor(primaryFollowOffset(h.path), h.size, pumpLeadLimit(gc().ReadAheadBudget, chunkSize), chunkSize); ok {
+				logger.Info(fmt.Sprintf("[V306] Pump reached EOF ahead of the player; re-anchoring to %dMB (player at %dMB): %s", to/(1024*1024), primaryFollowOffset(h.path)/(1024*1024), filepath.Base(h.path)), "file", filepath.Base(h.path))
+				offset = to
+				pumpedBytes = 0
+				watchSamples = watchSamples[:0]
+				sharedState.interruptPending.Store(false)
+				continue
+			}
 			reachedEOF = true
 			return // genuine EOF
 		}
@@ -559,6 +560,109 @@ func (h *MkvHandle) nativePump(ctx context.Context, pumpReader streamReader, sta
 		pumpedBytes += (nextOffset - offset)
 		offset = nextOffset
 	}
+}
+
+// primaryFollowOffset is where the primary handles of path are playing: the offset the pump
+// follows (the largest of them, 0 when there is none).
+func primaryFollowOffset(path string) int64 {
+	var playerOff int64
+	app.activeHandles.Range(func(key, _ interface{}) bool {
+		handle := key.(*MkvHandle)
+		if handle.path == path && handle.isPrimaryHandle.Load() {
+			if off := handle.followOff(); off > playerOff {
+				playerOff = off
+			}
+		}
+		return true
+	})
+	return playerOff
+}
+
+// followOff is the offset the pump follows for this handle: its last read, except while a
+// jump into the tail zone is held (noteTailHold), when it is the position before that jump.
+func (h *MkvHandle) followOff() int64 {
+	if hold := h.tailHold.Load(); hold > 0 {
+		return hold
+	}
+	return atomic.LoadInt64(&h.lastOff)
+}
+
+// noteTailHold keeps the pump with the player while the player's handle reads the file's
+// index at the tail (the Cues of an MKV): a read that jumps from outside the tail zone into
+// it holds the handle's follow offset at where it came from, until it comes back out or reads
+// the tail like a player (primaryProofReads sequential streaming reads). Without it the pump
+// jumped to the end of the file after the first index read, finished there, and the player,
+// back at its position, was left to demand fetches. A sequential run into the tail zone (the
+// playback reaching the end) never holds.
+func (h *MkvHandle) noteTailHold(prevOff, off int64, readLen int) {
+	if h.size <= 0 {
+		return
+	}
+	tailStart := h.size - tailProbeZoneSize(h.size)
+	if off < tailStart {
+		h.tailHold.Store(0)
+		h.tailRun.Store(0)
+		return
+	}
+	cfg := gc()
+	sequential := prevOff >= tailStart && off > prevOff && off-prevOff <= int64(readLen)+cfg.SequentialTolerance
+	if h.tailHold.Load() > 0 {
+		if sequential && int64(readLen) >= cfg.StreamingThreshold/4 {
+			if h.tailRun.Add(1) >= primaryProofReads {
+				h.tailHold.Store(0)
+				h.tailRun.Store(0)
+			}
+		} else {
+			h.tailRun.Store(0)
+		}
+		return
+	}
+	if prevOff > 0 && prevOff < tailStart && (off < prevOff || off-prevOff > int64(readLen)+cfg.SequentialTolerance) {
+		h.tailRun.Store(0)
+		h.tailHold.Store(prevOff)
+	}
+}
+
+// eofReanchor decides what a pump that reached the end of the file does: when the player is
+// more than one lead away from the end the pump has left it behind, and restarts at the
+// player's chunk; within one lead the end of the file is where the pump belongs.
+func eofReanchor(playerOff, size, lead, chunkSize int64) (int64, bool) {
+	if playerOff <= 0 || chunkSize <= 0 || playerOff >= size-lead {
+		return 0, false
+	}
+	return (playerOff / chunkSize) * chunkSize, true
+}
+
+// dropOrphanedPumpRef frees the pump reference of a handle that attached to a pump which has
+// since ended (the end of the file, an idle timeout): such a handle kept hasSlot, so no read
+// path ever started another pump and the player ran on demand fetches until some other handle
+// opened. Only an attached handle (isWatching) owns no master slot; a creator returns its
+// own when its pump ends. The next steps of Read then attach or start a pump as for any handle.
+func (h *MkvHandle) dropOrphanedPumpRef() {
+	if _, live := app.activePumps.Load(h.path); live {
+		return
+	}
+	pumpCreationMu.Lock() // a creator registers its pump under this lock, after taking hasSlot
+	defer pumpCreationMu.Unlock()
+	if _, live := app.activePumps.Load(h.path); live {
+		return
+	}
+	h.mu.Lock()
+	if !h.isWatching || !h.hasSlot.Load() {
+		h.mu.Unlock()
+		return
+	}
+	h.hasSlot.Store(false)
+	h.isWatching = false
+	h.pumpState = nil
+	h.nativeReader = nil
+	h.pumpCancel = nil
+	dec := h.refDropped.CompareAndSwap(false, true)
+	h.mu.Unlock()
+	if dec {
+		globalOpenTracker.Dec(h.hash, h.path)
+	}
+	logger.Info(fmt.Sprintf("[V264] Pump gone: handle drops its stale pump reference: %s", filepath.Base(h.path)), "file", filepath.Base(h.path))
 }
 
 // nativePumpChunk reads a single chunk from the Native pipe into raCache.
@@ -942,7 +1046,7 @@ func primaryOffsetFor(path string, except *MkvHandle) int64 {
 	app.activeHandles.Range(func(key, _ interface{}) bool {
 		other, ok := key.(*MkvHandle)
 		if ok && other != except && other.path == path && other.isPrimaryHandle.Load() {
-			if o := atomic.LoadInt64(&other.lastOff); o > off {
+			if o := other.followOff(); o > off {
 				off = o
 			}
 		}

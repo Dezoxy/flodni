@@ -85,6 +85,8 @@ type MkvHandle struct {
 	seqRun          atomic.Int32 // consecutive streaming advances, primary or not (feeds streamedOnce)
 	streamedOnce    atomic.Bool  // read sequentially like a player at least once
 	coldBoostTried  atomic.Bool  // engine_cold_boost was asked for at this handle's first player read
+	tailHold        atomic.Int64 // >0: the last offset before a jump into the tail zone; the pump keeps following it (noteTailHold)
+	tailRun         atomic.Int32 // sequential streaming reads in the tail zone since that jump
 }
 
 // Compile-time interface checks for MkvHandle
@@ -246,6 +248,7 @@ func (h *MkvHandle) readInner(fuseCtx context.Context, dest []byte, off int64) (
 	prevOff := atomic.LoadInt64(&h.lastOff)
 	atomic.StoreInt64(&h.lastOff, off)
 
+	h.noteTailHold(prevOff, off, len(dest))
 	h.promoteIfStreaming(prevOff, off, len(dest))
 
 	// A probe is a second handle on a file somebody is watching that is not that player's
@@ -339,7 +342,7 @@ func (h *MkvHandle) readInner(fuseCtx context.Context, dest []byte, off int64) (
 	// restarts and resets the flag (preventing the thrash loop seen in the logs).
 	budget := int64(gc().ReadAheadBudget)
 	seekReader := h.nativeReader // capture: a concurrent Release nils the field
-	if seekReader != nil && shouldInterruptPump(prevOff, off, budget, shouldServeTailFromSSD(off, h.size, warmup.TailWarmupSize)) {
+	if seekReader != nil && shouldInterruptPump(prevOff, off, budget, shouldServeTailFromSSD(off, h.size, warmup.TailWarmupSize) || h.tailHold.Load() > 0) {
 		// Promote to primary on a genuine seek once playback is confirmed/inferred - mirrors the
 		// refCount 0->1 "primary reconnect" promotion at attach time (main.go:1030): a secondary
 		// (attached) handle doing a real seek during confirmed playback IS the player, and needs
@@ -582,6 +585,9 @@ func (h *MkvHandle) readInner(fuseCtx context.Context, dest []byte, off int64) (
 	h.mu.Unlock()
 	atomic.StoreInt64(&h.lastOff, off)
 
+	if h.hasSlot.Load() {
+		h.dropOrphanedPumpRef()
+	}
 	if !h.hasSlot.Load() {
 		pumpCreationMu.Lock()
 
@@ -604,7 +610,8 @@ func (h *MkvHandle) readInner(fuseCtx context.Context, dest []byte, off int64) (
 			pumpCreationMu.Unlock()
 		} else {
 			// On-the-fly pump upgrade for confirmed playback with available slot.
-			if isStreaming && h.hash != "" {
+			// A read held in the tail zone (an index probe) leaves the pump to the player's own reads.
+			if isStreaming && h.hash != "" && h.tailHold.Load() == 0 {
 				if val, ok := app.playbackRegistry.Load(h.path); ok {
 					if ps, ok := val.(*PlaybackState); ok && (ps.GetStatus() || ps.IsInferredPlayback()) {
 						select {
@@ -996,7 +1003,7 @@ func (h *MkvHandle) releaseResources() syscall.Errno {
 		ps := val.(*NativePumpState)
 		// Only primary handles persist position; secondary probes have arbitrary offsets.
 		if h.isPrimaryHandle.Load() {
-			if pos := atomic.LoadInt64(&h.lastOff); pos > 0 {
+			if pos := h.followOff(); pos > 0 {
 				atomic.StoreInt64(&ps.playerOff, pos)
 			}
 		}
