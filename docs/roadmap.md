@@ -836,62 +836,64 @@ playback). Steps 5 and 3 next, but measured first (see their counters). Then
 step 4, then step 2 (low priority where libraries reach the mount through
 symlinks from a real filesystem; kept for correctness), and step 7 last.
 
-1. **Refuse malformed input from peers and trackers.** A peer can send a
-   negative metadata piece index, which panics on the request table; a chunk is
-   not checked against the request it answers, so a misaligned one is written
-   past the piece; `validateInfo` has no bounds on piece or file lengths; a
-   tracker response is read without a size cap (cap it at 4 MiB); a bad webseed
-   URL panics instead of failing the request; every `Port` message sends a DHT
-   ping to a port the peer picks (ping on the first only); and the client fails
-   to start where IPv6 is unavailable instead of skipping it. One PR, with the
-   `-std=gnu17` cgo flag in CI so the build survives the runner's move to a
-   C23-default compiler. Flodni has every one of these paths.
-2. **Real directory times.** `fillAttrFromStat` gives every directory
+1. **Refuse malformed input from peers and trackers.** [FINISHED] A peer can
+   send a negative metadata piece index, which panics on the request table; a
+   chunk is not checked against the request it answers, so a misaligned one is
+   written past the piece; `validateInfo` has no bounds on piece or file
+   lengths; a tracker response is read without a size cap (cap it at 4 MiB); a
+   bad webseed URL panics instead of failing the request; every `Port` message
+   sends a DHT ping to a port the peer picks (ping on the first only); and the
+   client fails to start where IPv6 is unavailable instead of skipping it. One
+   PR, with the `-std=gnu17` cgo flag in CI so the build survives the runner's
+   move to a C23-default compiler. Flodni has every one of these paths. Built
+   (#234).
+2. **Real directory times.** [FINISHED] `fillAttrFromStat` gives every directory
    `time.Now()`, so a library scanner sees every folder modified on each stat
    and re-walks everything. Take the time from the physical directory. A test
-   shows a stub add changes the directory time and nothing else does.
-3. **Keep the whole readahead safe from eviction.** The protected window still
-   uses the old percentage split, so pieces between the two bands are fetched
-   with deadlines and then evicted (about 11% re-download with 4 to 8 MB
-   pieces). Port upstream's `protectedWindow` and its test. Add a counter of
-   bytes fetched twice for the same piece, to measure before and after.
+   shows a stub add changes the directory time and nothing else does. Built
+   (#232).
+3. **Keep the whole readahead safe from eviction.** [FINISHED] The protected
+   window still uses the old percentage split, so pieces between the two bands
+   are fetched with deadlines and then evicted (about 11% re-download with 4 to
+   8 MB pieces). Port upstream's `protectedWindow` and its test. Add a counter
+   of bytes fetched twice for the same piece, to measure before and after. Built
+   (#240).
 4. **Write a stub only when it changes; save on wake only without metadata.**
-   An identical stub rewrite still bumps its time and makes the media server
-   re-analyse it: compare before the atomic write. A wake still snapshots the
-   torrent to the database under the client lock during playback: save only
-   while its metadata is missing.
-5. **Free partial pieces a seek abandons.** Seek-heavy playback strands
-   partially written in-memory pieces until eviction of complete ones reaches
-   them (upstream measured 40 seeks holding 480 MB in a 128 MB cache). Port
-   `ForgetPartialPiece` with its guards (wanted, hashing, queued, pending
+   [FINISHED] An identical stub rewrite still bumps its time and makes the media
+   server re-analyse it: compare before the atomic write. A wake still snapshots
+   the torrent to the database under the client lock during playback: save only
+   while its metadata is missing. Built (#232).
+5. **Free partial pieces a seek abandons.** [FINISHED] Seek-heavy playback
+   strands partially written in-memory pieces until eviction of complete ones
+   reaches them (upstream measured 40 seeks holding 480 MB in a 128 MB cache).
+   Port `ForgetPartialPiece` with its guards (wanted, hashing, queued, pending
    writes, outstanding requests) and a sweep at most every 5 s, after step 3,
    once the diverged `piece` fields it needs are confirmed. Add a metric of
    partial-piece bytes held after a seek, alertable; measure before porting.
-6. **Keep probe reads from moving the pump.** [FINISHED] A second handle on a
-   file someone is watching, a media server's probe or analysis, no longer takes
-   the primary stream, moves or interrupts the pump, fills the shared readahead
-   cache, or moves the resume position. It defers while the primary has read
-   within `warm_start_idle_seconds`, unless it is the player's successor (opened
-   after the primary and before the session's play webhook, or opened while the
-   primary stayed silent). Also an idempotent handle release, a pump reader
-   interrupted when its context ends, and a simulator over the engine seam
-   (`pumpSim`) that drives the handle and pump code without the engine. Built
-   (#237).
-7. **Measure first, then decide.** Request refill (a candidate cap, stealing
-   from stalled holders, half-queue refill) touches the same functions as
-   Flodni's adaptive pipeline, so it is a performance project with a benchmark
-   on a real swarm. Mount tuning (1 MB kernel readahead, longer attribute and
-   entry TTLs with kernel invalidation, splice off) needs privileges and
-   changes the live mount. Flodni never writes sysfs: it logs the mount's BDI
-   id once at start and exposes `read_ahead_kb` as the gauge
+   Built (#241).
+6. **Keep probe reads from moving the pump.** [FINISHED] A media server's probe
+   and analysis reads on a file someone is watching move the pump and take the
+   primary stream. First the two small safety parts: an idempotent handle
+   release and interrupting the pump reader when the request context ends. The
+   header-read and takeover logic only behind a simulator seam that drives the
+   handle and pump code without the engine; Flodni's pump has diverged and
+   resume positions depend on it. Built (#237).
+7. **Measure first, then decide.** [FINISHED] Request refill (a candidate cap,
+   stealing from stalled holders, half-queue refill) touches the same functions
+   as Flodni's adaptive pipeline, so it is a performance project with a
+   benchmark on a real swarm. Mount tuning (1 MB kernel readahead, longer
+   attribute and entry TTLs with kernel invalidation, splice off) needs
+   privileges and changes the live mount. Flodni never writes sysfs: it logs the
+   mount's BDI id once at start and exposes `read_ahead_kb` as the gauge
    `flodni_fuse_read_ahead_bytes` (observe only, built), so the host can tune it
    and the effect can be seen. The TTLs and splice come only as config options
    with defaults unchanged: the ADR is
    [0005](architecture/decisions/0005-fuse-timeouts-splice-readahead.md); the
    options exist (`attr_timeout_seconds`, `entry_timeout_seconds`,
    `fuse_disable_splice`, startup-only, a timeout outside 0 to 60 s refuses the
-   start), defaults unchanged. A TTL above 1 s warns at start until kernel dentry
-   invalidation is built. Raising them is for the deployment to A/B with numbers.
+   start), defaults unchanged. A TTL above 1 s warns at start until kernel
+   dentry invalidation is built. Raising them is for the deployment to A/B with
+   numbers. Built (#233, #238, #239).
 
 Not needed: the cold-open wake grace (`StartWake` exists), disabling WebTorrent
 (already off), and the TV-sync duplicate-name fix (no syncer in this tree).
