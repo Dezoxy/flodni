@@ -705,6 +705,7 @@ fails, the features are just inactive.
 | Played-file protection (see "Warmup cache eviction") | mark a file played, so eviction ranks it last | Built |
 | Reader budget refusal (see "Reader budget") | arm: refusal starts at the first matched play webhook after start, and a webhook confirms a play | Built, opt-in, off by default (`refuse_unconfirmed_reads`) |
 | Keep-alive of a confirmed play (see "Keep-alive") | confirm the play, so its torrent is not closed for idleness | Built, on by default (`playback_keepalive_minutes`) |
+| Re-announce of a starved confirmed torrent, private included within the tracker's interval (see "Starved-torrent re-announce") | ask the torrent's own trackers for peers when playback starves | Built, on by default; not measured on a real swarm |
 
 - **Set it up.** Point the media server's webhook at
   `http://<host>:<metrics_port>/plex/webhook` (`/webhook` answers the same
@@ -917,6 +918,45 @@ play is confirmed.
   and by the end-to-end `keep-alive` variant (a confirmed torrent is held
   through two idle windows and released by a stop webhook); the ceiling is
   unit-tested only.
+
+## Starved-torrent re-announce
+
+Built, on by default, no switch. After an engine rebuild a playing torrent can
+come back with one connected peer while its tracker lists many, and only a
+fresh announce finds the others. A torrent with a webhook-confirmed playback
+that is not stopped is announced to once when it starves.
+
+- **What triggers it.** All of: fewer than 3 connected peers for 60 s (sampled
+  every 5 s), and in that window a read stall on one of its open sessions or an
+  `ahead_bytes` that shrank. Low peers alone do nothing, nor does a torrent
+  nobody is playing. The torrent announces to its trackers; it asks no DHT, no
+  PEX and no tracker it was not stored with.
+- **Limits.** At least 2 minutes (public) or 5 minutes (private) between two
+  forced announces of one torrent, doubling with every announce that did not
+  end the starvation, up to 30 minutes; 2 minutes at or over 3 peers start the
+  gap over. The constants are in `internal/daemon/starved.go`, not config keys.
+- **Private torrents** (hard rule 3). They are announced only to the trackers
+  of their stored record, and only to a tracker that has answered before and
+  whose own announce interval (the one it returned, at least one minute) is
+  over, in addition to the gap above. The announce counts as the tracker's
+  last one, so the regular schedule waits out the interval after it. A torrent
+  whose metadata is not known yet counts as private. A private torrent whose
+  trackers are all inside their interval is not announced; the check repeats at
+  the next sample, and it is not counted. The engine does not keep the
+  tracker's separate `min interval`, so the returned interval is the one
+  honoured. Pinned in `internal/anacrolix-torrent/forced_announce_test.go`
+  (only the stored tracker is asked, never the DHT, never inside the interval)
+  and `internal/daemon/starved_test.go`.
+- **Priority after a rebuild.** A torrent the engine re-adds while a confirmed
+  playback of it is open gets its priority flag back (the flag lived on the
+  replaced object). Aggressive mode is not restored by this.
+- **Observability.** One `[Starved] re-announce` log line per forced announce
+  (reason, private, connected peers, stalls, ahead, trackers asked; never a
+  tracker URL) and `flodni_reannounce_total{reason="starved",private}`, both
+  present from 0.
+- **Not changed.** The weak-swarm discovery boost for a public torrent keeps
+  its own rule and cooldown; both can announce the same public torrent.
+  Measured on a real swarm: not yet.
 
 ## Engine stall gaps
 
@@ -2496,6 +2536,7 @@ scraper on the same host or Docker network.
 | `flodni_torrent_reopens_total` | counter | `confirmed` | Closed torrents a read on an open handle woke again; the wake at open is not counted. `confirmed` as above. |
 | `flodni_wake_refused_total` | counter | none | Wakes the engine refused because it keeps no record of the torrent: one per handle at a read, one per open. Not a failed read and not a dead swarm. 0 from start. See "A stub the engine does not store". |
 | `flodni_read_stalls_total` | counter | `confirmed` | Served reads that took over one second; failed reads are not counted. `confirmed` as above. Independent of sessions. |
+| `flodni_reannounce_total` | counter | `reason`, `private` | Tracker re-announces forced for a confirmed playback whose swarm starved; `reason` is `starved`, `private` is `true` or `false`. Both present from 0. See "Starved-torrent re-announce". |
 | `flodni_keepalive_releases_total` | counter | `reason` | Holds that ended: `stop` (a stop webhook, or the playback state dropped) or `ceiling` (`playback_keepalive_minutes` after the last activity). The torrent then closes at its next idle check. Both values present from 0. See Keep-alive. |
 | `flodni_keepalive_evicted_total` | counter | none | Confirmed torrents that lost their hold to `playback_keepalive_max_torrents`, once per episode. Present from 0. |
 | `flodni_keepalive_held_torrents` | gauge | none | Idle torrents the keep-alive is keeping open now (a torrent with a reader is not counted). |

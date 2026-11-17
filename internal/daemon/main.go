@@ -420,6 +420,8 @@ func Run() {
 	warmWake = nativeClient.WakeStored
 
 	go tuner.Start(context.Background())
+	torr.ConfirmedPlayback = hashConfirmed
+	go runStarvedReannounce(context.Background())
 
 	// Metadata LRU cache: capacity from config, 24h TTL.
 	metaCache = cache.NewLRUCache(gc().MetadataCacheSize, 24*time.Hour)

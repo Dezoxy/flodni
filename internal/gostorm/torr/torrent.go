@@ -196,6 +196,14 @@ func NewTorrent(spec *torrent.TorrentSpec, bt *BTServer) (*Torrent, error) {
 		return nil, err
 	}
 
+	// Runs after the unlock below (defers run last in, first out): the hook reads daemon
+	// state that must not be read under bt.mu.
+	var fresh *Torrent
+	defer func() {
+		if fresh != nil {
+			restorePriority(fresh, spec.InfoHash.HexString())
+		}
+	}()
 	bt.mu.Lock()
 	defer bt.mu.Unlock()
 	if tor, ok := bt.torrents[spec.InfoHash]; ok {
@@ -218,10 +226,23 @@ func NewTorrent(spec *torrent.TorrentSpec, bt *BTServer) (*Torrent, error) {
 	torr.Timestamp = time.Now().Unix()
 
 	bt.torrents[spec.InfoHash] = torr
+	fresh = torr
 	if len(spec.InfoBytes) == 0 {
 		go retrackWhenPublic(goTorrent, settings.BTsets.RetrackersMode, utils.GetDefTrackers, utils.GetTrackerFromFile)
 	}
 	return torr, nil
+}
+
+// ConfirmedPlayback, when set, says whether a webhook-confirmed playback of the torrent is
+// open. The daemon sets it once at start. A nil func answers no.
+var ConfirmedPlayback func(hash string) bool
+
+// restorePriority gives a torrent the engine has just (re-)added back the priority flag of
+// the playback that is open on it: the flag lived on the object a rebuild replaced.
+func restorePriority(t *Torrent, hash string) {
+	if f := ConfirmedPlayback; f != nil && f(hash) {
+		t.IsPriority.Store(true)
+	}
 }
 
 func (t *Torrent) WaitInfo() bool {
