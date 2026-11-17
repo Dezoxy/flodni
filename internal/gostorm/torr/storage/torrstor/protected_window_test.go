@@ -12,7 +12,8 @@ import (
 // percentage split and the full readahead used to be fetched with deadlines and then evicted.
 func TestReadaheadWindowIsNeverEvictable(t *testing.T) {
 	oldSets := settings.BTsets
-	defer func() { settings.BTsets = oldSets }()
+	// Registered first, so it runs last: Close starts a background rebuild that reads settings.
+	t.Cleanup(func() { settings.BTsets = oldSets })
 	settings.BTsets = &settings.BTSets{ReaderReadAHead: 75}
 
 	const (
@@ -32,7 +33,11 @@ func TestReadaheadWindowIsNeverEvictable(t *testing.T) {
 
 	file := cache.torrent.Files()[0]
 	r := cache.NewReader(file)
-	defer r.Close()
+	t.Cleanup(func() {
+		r.Close()
+		_ = cache.Close()
+		cache.bg.Wait()
+	})
 	r.mu.Lock()
 	r.offset = readPos * pieceLen
 	r.mu.Unlock()
@@ -79,5 +84,65 @@ func TestProtectedWindow(t *testing.T) {
 		if e-b != c.protected && c.ra >= 0 {
 			t.Errorf("%s: window width %d, want the protected share %d", c.name, e-b, c.protected)
 		}
+	}
+}
+
+// A pure sequential read with readahead R re-fetches nothing: each step the engine delivers the
+// pieces up to pos+R in order, the reader advances, and every piece in the window stays complete.
+func TestSequentialReadRefetchesNothing(t *testing.T) {
+	oldSets := settings.BTsets
+	// Registered first, so it runs last: Close starts a background rebuild that reads settings.
+	t.Cleanup(func() { settings.BTsets = oldSets })
+	settings.BTsets = &settings.BTSets{ReaderReadAHead: 75}
+
+	const (
+		pieces   = 100
+		pieceLen = int64(1 << 20)
+		capPcs   = 40
+		raPieces = 32 // forward 32, behind 2 of the 34-piece protected share
+		start    = 20
+	)
+	_, cache := newPriorityTestCacheSized(t, pieces, pieceLen)
+	cache.capacity = capPcs * pieceLen
+	r := cache.NewReader(cache.torrent.Files()[0])
+	t.Cleanup(func() {
+		r.Close()
+		_ = cache.Close()
+		cache.bg.Wait()
+	})
+	r.SetReadahead(raPieces * pieceLen)
+
+	refetched0 := RefetchedBytes()
+	stamp := int64(0)
+	for pos := start; pos < start+40; pos++ {
+		r.mu.Lock()
+		r.offset = int64(pos) * pieceLen
+		r.mu.Unlock()
+		for id := pos; id <= pos+raPieces && id < pieces; id++ {
+			p := cache.pieces[id]
+			if p.Complete.Load() {
+				continue
+			}
+			if _, err := p.WriteAt(make([]byte, pieceLen), 0); err != nil {
+				t.Fatal(err)
+			}
+			stamp++
+			atomic.StoreInt64(&p.Accessed, stamp)
+			if err := p.MarkComplete(); err != nil {
+				t.Fatal(err)
+			}
+		}
+		cache.evictNow()
+		for id := pos; id <= pos+raPieces && id < pieces; id++ {
+			if !cache.pieces[id].Complete.Load() {
+				t.Fatalf("pos %d: piece %d of the readahead window was evicted", pos, id)
+			}
+		}
+	}
+	if got := RefetchedBytes() - refetched0; got != 0 {
+		t.Errorf("a sequential read refetched %d bytes, want 0", got)
+	}
+	if got := cache.strandedPartialBytes(); got != 0 {
+		t.Errorf("stranded partial bytes = %d, want 0", got)
 	}
 }
