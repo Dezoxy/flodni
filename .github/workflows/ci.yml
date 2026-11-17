@@ -144,6 +144,10 @@ jobs:
 
   image-build:
     name: Image build
+    # Image and end-to-end jobs run on pull requests and release tags only. A push to
+    # main is a squash of a pull request whose identical tree already passed them (the
+    # merge flow checks the tree), and a release tag runs them again before publishing.
+    if: github.event_name == 'pull_request' || startsWith(github.ref, 'refs/tags/v')
     # Builds the code under test with no write permission and no secret, beside the checks.
     # The end-to-end matrix starts as soon as the images are saved here; the smoke test and
     # the scan (job "image") run beside it on the same images.
@@ -205,7 +209,7 @@ jobs:
   image:
     name: Image (build, smoke test, scan)
     needs: image-build
-    if: ${{ always() }}
+    if: ${{ always() && (github.event_name == 'pull_request' || startsWith(github.ref, 'refs/tags/v')) }}
     runs-on: ubuntu-latest
     timeout-minutes: 20
     permissions:
@@ -302,7 +306,7 @@ jobs:
   e2e-result:
     name: End-to-end
     needs: e2e
-    if: ${{ always() }}
+    if: ${{ always() && (github.event_name == 'pull_request' || startsWith(github.ref, 'refs/tags/v')) }}
     runs-on: ubuntu-latest
     timeout-minutes: 5
     permissions: {}
