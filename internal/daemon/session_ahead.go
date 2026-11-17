@@ -29,6 +29,7 @@ type sessionView struct {
 	sessionRecord
 	SessionAgeSeconds *int64 `json:"session_age_seconds,omitempty"`
 	LastReadOffset    *int64 `json:"last_read_offset,omitempty"`
+	LastReadEnd       *int64 `json:"last_read_end,omitempty"`
 	AheadBytes        *int64 `json:"ahead_bytes,omitempty"`
 	FrontierOffset    *int64 `json:"frontier_offset,omitempty"`
 }
@@ -90,16 +91,24 @@ func (s *TTFFSession) fillAhead(v *sessionView) {
 	if off < 0 {
 		return
 	}
-	v.LastReadOffset = &off
-	if s.fileIndex <= 0 || s.size <= 0 || off >= s.size {
+	// Written lastEnd first, lastOff second (recordRead), so a torn read sees an end at or
+	// past the one that belongs to off; never an end before off.
+	end := max(s.lastEnd.Load(), off)
+	v.LastReadOffset, v.LastReadEnd = &off, &end
+	if s.fileIndex <= 0 || s.size <= 0 {
 		return
 	}
-	limit := min(s.size, off+aheadScanCap)
-	pm := sessionFilePieces(s.hash, s.fileIndex, off, limit)
+	if end >= s.size {
+		ahead, frontier := int64(0), s.size
+		v.AheadBytes, v.FrontierOffset = &ahead, &frontier
+		return
+	}
+	limit := min(s.size, end+aheadScanCap)
+	pm := sessionFilePieces(s.hash, s.fileIndex, end, limit)
 	if pm == nil {
 		return
 	}
-	ahead, frontier := computeAhead(off, limit, pm, func(o, l int64) int64 { return sessionCacheRun(s.path, o, l) })
+	ahead, frontier := computeAhead(end, limit, pm, func(o, l int64) int64 { return sessionCacheRun(s.path, o, l) })
 	v.AheadBytes, v.FrontierOffset = &ahead, &frontier
 }
 

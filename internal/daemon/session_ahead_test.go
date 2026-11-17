@@ -63,6 +63,7 @@ func openAheadSession(path string, size int64, fileIndex int, lastOff int64, age
 	s := &TTFFSession{path: path, size: size, hash: "h", fileIndex: fileIndex, id: 1}
 	s.openedAt.Store(time.Now().Add(-age).UnixNano())
 	s.lastOff.Store(lastOff)
+	s.lastEnd.Store(lastOff)
 	sessions.Store(path, s)
 	return s
 }
@@ -213,7 +214,7 @@ func TestSessionsJSONContractAhead(t *testing.T) {
 			t.Fatalf("existing key %q missing", k)
 		}
 	}
-	for _, k := range []string{"session_age_seconds", "last_read_offset", "ahead_bytes", "frontier_offset"} {
+	for _, k := range []string{"session_age_seconds", "last_read_offset", "last_read_end", "ahead_bytes", "frontier_offset"} {
 		if _, ok := out.Open[0][k]; !ok {
 			t.Fatalf("new key %q missing", k)
 		}
@@ -231,5 +232,36 @@ func TestSessionsJSONContractAhead(t *testing.T) {
 	}
 	if string(out.Open[0]["id"]) != "1" || string(out.Open[0]["path"]) != `"/m/a.mkv"` {
 		t.Fatalf("existing values changed: %s", body)
+	}
+}
+
+// ahead_bytes starts where the last read ended, not where it began: against a 16 MiB alert a
+// 4 MiB read would otherwise count as ahead.
+func TestAheadMeasuresFromEndOfLastRead(t *testing.T) {
+	resetSessionState(t)
+	const mib = int64(1 << 20)
+	x := 100 * mib
+	withAheadSources(t, &native.FilePieceMap{PieceLen: mib}, func(_ string, off, limit int64) int64 {
+		a, b := x+4*mib, x+12*mib // exactly 8 MiB cached after the read
+		if off < a || off >= b {
+			return 0
+		}
+		return min(b, limit) - off
+	})
+	s := openAheadSession("/m/e.mkv", 1<<30, 1, -1, time.Minute)
+	s.recordRead(srcFetchBlock, time.Millisecond, int(4*mib), x)
+
+	var v sessionView
+	for _, got := range openSessionViews(time.Now()) {
+		v = got
+	}
+	if v.LastReadOffset == nil || *v.LastReadOffset != x || v.LastReadEnd == nil || *v.LastReadEnd != x+4*mib {
+		t.Fatalf("last read start/end: %+v", v)
+	}
+	if v.AheadBytes == nil || *v.AheadBytes != 8*mib {
+		t.Fatalf("ahead_bytes %v, want %d", v.AheadBytes, 8*mib)
+	}
+	if v.FrontierOffset == nil || *v.FrontierOffset != x+4*mib {
+		t.Fatalf("frontier_offset %v, want the end of the read %d", v.FrontierOffset, x+4*mib)
 	}
 }
