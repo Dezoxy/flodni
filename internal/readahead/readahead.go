@@ -203,6 +203,25 @@ func (c *Cache) MaxCachedOffset(p string) int64 {
 
 }
 
+// CoveredRun returns how many bytes starting at off the cache holds without a gap, up to
+// limit (exclusive end), 0 when off itself is not cached. Read only: unlike Covered and Get it
+// does not refresh lastAccess, so asking never keeps a chunk alive. It holds one shard read
+// lock for at most limit/chunk map lookups.
+func (c *Cache) CoveredRun(p string, off, limit int64) int64 {
+	s := c.getShard(p)
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	pos := off
+	for pos < limit {
+		b, ok := s.buffers[c.chunkKey(p, pos)]
+		if !ok || pos < b.start || pos > b.end {
+			break
+		}
+		pos = b.end + 1
+	}
+	return max(min(pos, limit)-off, 0)
+}
+
 // chunkKey returns a compound key using the per-path adaptive chunk size.
 func (c *Cache) chunkKey(path string, offset int64) string {
 	return fmt.Sprintf("%s:%d", path, offset/c.ChunkSize(path))

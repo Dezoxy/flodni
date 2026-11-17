@@ -329,7 +329,7 @@ func TestRuntimeAndProcessFamilyTypes(t *testing.T) {
 		}
 	}
 	want := openSessionCount()
-	if got := len(openSessionRecords()); got != want {
+	if got := len(openSessionViews(time.Now())); got != want {
 		t.Fatalf("open sessions: gauge counts %d, /api/sessions lists %d", want, got)
 	}
 	if _, err := os.Stat("/proc/self/fd"); err == nil {

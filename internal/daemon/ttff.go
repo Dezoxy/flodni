@@ -170,6 +170,7 @@ type TTFFSession struct {
 	bytesWarmupTail atomic.Int64
 	failedReads     atomic.Int64 // reads that gave up with EAGAIN/EIO, for /api/sessions
 	lastOff         atomic.Int64 // start offset of previous read; -1 = none
+	lastEnd         atomic.Int64 // end of that read (offset + bytes returned); meaningful once lastOff >= 0
 	seekCount       atomic.Int64
 	stallCount      atomic.Int64
 	maxStallMS      atomic.Int64
@@ -275,6 +276,7 @@ func (s *TTFFSession) recordRead(src ttffSource, d time.Duration, n int, off int
 				ttffStats.seekLatency.Add(d)
 			}
 		}
+		s.lastEnd.Store(off + int64(n))
 		s.lastOff.Store(off)
 	}
 	if d > ttffStallDuration {

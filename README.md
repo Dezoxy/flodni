@@ -1249,7 +1249,8 @@ the same rules: one younger than 25 s is never condemned as a dead swarm.
 ```
 
 Everything after `[Session] ` is one JSON object on one line, the same
-object `/api/sessions` returns; there an open session has outcome `open`,
+object `/api/sessions` returns (an open session there also carries the
+four fields marked "open sessions only"); there it has outcome `open`,
 no `closed_at` and live counters, so the byte fields can differ from
 `bytes_served` by a read in flight. Parse the JSON; do not grep the path,
 which `json.Marshal` escapes (`&`, `<`, `>`). Key order is not part of the
@@ -1279,6 +1280,10 @@ and `[DeadSwarm]` lines are unchanged, and their wording is not a contract.
 | `confirmed` | boolean | A play webhook confirmed the file while the session was open, or it was confirmed when the session started. Sticky: a later stop webhook does not clear it. |
 | `id`, `resumed_from` | number | A number for the session, unique within one daemon run (it restarts at 1), and the `id` of the session this one continues; 0 for a session that began with an open. Follow `resumed_from` to stitch a paused playback back together. |
 | `outcome` | string | `served`: 1 MiB or more, or over 64 KiB with a read past 8 MiB or in the tail window. `probe`: fewer bytes, a scan. `unserved`: no bytes. `dead_swarm`: the session counted as a failure in the readability record, whatever it served; it never appears when the state database is off. The thresholds may change. |
+| `session_age_seconds` | number | Open sessions only, not in the log line: seconds since the session opened. |
+| `last_read_offset`, `last_read_end` | number | Open sessions only, not in the log line: where the last served read started, and where it ended (start plus the bytes returned), in file bytes. Absent until a read has returned data. |
+| `ahead_bytes` | number | Open sessions only, not in the log line: how many bytes from `last_read_end` on the player can read without waiting. It walks forward over the read-ahead cache and the verified pieces together and stops at the first byte neither holds, at the end of the file, or after 1 GiB. Absent when `last_read_end` is, when the stub carries no `file_index`, or when the engine does not hold the torrent. Worked out when you ask, never on the read path. |
+| `frontier_offset` | number | Open sessions only, not in the log line: the end (exclusive, in file bytes) of the run of verified pieces that starts at `last_read_end`, the engine alone, without the cache. It equals `last_read_end` when the piece under it is not complete, and stops at the end of the file or 1 GiB past `last_read_end`. Present when `ahead_bytes` is. |
 
 - The four byte fields name the path that answered each read, not where
   the bytes came from. Bytes fetched from the swarm in a session reappear
@@ -2518,6 +2523,8 @@ scraper on the same host or Docker network.
 | `flodni_engine_peer_churn_drops_total` | counter | `transport` | Peers dropped by the warmup-probe churn, `tcp` or `utp`. Process counter. |
 | `flodni_engine_gradient2_backoff_samples_total` | counter | none | Gradient2 limiter samples whose latency gradient was below 1, the loop reacting to rising latency. Stays 0 while the limiter is off, which is the default. Process counter. |
 | `flodni_sessions_open` | gauge | none | Sessions open now, the length of the `open` list of `/api/sessions`. |
+| `flodni_sessions_min_ahead_bytes` | gauge | none | The smallest `ahead_bytes` over open sessions that a play webhook confirmed and that opened more than 60 seconds ago (the first 60 seconds are left out, so a cold start does not flap it). No sample while no session qualifies: absent, not 0. Worked out at scrape. The alert to use: under 16 MiB for 60 s while a session is playing. |
+| `flodni_session_ahead_bytes` | histogram | none | `ahead_bytes` of every open session that has one, sampled at scrape. Buckets 1, 4, 16, 32, 64, 128, 256, 512, 768 and 1024 MiB. Capped at 1 GiB, so the top bucket and `+Inf` hold sessions with 1 GiB or more ahead. |
 | `go_goroutines` | gauge | none | Goroutines that currently exist. |
 | `go_memstats_heap_inuse_bytes` | gauge | none | Bytes in in-use heap spans. |
 | `go_memstats_sys_bytes` | gauge | none | Bytes the Go runtime obtained from the system. |
