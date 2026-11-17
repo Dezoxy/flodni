@@ -111,7 +111,16 @@ const minPerReaderReadahead = 8 << 20
 // CacheReadahead is the whole-cache read-ahead the stats tick hands AdjustRA: the cache size
 // (64 MiB when unset) times the read-ahead percentage (95 when unset), at least 8 MiB.
 func CacheReadahead() int64 {
-	cacheSize := settings.BTsets.CacheSize
+	return readaheadFor(settings.BTsets.CacheSize)
+}
+
+// Readahead is CacheReadahead for this cache: derived from the size it was opened with,
+// with the percentage read live.
+func (c *Cache) Readahead() int64 {
+	return readaheadFor(c.openSize)
+}
+
+func readaheadFor(cacheSize int64) int64 {
 	if cacheSize == 0 {
 		cacheSize = 64 << 20 // 64 MB default
 	}

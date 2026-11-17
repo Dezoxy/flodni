@@ -319,6 +319,8 @@ func Run() {
 	// closes. Set before the engine and its ticker start. The hook only counts; it
 	// changes nothing about when a torrent closes.
 	torr.OnIdleClose = countIdleClose
+	// The engine refuses a restart under playback; only the daemon knows what plays.
+	torr.SetPlaybackProbe(confirmedPlayingSessions)
 	// Keep-alive (phase b): the engine asks before it closes an idle torrent. The
 	// predicate reads the playback state only and never calls into the engine.
 	torr.HoldExpiry = keepaliveHold

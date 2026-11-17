@@ -1254,6 +1254,10 @@
 
         // --- TorrServer Logic ---
         const NEGATIVE_KEYS = ["DisableDHT", "DisablePEX", "DisableTCP", "DisableUTP", "DisableUpload"];
+        // Fields the engine reads only when its torrent client is built: a change restarts
+        // the engine and drops every active torrent. Mirrors settings.ClientFields (a test
+        // keeps the two equal); every other field is applied in place.
+        const CLIENT_KEYS = ["AggressivePeerManagement", "ConnectionsLimit", "DisableDHT", "DisablePEX", "DisableTCP", "DisableUPNP", "DisableUTP", "DisableUpload", "DownloadRateLimit", "EnableDebug", "EnableIPv6", "ForceEncrypt", "PeersListenPort", "UploadRateLimit"];
         let originalCore = {};
 
         async function loadCore() {
@@ -1314,12 +1318,25 @@
                 const isUIOn = formData.has(formKey);
                 sets[k] = NEGATIVE_KEYS.includes(k) ? !isUIOn : isUIOn;
             });
+            const payload = { action: 'set', sets: sets };
+            const restartKeys = CLIENT_KEYS.filter(k => (sets[k] || 0) !== (originalCore[k] || 0));
+            if (restartKeys.length) {
+                const ok = confirm("Changing " + restartKeys.join(", ") + " restarts the engine and drops all active torrents (a playing stream will stall). Apply anyway?");
+                if (!ok) return;
+                payload.force = true; // only after the user confirmed
+            }
             const res = await api('/api/gostorm/settings', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ action: 'set', sets: sets })
+                body: JSON.stringify(payload)
             });
-            status.textContent = res.ok ? "✓ Core settings applied (live)" : "✗ Apply error";
+            let msg = "✗ Apply error";
+            if (res.ok) {
+                msg = restartKeys.length ? "✓ Core settings applied (engine restarted)" : "✓ Core settings applied (live)";
+            } else if (res.status === 409) {
+                try { msg = "✗ " + (await res.json()).error; } catch (e) { msg = "✗ Refused: the change restarts the engine while a session is playing"; }
+            }
+            status.textContent = msg;
             status.className = "status-msg " + (res.ok ? "status-success" : "status-error");
             setTimeout(() => { status.className = "status-msg"; }, 5000);
             if (res.ok) loadCore();

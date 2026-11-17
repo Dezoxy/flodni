@@ -559,37 +559,6 @@ func DropTorrent(hashHex string) {
 	bts.RemoveTorrent(hash)
 }
 
-func SetSettings(set *sets.BTSets) {
-	if sets.ReadOnly {
-		log.TLogln("API SetSettings: Read-only DB mode!")
-		return
-	}
-	// V227: Serialize — prevent concurrent SetSettings from interleaving disconnect/connect
-	settingsMu.Lock()
-	defer settingsMu.Unlock()
-
-	sets.SetBTSets(set)
-	log.TLogln("drop all torrents")
-	dropAllTorrent()
-	time.Sleep(time.Millisecond * 200)
-	log.TLogln("disconect")
-
-	btsMu.Lock()
-	bts.Disconnect()
-	btsMu.Unlock()
-
-	log.TLogln("connect")
-
-	// Connect() calls InitApiHelper() which acquires btsMu.Lock() internally.
-	// Do NOT wrap in btsMu.Lock here — RWMutex is not reentrant → deadlock.
-	if err := reconnect(bts.Connect, 30, time.Second); err != nil {
-		log.TLogln("connect failed:", err)
-	}
-
-	time.Sleep(time.Millisecond * 200)
-	log.TLogln("end set settings")
-}
-
 // reconnect retries Connect: the closed client's uTP socket is released lazily, and until
 // then the peer port fails with "address already in use", leaving bts.client nil.
 func reconnect(connect func() error, attempts int, wait time.Duration) error {
@@ -609,37 +578,6 @@ func reconnect(connect func() error, attempts int, wait time.Duration) error {
 		}
 	}
 	return err
-}
-
-func SetDefSettings() {
-	if sets.ReadOnly {
-		log.TLogln("API SetDefSettings: Read-only DB mode!")
-		return
-	}
-	// V227: Serialize — prevent concurrent settings changes
-	settingsMu.Lock()
-	defer settingsMu.Unlock()
-
-	sets.SetDefaultConfig()
-	log.TLogln("drop all torrents")
-	dropAllTorrent()
-	time.Sleep(time.Millisecond * 200)
-	log.TLogln("disconect")
-
-	btsMu.Lock()
-	bts.Disconnect()
-	btsMu.Unlock()
-
-	log.TLogln("connect")
-
-	// Connect() calls InitApiHelper() which acquires btsMu.Lock() internally.
-	// Do NOT wrap in btsMu.Lock here — RWMutex is not reentrant → deadlock.
-	if err := reconnect(bts.Connect, 30, time.Second); err != nil {
-		log.TLogln("connect failed:", err)
-	}
-
-	time.Sleep(time.Millisecond * 200)
-	log.TLogln("end set default settings")
 }
 
 func dropAllTorrent() {

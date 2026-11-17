@@ -4,6 +4,7 @@ import (
 	"flodni/internal/gostorm/native"
 	"flodni/internal/promtext"
 	"sort"
+	"sync/atomic"
 	"time"
 )
 
@@ -32,6 +33,36 @@ type sessionView struct {
 	LastReadEnd       *int64 `json:"last_read_end,omitempty"`
 	AheadBytes        *int64 `json:"ahead_bytes,omitempty"`
 	FrontierOffset    *int64 `json:"frontier_offset,omitempty"`
+	// The pump of the session's file, absent while none runs. They say why ahead_bytes is
+	// shallow: where the pump fetches against where the player is, whether a primary
+	// handle is open (the pump follows it) and how many handles share the pump.
+	PumpOffset *int64 `json:"pump_offset,omitempty"`
+	PlayerOff  *int64 `json:"player_off,omitempty"`
+	Primary    *bool  `json:"primary,omitempty"`
+	Refs       *int32 `json:"refs,omitempty"`
+}
+
+// fillPump adds the pump fields of the session's file. Read-only: atomics and the two
+// sync.Map reads, no lock of the pump or of a handle.
+func (s *TTFFSession) fillPump(v *sessionView) {
+	val, ok := app.activePumps.Load(s.path)
+	if !ok {
+		return
+	}
+	ps, ok := val.(*NativePumpState)
+	if !ok {
+		return
+	}
+	pumpOff, playerOff, refs := ps.pumpOff.Load(), atomic.LoadInt64(&ps.playerOff), atomic.LoadInt32(&ps.refCount)
+	primary := false
+	app.activeHandles.Range(func(key, _ any) bool {
+		if h := key.(*MkvHandle); h.path == s.path && h.isPrimaryHandle.Load() {
+			primary = true
+			return false
+		}
+		return true
+	})
+	v.PumpOffset, v.PlayerOff, v.Primary, v.Refs = &pumpOff, &playerOff, &primary, &refs
 }
 
 var (
@@ -121,6 +152,7 @@ func openSessionViews(now time.Time) []sessionView {
 		age := max(int64(now.Sub(time.Unix(0, s.openedAt.Load())).Seconds()), 0)
 		v.SessionAgeSeconds = &age
 		s.fillAhead(&v)
+		s.fillPump(&v)
 		out = append(out, v)
 		return true
 	})

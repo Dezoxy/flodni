@@ -40,11 +40,13 @@ type Torrent struct {
 	bt    *BTServer
 	cache *torrstor.Cache
 
-	lastTimeSpeed       time.Time
-	DownloadSpeed       float64
-	UploadSpeed         float64
-	BytesReadUsefulData int64
-	BytesWrittenData    int64
+	lastTimeSpeed    time.Time
+	DownloadSpeed    float64 // useful data per second
+	DownloadSpeedRaw float64 // wire bytes per second, with overhead and waste
+	UploadSpeed      float64
+	bytesReadSeen    int64 // engine BytesRead (wire) at the last sample
+	usefulSeen       int64 // engine BytesReadUsefulData at the last sample
+	BytesWrittenData int64
 
 	PreloadSize    int64
 	PreloadedBytes int64
@@ -348,14 +350,17 @@ func (t *Torrent) UpdateStats() {
 	if t.Torrent != nil && t.Torrent.Info() != nil {
 		st := t.Torrent.Stats()
 		usefulBytes = st.BytesReadUsefulData.Int64()
-		deltaDlBytes := st.BytesRead.Int64() - t.BytesReadUsefulData
-		deltaUpBytes := st.BytesWritten.Int64() - t.BytesWrittenData
 		deltaTime := time.Since(t.lastTimeSpeed).Seconds()
+		t.DownloadSpeed, t.DownloadSpeedRaw = speedSample(
+			st.BytesRead.Int64()-t.bytesReadSeen, usefulBytes-t.usefulSeen, deltaTime)
+		deltaUpBytes := st.BytesWritten.Int64() - t.BytesWrittenData
+		t.UploadSpeed = 0
+		if deltaTime > 0 {
+			t.UploadSpeed = float64(deltaUpBytes) / deltaTime
+		}
 
-		t.DownloadSpeed = float64(deltaDlBytes) / deltaTime
-		t.UploadSpeed = float64(deltaUpBytes) / deltaTime
-
-		t.BytesReadUsefulData = st.BytesRead.Int64()
+		t.bytesReadSeen = st.BytesRead.Int64()
+		t.usefulSeen = usefulBytes
 		t.BytesWrittenData = st.BytesWritten.Int64()
 
 		if t.cache != nil {
@@ -363,6 +368,7 @@ func (t *Torrent) UpdateStats() {
 		}
 	} else {
 		t.DownloadSpeed = 0
+		t.DownloadSpeedRaw = 0
 		t.UploadSpeed = 0
 	}
 	t.lastTimeSpeed = time.Now()
@@ -374,11 +380,22 @@ func (t *Torrent) UpdateStats() {
 	t.updateRA()
 }
 
+// speedSample turns one window's counter growth into rates. useful is the rate of data
+// the torrent kept (the engine's useful-data counter), raw the wire rate (BytesRead),
+// which also carries protocol overhead, duplicates and waste. Neither is negative: a
+// counter that went back (a peer dropped) reads 0. A window that did not advance is 0.
+func speedSample(rawDelta, usefulDelta int64, seconds float64) (useful, raw float64) {
+	if seconds <= 0 {
+		return 0, 0
+	}
+	return float64(max(usefulDelta, 0)) / seconds, float64(max(rawDelta, 0)) / seconds
+}
+
 func (t *Torrent) updateRA() {
 	if t.cache == nil {
 		return
 	}
-	adj := torrstor.CacheReadahead()
+	adj := t.cache.Readahead()
 	go t.cache.AdjustRA(adj)
 }
 
@@ -595,6 +612,7 @@ func (t *Torrent) Status() *state.TorrentStatus {
 	st.PreloadedBytes = t.PreloadedBytes
 	st.PreloadSize = t.PreloadSize
 	st.DownloadSpeed = t.DownloadSpeed
+	st.DownloadSpeedRaw = t.DownloadSpeedRaw
 	st.UploadSpeed = t.UploadSpeed
 
 	if t.TorrentSpec != nil {
