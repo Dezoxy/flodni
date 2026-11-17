@@ -1753,7 +1753,9 @@ torrent keeps the cache it was opened with until it is closed (idle expiry or a 
 and loaded again. Its read-ahead is derived from that size, so it cannot outgrow it. A
 `ReaderReadAHead` change applies to loaded torrents too, on their next read-ahead
 update (about a second): it is a percentage of the cache they have, and no cache is
-resized. `RetrackersMode` applies to torrents added afterwards. `UseDisk` and
+resized. `RetrackersMode` applies to torrents added afterwards. `ResponsiveMode` is latched
+when a stream opens, so it applies to readers opened after the change.
+A preload is a share of the cache the torrent has. `UseDisk` and
 `TorrentsSavePath` do not move the warmup directory, which is fixed at start.
 
 **Download speed.** The engine's torrent status reports `download_speed` as

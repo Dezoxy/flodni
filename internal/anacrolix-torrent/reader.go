@@ -328,7 +328,8 @@ func init() { maxDefaultReadahead.Store(128 << 20) }
 const minDefaultReadahead = 48 << 20 // 48 MiB
 
 // SetMaxReadahead allows TorrServer to align the reader's max readahead with CacheSize.
-// Must be called before any readers are created (typically at BTServer.Connect).
+// Called at BTServer.Connect and again when a settings change moves the cache size; the
+// value is atomic, and readers pick it up the next time they compute their read-ahead.
 func SetMaxReadahead(cacheSize int64) {
 	if cacheSize > 0 {
 		maxDefaultReadahead.Store(cacheSize)

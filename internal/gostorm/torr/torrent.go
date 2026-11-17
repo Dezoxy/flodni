@@ -350,18 +350,7 @@ func (t *Torrent) UpdateStats() {
 	if t.Torrent != nil && t.Torrent.Info() != nil {
 		st := t.Torrent.Stats()
 		usefulBytes = st.BytesReadUsefulData.Int64()
-		deltaTime := time.Since(t.lastTimeSpeed).Seconds()
-		t.DownloadSpeed, t.DownloadSpeedRaw = speedSample(
-			st.BytesRead.Int64()-t.bytesReadSeen, usefulBytes-t.usefulSeen, deltaTime)
-		deltaUpBytes := st.BytesWritten.Int64() - t.BytesWrittenData
-		t.UploadSpeed = 0
-		if deltaTime > 0 {
-			t.UploadSpeed = float64(deltaUpBytes) / deltaTime
-		}
-
-		t.bytesReadSeen = st.BytesRead.Int64()
-		t.usefulSeen = usefulBytes
-		t.BytesWrittenData = st.BytesWritten.Int64()
+		t.sampleCounters(st.BytesRead.Int64(), usefulBytes, st.BytesWritten.Int64(), time.Now())
 
 		if t.cache != nil {
 			t.PreloadedBytes = t.cache.GetState().Filled
@@ -378,6 +367,20 @@ func (t *Torrent) UpdateStats() {
 		t.coldBoost.tick(usefulBytes, time.Now(), configuredConns())
 	}
 	t.updateRA()
+}
+
+// sampleCounters turns the engine's cumulative counters into this window's rates and
+// remembers them for the next. wire is BytesRead, useful BytesReadUsefulData, wrote
+// BytesWritten. download_speed follows the useful counter, download_speed_raw the wire
+// one. The caller holds muTorrent.
+func (t *Torrent) sampleCounters(wire, useful, wrote int64, now time.Time) {
+	deltaTime := now.Sub(t.lastTimeSpeed).Seconds()
+	t.DownloadSpeed, t.DownloadSpeedRaw = speedSample(wire-t.bytesReadSeen, useful-t.usefulSeen, deltaTime)
+	t.UploadSpeed = 0
+	if deltaTime > 0 {
+		t.UploadSpeed = float64(wrote-t.BytesWrittenData) / deltaTime
+	}
+	t.bytesReadSeen, t.usefulSeen, t.BytesWrittenData = wire, useful, wrote
 }
 
 // speedSample turns one window's counter growth into rates. useful is the rate of data

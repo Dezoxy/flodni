@@ -116,6 +116,9 @@ func CacheReadahead() int64 {
 
 // Readahead is CacheReadahead for this cache: derived from the size it was opened with,
 // with the percentage read live.
+// OpenSize is the size the cache was opened with.
+func (c *Cache) OpenSize() int64 { return c.openSize }
+
 func (c *Cache) Readahead() int64 {
 	return readaheadFor(c.openSize)
 }

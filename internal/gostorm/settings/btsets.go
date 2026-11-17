@@ -234,10 +234,9 @@ func loadBTSets() {
 	if len(buf) > 0 {
 		err := json.Unmarshal(buf, &BTsets)
 		if err == nil {
-			if BTsets.ReaderReadAHead < 5 {
-				BTsets.ReaderReadAHead = 5
-			}
-			// V301: Do NOT override TorrentDisconnectTimeout here if already loaded from DB
+			// The same clamps a save applies: an unnormalized legacy or hand-edited store
+			// would otherwise make the first save a CLIENT diff made of defaults alone.
+			Normalize(BTsets)
 			return
 		}
 		log.TLogln("Error unmarshal btsets", err)

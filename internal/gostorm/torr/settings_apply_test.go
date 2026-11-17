@@ -133,6 +133,37 @@ func TestHotOnlyUnderPlaybackIsAppliedWithoutRefusal(t *testing.T) {
 	}
 }
 
+// The request is normalized before it is diffed: a blank or 0 ConnectionsLimit becomes 25
+// and, against a stored 25, is no change at all (no refusal, no rebuild).
+func TestBlankConnectionsLimitIsNotAClientChange(t *testing.T) {
+	f := newSettingsFixture(t)
+	f.playing = 2
+	if err := SetSettings(changed(func(s *sets.BTSets) { s.ConnectionsLimit = 0 }), false); err != nil {
+		t.Fatalf("a blank ConnectionsLimit was refused: %v", err)
+	}
+	if f.rebuilt() {
+		t.Error("a blank ConnectionsLimit rebuilt the engine")
+	}
+	if sets.BTsets.ConnectionsLimit != 25 {
+		t.Errorf("stored ConnectionsLimit = %d, want 25", sets.BTsets.ConnectionsLimit)
+	}
+}
+
+// A hot CacheSize change re-aligns the reader's read-ahead ceiling with the new size.
+func TestHotCacheSizeMovesTheReadaheadCeiling(t *testing.T) {
+	newSettingsFixture(t)
+	var got []int64
+	old := setMaxReadahead
+	setMaxReadahead = func(n int64) { got = append(got, n) }
+	defer func() { setMaxReadahead = old }()
+	if err := SetSettings(changed(func(s *sets.BTSets) { s.CacheSize = 256 * mib }), false); err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 1 || got[0] != 256*mib {
+		t.Errorf("SetMaxReadahead calls = %v, want [256 MiB]", got)
+	}
+}
+
 func TestDefaultsRebuildOnlyWhenAClientFieldDiffers(t *testing.T) {
 	f := newSettingsFixture(t)
 	f.playing = 1

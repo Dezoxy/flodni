@@ -30,7 +30,7 @@ var fieldClass = map[string]Class{
 	"RemoveCacheOnDrop":        Hot, // read when a cache closes
 	"RetrackersMode":           Hot, // read when a torrent is added
 	"TorrentDisconnectTimeout": Hot, // read when a torrent's idle timer is set
-	"ResponsiveMode":           Hot, // getter read per piece
+	"ResponsiveMode":           Hot, // latched per reader when a stream opens: readers opened after the change
 	"AdaptiveShield":           Hot, // getter read per piece
 	// no consumer in the engine's client, or consumed only at daemon start (a rebuild
 	// would not apply them either)

@@ -622,15 +622,25 @@ func Shutdown() {
 	os.Exit(0)
 }
 
+// preloadSize is the PreloadCache share of the cache the torrent has: the size it was
+// opened with, which a later CacheSize change does not move. A torrent with no cache
+// yet gets the share of the live size.
+func preloadSize(torr *Torrent) int64 {
+	cacheSize := sets.BTsets.CacheSize
+	if torr != nil && torr.cache != nil {
+		cacheSize = torr.cache.OpenSize()
+	}
+	size := int64((float32(cacheSize) / 100.0) * float32(sets.BTsets.PreloadCache))
+	if size > cacheSize {
+		size = cacheSize
+	}
+	return size
+}
+
 func Preload(torr *Torrent, index int) {
-	cache := float32(sets.BTsets.CacheSize)
-	preload := float32(sets.BTsets.PreloadCache)
-	size := int64((cache / 100.0) * preload)
+	size := preloadSize(torr)
 	if size <= 0 {
 		return
-	}
-	if size > sets.BTsets.CacheSize {
-		size = sets.BTsets.CacheSize
 	}
 	// V239: Leak Plumbing - Use context with timeout for API preloads
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)

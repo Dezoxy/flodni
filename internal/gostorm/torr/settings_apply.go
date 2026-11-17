@@ -12,6 +12,8 @@ import (
 	"github.com/anacrolix/torrent"
 )
 
+var setMaxReadahead = torrent.SetMaxReadahead
+
 // Seams: the settings path is driven in tests without a live torrent client.
 var (
 	storeSettings    = sets.SetBTSets
@@ -117,7 +119,7 @@ func applyHot() {
 	if _, storage := b.clientAndStorage(); storage != nil {
 		storage.SetCapacity(size)
 	}
-	torrent.SetMaxReadahead(size)
+	setMaxReadahead(size)
 }
 
 func rebuildEngine() {
