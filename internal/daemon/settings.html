@@ -556,7 +556,7 @@
                             <div class="form-group" style="grid-column: 1 / -1;">
                                 <label>FUSE Cache Budget (MB)</label>
                                 <div class="range-group">
-                                    <input type="range" name="read_ahead_budget_mb" min="128" max="512" step="32">
+                                    <input type="range" name="read_ahead_budget_mb" min="128" max="2048" step="32">
                                     <span class="range-val" data-for="read_ahead_budget_mb">256 MB</span>
                                 </div>
                                 <div class="hint">RAM for raCache pre-read buffer (recommended: 256 MB)</div>
@@ -694,7 +694,7 @@
                                     <div class="form-group">
                                         <label>Cache Size (MB)</label>
                                         <div class="range-group">
-                                            <input type="range" name="cacheSize" min="64" max="256" step="16">
+                                            <input type="range" name="cacheSize" min="64" max="2048" step="16">
                                             <span class="range-val" data-for="cacheSize">64</span>
                                         </div>
                                         <div class="hint">GoStorm piece buffer, feeds raCache (recommended: 128 MB)
@@ -1066,6 +1066,31 @@
             slider.addEventListener('input', () => { label.textContent = slider.value + suffix; });
         });
 
+        // The one way a stored value reaches a range input. A browser clamps a value
+        // outside [min, max] (and snaps one off the step grid) as it is set, and Apply
+        // would then write the clamped number back. So the range is widened first.
+        function loadRange(slider, raw, suffix) {
+            const v = Number(raw);
+            if (raw === null || raw === undefined || raw === '' || !Number.isFinite(v)) return;
+            let note = slider.parentElement.querySelector('.range-note');
+            let kept = false;
+            if (v < Number(slider.min)) { slider.min = String(v); kept = true; }
+            if (v > Number(slider.max)) { slider.max = String(v); kept = true; }
+            const step = Number(slider.step);
+            if (step > 1 && (v - Number(slider.min)) % step !== 0) { slider.step = '1'; kept = true; }
+            slider.value = String(v);
+            slider.parentElement.querySelector('.range-val').textContent = slider.value + suffix;
+            if (!note && kept) {
+                note = slider.ownerDocument.createElement('span');
+                note.className = 'range-note';
+                slider.parentElement.appendChild(note);
+            }
+            if (note) {
+                note.textContent = kept ? 'outside the usual range; kept as configured' : '';
+                note.hidden = !kept;
+            }
+        }
+
         // --- Readahead Metric (informative only, no auto-adjust) ---
         function updateReadaheadCoupling() {
             const budgetSlider = document.querySelector('[name="read_ahead_budget_mb"]');
@@ -1153,17 +1178,14 @@
                 const form = document.getElementById('flodni-form');
                 ENGINE_ROOT_KEYS.forEach(k => {
                     const input = document.querySelector(`[name="${k}"]`);
-                    if (input) {
+                    if (input && input.type === 'range') {
+                        loadRange(input, originalEngine[k], ' MB');
+                    } else if (input) {
                         input.value = originalEngine[k] ?? "";
                         // A <select> shows blank when the stored value matches no option;
                         // an unset media server type means Plex, which is the engine default.
                         if (input.tagName === 'SELECT' && !input.value) {
                             input.value = input.options[0]?.value ?? "";
-                        }
-                        const label = document.querySelector(`[data-for="${k}"]`);
-                        if (label) {
-                            const suffix = k.includes('_mb') ? ' MB' : '%';
-                            label.textContent = originalEngine[k] + suffix;
                         }
                     }
                 });
@@ -1244,10 +1266,10 @@
                 originalCore = await res.json();
                 const form = document.getElementById('gostorm-form');
                 const csVal = Math.round(originalCore.CacheSize / (1024 * 1024));
-                form.querySelector('[name="cacheSize"]').value = csVal;
-                form.querySelector('[data-for="cacheSize"]').textContent = csVal + ' MB';
-                form.querySelector('[name="readerReadAHead"]').value = originalCore.ReaderReadAHead;
-                form.querySelector('[data-for="readerReadAHead"]').textContent = originalCore.ReaderReadAHead + '%';
+                const csSlider = form.querySelector('[name="cacheSize"]');
+                loadRange(csSlider, csVal, ' MB');
+                csSlider.dataset.loaded = csSlider.value;
+                loadRange(form.querySelector('[name="readerReadAHead"]'), originalCore.ReaderReadAHead, '%');
                 markCouplingLoaded();
                 form.querySelector('[name="downloadRateLimit"]').value = originalCore.DownloadRateLimit || '';
                 form.querySelector('[name="uploadRateLimit"]').value = originalCore.UploadRateLimit || '';
@@ -1273,7 +1295,11 @@
             const status = document.getElementById('gostorm-status');
             const formData = new FormData(e.target);
             const sets = { ...originalCore };
-            sets.CacheSize = parseInt(formData.get('cacheSize')) * 1024 * 1024;
+            // An unmoved slider writes the stored bytes back untouched (the slider shows whole MB).
+            sets.CacheSize = Number.isFinite(originalCore.CacheSize) &&
+                formData.get('cacheSize') === e.target.querySelector('[name="cacheSize"]').dataset.loaded
+                ? originalCore.CacheSize
+                : parseInt(formData.get('cacheSize')) * 1024 * 1024;
             sets.ReaderReadAHead = parseInt(formData.get('readerReadAHead'));
             sets.DownloadRateLimit = parseInt(formData.get('downloadRateLimit')) || 0;
             sets.UploadRateLimit = parseInt(formData.get('uploadRateLimit')) || 0;
