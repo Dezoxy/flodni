@@ -345,9 +345,12 @@ func (h *MkvHandle) nativePump(ctx context.Context, pumpReader streamReader, sta
 			logger.Warn(fmt.Sprintf("[Pump] Warning: hash empty for %s, warmup disabled", filepath.Base(h.path)), "file", filepath.Base(h.path))
 		}
 	}
+	// reachedEOF is set where the loop sees the end of the file, to tell that normal end from an
+	// early exit: V306 used to warn on both. Adapted from upstream Tiramisu c32cd25.
+	reachedEOF := false
 	defer func() {
-		// V306: Check if pump exited during confirmed healthy playback — this is
-		// unexpected and usually indicates an I/O error or cancellation. Log for diagnosis.
+		// V306: a pump that exits during confirmed healthy playback before the end of the file
+		// is unexpected (I/O error, cancellation, interrupt). Log for diagnosis.
 		pumpExitedHealthy := false
 		if val, ok := app.playbackRegistry.Load(h.path); ok {
 			if ps, ok := val.(*PlaybackState); ok && ps.GetStatus() {
@@ -366,7 +369,9 @@ func (h *MkvHandle) nativePump(ctx context.Context, pumpReader streamReader, sta
 			raCache.ClearPieceLen(h.path)
 		}
 
-		if pumpExitedHealthy {
+		if pumpExitedHealthy && reachedEOF {
+			logger.Info(fmt.Sprintf("[V306] Pump reached end of file during playback for %s: download complete", filepath.Base(h.path)), "file", filepath.Base(h.path))
+		} else if pumpExitedHealthy {
 			logger.Warn(fmt.Sprintf("[V306] WARNING: pump goroutine exited during healthy playback for %s — priority preserved via IsHealthy", filepath.Base(h.path)), "file", filepath.Base(h.path))
 		}
 
@@ -547,6 +552,7 @@ func (h *MkvHandle) nativePump(ctx context.Context, pumpReader streamReader, sta
 				sharedState.interruptPending.Store(false)
 				continue
 			}
+			reachedEOF = true
 			return // genuine EOF
 		}
 

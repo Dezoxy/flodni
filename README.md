@@ -305,6 +305,11 @@ mode) and only the control port reads the cookie, never the engine's.
   the panel's hostname, so run no other service you do not trust on it.
 - The panel page answers `Content-Security-Policy: frame-ancestors 'none'` and
   `X-Frame-Options: DENY`.
+- Every control-port response (the panel, every API route, refusals and the open
+  routes) carries `X-Content-Type-Options: nosniff` and `Referrer-Policy:
+  same-origin`. `Strict-Transport-Security: max-age=31536000` is added only when the
+  request is known to be https: it came over TLS, the first `X-Forwarded-Proto` is
+  `https`, or `auth_panel_https` is true. The engine port is unchanged.
 
 #### Upgrading from v0.2.x to v0.3.0
 
