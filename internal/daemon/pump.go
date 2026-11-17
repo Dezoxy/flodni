@@ -136,7 +136,7 @@ func (h *MkvHandle) startNativePump(finalHash string, fileIdx int) {
 		globalOpenTracker.Inc(h.hash, h.path)
 		// Primary reconnect (refCount 0→1): inherit player position.
 		// Secondary handles (Plex probes at arbitrary offsets): no inheritance.
-		if newRefs == 1 && !h.shadowsAtOpen() {
+		if newRefs == 1 && !h.shadowsActivePlayer() {
 			becomePrimary(h)
 			if curPos := atomic.LoadInt64(&ps.playerOff); curPos > 0 {
 				atomic.StoreInt64(&h.lastOff, curPos)
@@ -167,7 +167,7 @@ func (h *MkvHandle) startNativePump(finalHash string, fileIdx int) {
 			h.pumpCancel = ps.cancel
 			h.mu.Unlock()
 			globalOpenTracker.Inc(h.hash, h.path)
-			if newRefs == 1 && !h.shadowsAtOpen() {
+			if newRefs == 1 && !h.shadowsActivePlayer() {
 				becomePrimary(h)
 				if curPos := atomic.LoadInt64(&ps.playerOff); curPos > 0 {
 					atomic.StoreInt64(&h.lastOff, curPos)
@@ -181,7 +181,7 @@ func (h *MkvHandle) startNativePump(finalHash string, fileIdx int) {
 		h.refDropped.Store(false)
 		// The pump's creator is its primary, unless a player is watching through another handle
 		// (a probe that opens while no pump is registered must not take the primary this way).
-		if !h.shadowsAtOpen() {
+		if !h.shadowsActivePlayer() {
 			becomePrimary(h)
 		}
 		// Capture the reader now and pass it to the pump goroutine: re-reading h.nativeReader
@@ -859,23 +859,16 @@ func activeStreamingPrimary(path string, except *MkvHandle) *MkvHandle {
 }
 
 // mayTakeOverStreamingPrimary reports whether h is the successor of inc, a primary that is
-// watching, and so may take over. Two cases:
-//   - A reopen: inc has not read since h opened. A player that opens a new handle to seek
-//     leaves the old one open but silent; a probe opens while the player keeps reading, so
-//     the player reads after the probe opened. This needs no webhook.
-//   - The session's player: h opened after inc and no later than the play webhook that started
-//     the session (sessionStart, set by media.play only; resume, pause and stop leave it
-//     alone). An analysis started during a session opens after that play; when the analysis
-//     ran first, the player opens after it and before the webhook.
+// watching: the player of the session, opened after inc and no later than the play webhook
+// that started the session (sessionStart, set by media.play only; resume, pause and stop leave
+// it alone). An analysis started during a session opens after that play; when the analysis ran
+// first, the player opens after it and before the webhook.
+//
+// Anything else waits for inc to go quiet (activeStreamingPrimary is nil then) or to be
+// released. A reopen that leaves the old handle open is served as a probe until then: a
+// buffered player goes silent between bursts all the time, and a probe opening in such a lull
+// must never be able to write the resume position.
 func mayTakeOverStreamingPrimary(h, inc *MkvHandle, sessionStart time.Time) bool {
-	if h.openedAt.IsZero() {
-		return false
-	}
-	return inc.lastRead.Load() < h.openedAt.UnixNano() || isSessionPlayer(h, inc, sessionStart)
-}
-
-// isSessionPlayer is the second case of mayTakeOverStreamingPrimary on its own.
-func isSessionPlayer(h, inc *MkvHandle, sessionStart time.Time) bool {
 	return !h.openedAt.IsZero() && h.openedAt.After(inc.openedAt) && !h.openedAt.After(sessionStart)
 }
 
@@ -888,21 +881,6 @@ func (h *MkvHandle) defersTo(inc *MkvHandle, sessionStart time.Time) bool {
 		return false
 	}
 	return !mayTakeOverStreamingPrimary(h, inc, sessionStart)
-}
-
-// shadowsAtOpen is shadowsActivePlayer for a handle that has not read yet, as when it opens
-// and starts or joins the pump. Every incumbent has "not read since" such a handle opened, so
-// the reopen case cannot say anything yet: only the session's player qualifies now, and a
-// reopen is recognised on its first reads instead (a seek, or the sequential proof).
-func (h *MkvHandle) shadowsAtOpen() bool {
-	if h.isPrimaryHandle.Load() {
-		return false
-	}
-	inc := activeStreamingPrimary(h.path, h)
-	if inc == nil || inc.openedAt.After(h.openedAt) {
-		return false
-	}
-	return !isSessionPlayer(h, inc, h.sessionStart())
 }
 
 func (h *MkvHandle) sessionStart() time.Time {

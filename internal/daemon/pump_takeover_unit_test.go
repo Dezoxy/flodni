@@ -12,23 +12,22 @@ func TestMayTakeOverStreamingPrimary(t *testing.T) {
 		name         string
 		openedAt     time.Time
 		sessionStart time.Time
-		incLastRead  time.Time // the incumbent's last read
 		want         bool
 	}{
-		{"opened after the incumbent and before the session started: the session's player", base.Add(time.Second), base.Add(2 * time.Second), base.Add(5 * time.Second), true},
-		{"opened at the session start", base.Add(time.Second), base.Add(time.Second), base.Add(5 * time.Second), true},
-		{"opened after the session started while the incumbent keeps reading: a probe", base.Add(3 * time.Second), base.Add(2 * time.Second), base.Add(5 * time.Second), false},
-		{"opened before the incumbent", base.Add(-time.Second), base.Add(2 * time.Second), base.Add(5 * time.Second), false},
-		{"no session start known, the incumbent keeps reading", base.Add(time.Second), time.Time{}, base.Add(5 * time.Second), false},
-		{"open time unknown", time.Time{}, base.Add(2 * time.Second), base.Add(5 * time.Second), false},
-		{"a reopen: the incumbent has not read since this handle opened", base.Add(3 * time.Second), time.Time{}, base.Add(2 * time.Second), true},
-		{"the incumbent read at the very moment of the open", base.Add(3 * time.Second), time.Time{}, base.Add(3 * time.Second), false},
+		{"opened after the incumbent and before the session started: the session's player", base.Add(time.Second), base.Add(2 * time.Second), true},
+		{"opened at the session start", base.Add(time.Second), base.Add(time.Second), true},
+		{"opened after the session started: a probe", base.Add(3 * time.Second), base.Add(2 * time.Second), false},
+		{"opened before the incumbent", base.Add(-time.Second), base.Add(2 * time.Second), false},
+		{"no session start known: nothing makes a successor", base.Add(time.Second), time.Time{}, false},
+		{"open time unknown", time.Time{}, base.Add(2 * time.Second), false},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
 			t.Parallel()
 			inc := &MkvHandle{openedAt: base}
-			inc.lastRead.Store(c.incLastRead.UnixNano())
+			// An incumbent silent since before the newcomer opened makes no difference: a lull
+			// between a buffered player's bursts is not a reopen.
+			inc.lastRead.Store(base.UnixNano())
 			if got := mayTakeOverStreamingPrimary(&MkvHandle{openedAt: c.openedAt}, inc, c.sessionStart); got != c.want {
 				t.Errorf("got %v, want %v", got, c.want)
 			}

@@ -100,25 +100,99 @@ func TestAHandleOpenedWhenNoPumpIsRegisteredIsNotMadePrimaryAsCreator(t *testing
 	}
 }
 
-// Reopen-to-seek with the old handle lingering: A stays open but silent; the new handle C
-// seeks and reads. C is the player, not a probe: it gets the read-ahead window and the
-// primary at once.
-func TestAReopenWhileTheOldHandleLingersSilentTakesThePrimary(t *testing.T) {
-	const path = "/test/review-reopen.mkv"
+// Reopen-to-seek with the old handle lingering open: until the old handle has been quiet past
+// the window, the new one is served as a probe. It takes no primary, no read-ahead and never
+// writes the resume position: a buffered player is silent between bursts all the time.
+func TestAReopenWhileTheOldHandleLingersIsAProbeUntilItGoesQuiet(t *testing.T) {
+	const path = "/test/review-reopen-early.mkv"
 	sim := newPumpSim(t, path, probeSize, probeAt, probeFetch)
 	a := sim.open("A")
 	sim.settle()
 	a.readRange(probeAt, 40*probeStep, probeStep)
+	last := probeAt + 39*probeStep
 	c := sim.open("C")
 
 	c.read(0, probeStep) // the header
 	c.read(probeStep, probeStep)
 	c.read(700*mb, probeStep) // the seek
+	streamFar(c, 700*mb+probeStep, 16)
+	c.release()
+	if got := sim.primaryOwner(); got != "[A]" {
+		t.Errorf("primary owner = %s, want [A] while A is inside the window", got)
+	}
+	if raCache.Covered(path, 700*mb+probeStep, 700*mb+2*mb-1) {
+		t.Error("C filled the shared read-ahead cache while A is inside the window")
+	}
+	if got := sim.resumeOff(); got != last {
+		t.Errorf("persisted resume position = %d MiB, want A's %d MiB", got/mb, last/mb)
+	}
+	if got := atomic.LoadInt64(&sim.pumpState().playerOff); got != 0 {
+		t.Errorf("shared player position = %d MiB, want it untouched", got/mb)
+	}
+}
+
+// Once the lingering old handle has been quiet past the window, the reopen is the player: its
+// seek takes the primary at once and gets its read-ahead window.
+func TestAReopenWhileTheOldHandleLingersTakesThePrimaryOnceItWentQuiet(t *testing.T) {
+	const path = "/test/review-reopen-late.mkv"
+	sim := newPumpSim(t, path, probeSize, probeAt, probeFetch)
+	sim.shortWindow(1)
+	a := sim.open("A")
+	sim.settle()
+	a.readRange(probeAt, 40*probeStep, probeStep)
+	c := sim.open("C")
+
+	time.Sleep(1500 * time.Millisecond) // A stays open and goes quiet past the window, for real
+	c.read(0, probeStep)
+	c.read(probeStep, probeStep)
+	c.read(700*mb, probeStep) // the seek
 	if got := sim.primaryOwner(); got != "[C]" {
-		t.Errorf("primary owner = %s, want [C] at once", got)
+		t.Errorf("primary owner = %s, want [C] once A went quiet", got)
 	}
 	if !raCache.Covered(path, 700*mb+probeStep, 700*mb+2*mb-1) {
 		t.Error("C's read got no read-ahead window: it was served as a probe")
+	}
+}
+
+// A lull: the player is silent for a second, shorter than the window. A probe opens in it,
+// seeks far and reads; then the player resumes. The probe never becomes primary, the
+// persisted resume position stays the player's and the player keeps the pump.
+func TestAProbeOpenedInALullNeverWritesTheResumePosition(t *testing.T) {
+	sim := newPumpSim(t, "/test/review-lull.mkv", probeSize, probeAt, probeFetch)
+	a := sim.open("A")
+	sim.settle()
+	a.readRange(probeAt, 40*probeStep, probeStep)
+	last := probeAt + 39*probeStep
+	time.Sleep(time.Second) // the lull, inside the window
+
+	b := sim.open("B")
+	b.read(0, probeStep)
+	b.read(probeStep, probeStep)
+	b.read(700*mb, probeStep) // seeks far
+	streamFar(b, 700*mb+probeStep, 16)
+	if got := sim.primaryOwner(); got != "[A]" {
+		t.Errorf("primary owner = %s during the lull, want [A]", got)
+	}
+	if got := sim.resumeOff(); got != last {
+		t.Errorf("persisted resume position = %d MiB after the probe, want A's %d MiB", got/mb, last/mb)
+	}
+
+	next := last + probeStep // the player resumes
+	a.readRange(next, 4*probeStep, probeStep)
+	last = next + 3*probeStep
+	b.release()
+	sim.settle()
+	if got := sim.primaryOwner(); got != "[A]" {
+		t.Errorf("primary owner = %s after the player resumed, want [A]", got)
+	}
+	if got := sim.resumeOff(); got != last {
+		t.Errorf("persisted resume position = %d MiB, want A's %d MiB", got/mb, last/mb)
+	}
+	if got := atomic.LoadInt64(&sim.pumpState().playerOff); got != 0 {
+		t.Errorf("shared player position = %d MiB after B's Release, want it untouched", got/mb)
+	}
+	if target := sim.pumpTarget(); target >= 600*mb {
+		t.Errorf("pump target = %d MiB: the pump followed the probe", target/mb)
 	}
 }
 
