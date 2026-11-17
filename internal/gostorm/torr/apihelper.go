@@ -3,9 +3,11 @@ package torr
 import (
 	"context"
 	"encoding/hex"
+	"errors"
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 
@@ -126,10 +128,82 @@ func AddTorrent(spec *torrent.TorrentSpec, title, poster string, data string, ca
 	return torr, nil
 }
 
+// ErrNoMetadata and ErrNotSaved are why an add that asked for a record has none.
+var (
+	ErrNoMetadata = errors.New("no metadata before the timeout")
+	ErrNotSaved   = errors.New("the record was not saved")
+)
+
+// SetAddedTitle gives an added torrent without a title the cleaned display name of its
+// link, or the name its metadata carries. Call it once the metadata is in.
+func SetAddedTitle(tor *Torrent, displayName string) {
+	if tor.Title != "" {
+		return
+	}
+	tor.Title = displayName // prefer dn over name
+	tor.Title = strings.ReplaceAll(tor.Title, "rutor.info", "")
+	tor.Title = strings.ReplaceAll(tor.Title, "_", " ")
+	tor.Title = strings.Trim(tor.Title, " ")
+	if tor.Title == "" && tor.Torrent != nil {
+		tor.Title = tor.Name()
+	}
+}
+
+// SaveAdded is the add that must not answer before its record exists: it waits for the
+// metadata, titles the torrent and commits the record, and says which of the two failed.
+// It does not use the save debounce: a save made a moment ago does not stand for this one.
+//
+// wait bounds the metadata wait (the caller's metadata_wait); zero keeps the engine's own.
+func SaveAdded(tor *Torrent, displayName string, wait time.Duration) error {
+	if !gotInfoWithin(tor, wait) {
+		return ErrNoMetadata
+	}
+	SetAddedTitle(tor, displayName)
+	if !saveTorrentToDB(tor) {
+		return ErrNotSaved
+	}
+	lastSaveTimes.Store(tor.Hash(), time.Now())
+	return nil
+}
+
+// waitInfo is the metadata wait of an add; a variable so a test can stand in for it.
+var waitInfo = func(t *Torrent) bool { return t.GotInfo() }
+
+// gotInfoWithin waits for the metadata for at most wait (zero: the engine's own limit). A
+// torrent given up on is closed, as one that timed out inside GotInfo is.
+func gotInfoWithin(tor *Torrent, wait time.Duration) bool {
+	info := waitInfo
+	if wait <= 0 {
+		return info(tor)
+	}
+	done := make(chan bool, 1)
+	go func() { done <- info(tor) }()
+	timer := time.NewTimer(wait)
+	defer timer.Stop()
+	select {
+	case ok := <-done:
+		return ok
+	case <-timer.C:
+		tor.Close()
+		return false
+	}
+}
+
 // ForceSaveTorrentToDB bypasses debounce — use only when the torrent is about
 // to be removed (expiry) so the final peer snapshot is always persisted.
 func ForceSaveTorrentToDB(torr *Torrent) {
 	_ = saveTorrentToDB(torr)
+}
+
+// SaveMetadataIfMissing saves the torrent only while its InfoBytes are not stored yet, which
+// is what lets the next Wake skip the metadata wait. Once they are, a save on every wake only
+// snapshots peers under the client lock during playback; ForceSaveTorrentToDB at expiry keeps
+// the peer list current. Adapted from upstream Tiramisu 4a25ffd.
+func SaveMetadataIfMissing(torr *Torrent) {
+	if torr == nil || torr.TorrentSpec == nil || len(torr.TorrentSpec.InfoBytes) > 0 {
+		return
+	}
+	SaveTorrentToDB(torr)
 }
 
 // SaveTorrentToDB saves with a 30s debounce per hash to avoid redundant fsyncs.

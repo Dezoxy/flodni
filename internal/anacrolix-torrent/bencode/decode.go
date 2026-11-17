@@ -16,11 +16,18 @@ import (
 // allocation when parsing, but also leaves the window open to implement a better solution.
 const DefaultDecodeMaxStrLen = 1<<27 - 1 // ~128MiB
 
+// The default limit on nested lists and dicts. Real torrents and peer messages nest a handful of
+// levels; the decoder recurses once per level, and a deeper input overflows the goroutine stack,
+// which cannot be recovered from.
+const DefaultDecodeMaxDepth = 256
+
 type MaxStrLen = int64
 
 type Decoder struct {
 	// Maximum parsed bencode string length. Defaults to DefaultMaxStrLen if zero.
 	MaxStrLen MaxStrLen
+	// Maximum nesting of lists and dicts. Defaults to DefaultDecodeMaxDepth if zero.
+	MaxDepth int
 
 	r interface {
 		io.ByteScanner
@@ -29,9 +36,28 @@ type Decoder struct {
 	// Sum of bytes used to Decode values.
 	Offset int64
 	buf    bytes.Buffer
+	// Current nesting of lists and dicts, reset by every Decode.
+	depth int
 }
 
+// enter is called after a 'd' or 'l' is consumed, and leave when its value is done. Every
+// recursive parse path (typed, interface and raw) goes through them. enter panics with a
+// *SyntaxError, which Decode returns.
+func (d *Decoder) enter() {
+	d.depth++
+	max := d.MaxDepth
+	if max == 0 {
+		max = DefaultDecodeMaxDepth
+	}
+	if d.depth > max {
+		d.throwSyntaxError(d.Offset-1, fmt.Errorf("nesting deeper than %d levels", max))
+	}
+}
+
+func (d *Decoder) leave() { d.depth-- }
+
 func (d *Decoder) Decode(v interface{}) (err error) {
+	d.depth = 0
 	defer func() {
 		if err != nil {
 			return
@@ -505,8 +531,10 @@ func (d *Decoder) readOneValue() bool {
 	switch b {
 	case 'd', 'l':
 		// read until there is nothing to read
+		d.enter()
 		for d.readOneValue() {
 		}
+		d.leave()
 		// consume 'e' as well
 		b = d.readByte()
 		d.buf.WriteByte(b)
@@ -593,9 +621,15 @@ func (d *Decoder) parseValue(v reflect.Value) (bool, error) {
 	case 'e':
 		return false, nil
 	case 'd':
-		return true, d.parseDict(v)
+		d.enter()
+		err := d.parseDict(v)
+		d.leave()
+		return true, err
 	case 'l':
-		return true, d.parseList(v)
+		d.enter()
+		err := d.parseList(v)
+		d.leave()
+		return true, err
 	case 'i':
 		return true, d.parseInt(v)
 	default:
@@ -631,9 +665,15 @@ func (d *Decoder) parseValueInterface() (interface{}, bool) {
 	case 'e':
 		return nil, false
 	case 'd':
-		return d.parseDictInterface(), true
+		d.enter()
+		dict := d.parseDictInterface()
+		d.leave()
+		return dict, true
 	case 'l':
-		return d.parseListInterface(), true
+		d.enter()
+		list := d.parseListInterface()
+		d.leave()
+		return list, true
 	case 'i':
 		return d.parseIntInterface(), true
 	default:

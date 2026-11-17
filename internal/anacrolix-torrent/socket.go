@@ -142,6 +142,11 @@ type networkAndHost struct {
 }
 
 func isUnsupportedNetworkError(err error) bool {
+	// No support for the family at all (a kernel or container without IPv6), or no address of it
+	// to bind: skip the network instead of failing the client. Adapted from Tiramisu fd976eb.
+	if errors.Is(err, syscall.EAFNOSUPPORT) || errors.Is(err, syscall.EADDRNOTAVAIL) {
+		return true
+	}
 	var sysErr *os.SyscallError
 	//spewCfg := spew.NewDefaultConfig()
 	//spewCfg.ContinueOnMethod = true
@@ -177,6 +182,7 @@ func listenAllRetry(
 		s, err = listen(nah.Network, net.JoinHostPort(nah.Host, portStr), f, logger)
 		if err != nil {
 			if isUnsupportedNetworkError(err) {
+				logger.Levelf(log.Info, "skipping network %q: %v", nah.Network, err)
 				err = nil
 				continue
 			}

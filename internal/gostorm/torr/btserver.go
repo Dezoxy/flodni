@@ -42,6 +42,11 @@ type BTServer struct {
 	dropMu sync.Mutex
 }
 
+// EngineRefillV2 turns on the engine's request-refill changes (ClientConfig.RefillV2). The
+// daemon sets it once at start from engine_refill_v2, before the engine builds its client; it is
+// not read again. False is the engine's behaviour without the changes.
+var EngineRefillV2 bool
+
 var privateIPBlocks []*net.IPNet
 
 // DHT Bootstrap nodes per discovery veloce
@@ -212,6 +217,7 @@ const trackerUserAgent = "qBittorrent/5.0.3"
 
 func (bt *BTServer) configure(ctx context.Context) {
 	bt.config = torrent.NewDefaultClientConfig()
+	bt.config.RefillV2 = EngineRefillV2
 
 	bt.storage = torrstor.NewStorage(settings.BTsets.CacheSize)
 	bt.config.DefaultStorage = bt.storage
