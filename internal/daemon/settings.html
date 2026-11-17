@@ -1254,7 +1254,17 @@
 
         // --- TorrServer Logic ---
         const NEGATIVE_KEYS = ["DisableDHT", "DisablePEX", "DisableTCP", "DisableUTP", "DisableUpload"];
+        // Fields the engine reads only when its torrent client is built: a change restarts
+        // the engine and drops every active torrent. Mirrors settings.ClientFields (a test
+        // keeps the two equal); every other field is applied in place.
+        const CLIENT_KEYS = ["AggressivePeerManagement", "ConnectionsLimit", "DisableDHT", "DisablePEX", "DisableTCP", "DisableUPNP", "DisableUTP", "DisableUpload", "DownloadRateLimit", "EnableDebug", "EnableIPv6", "ForceEncrypt", "PeersListenPort", "UploadRateLimit"];
         let originalCore = {};
+        // A blank or non-numeric field keeps the stored value: it is not a change, so it
+        // cannot trigger the restart confirmation or a force.
+        function intOr(raw, stored) {
+            const n = parseInt(raw, 10);
+            return Number.isFinite(n) ? n : stored;
+        }
 
         async function loadCore() {
             try {
@@ -1300,26 +1310,54 @@
                 formData.get('cacheSize') === e.target.querySelector('[name="cacheSize"]').dataset.loaded
                 ? originalCore.CacheSize
                 : parseInt(formData.get('cacheSize')) * 1024 * 1024;
-            sets.ReaderReadAHead = parseInt(formData.get('readerReadAHead'));
+            sets.ReaderReadAHead = intOr(formData.get('readerReadAHead'), originalCore.ReaderReadAHead);
             sets.DownloadRateLimit = parseInt(formData.get('downloadRateLimit')) || 0;
             sets.UploadRateLimit = parseInt(formData.get('uploadRateLimit')) || 0;
-            sets.ConnectionsLimit = parseInt(formData.get('connectionsLimit'));
-            sets.PeersListenPort = parseInt(formData.get('peersListenPort'));
-            sets.TorrentDisconnectTimeout = parseInt(formData.get('torrentDisconnectTimeout'));
+            sets.ConnectionsLimit = intOr(formData.get('connectionsLimit'), originalCore.ConnectionsLimit);
+            sets.PeersListenPort = intOr(formData.get('peersListenPort'), originalCore.PeersListenPort);
+            sets.TorrentDisconnectTimeout = intOr(formData.get('torrentDisconnectTimeout'), originalCore.TorrentDisconnectTimeout);
             sets.TorrentsSavePath = formData.get('torrentsSavePath');
-            sets.RetrackersMode = parseInt(formData.get('retrackersMode'));
+            sets.RetrackersMode = intOr(formData.get('retrackersMode'), originalCore.RetrackersMode);
             const allToggleKeys = ["ResponsiveMode", "AdaptiveShield", "UseDisk", "EnableIPv6", "DisableUTP", "DisableDHT", "DisablePEX", "DisableTCP", "DisableUpload", "ForceEncrypt", "EnableDebug"];
             allToggleKeys.forEach(k => {
                 const formKey = k.charAt(0).toLowerCase() + k.slice(1);
                 const isUIOn = formData.has(formKey);
                 sets[k] = NEGATIVE_KEYS.includes(k) ? !isUIOn : isUIOn;
             });
-            const res = await api('/api/gostorm/settings', {
+            const payload = { action: 'set', sets: sets };
+            const send = () => api('/api/gostorm/settings', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ action: 'set', sets: sets })
+                body: JSON.stringify(payload)
             });
-            status.textContent = res.ok ? "✓ Core settings applied (live)" : "✗ Apply error";
+            const restartKeys = CLIENT_KEYS.filter(k => (sets[k] || 0) !== (originalCore[k] || 0));
+            if (restartKeys.length) {
+                const ok = confirm("Changing " + restartKeys.join(", ") + " restarts the engine and drops all active torrents (a playing stream will stall). Apply anyway?");
+                if (!ok) return;
+                payload.force = true; // only after the user confirmed
+            }
+            let res = await send();
+            let msg = "✗ Apply error";
+            let restarted = restartKeys.length > 0;
+            if (res.status === 409) {
+                // The engine refused a restart under playback (a stale tab, or a field this page
+                // did not see change). Same explicit confirmation; never retried on its own.
+                let why = "The change restarts the engine while a session is playing.";
+                try { why = (await res.json()).error; } catch (e) { /* keep the generic text */ }
+                msg = "✗ " + why;
+                const again = confirm(why + "\n\nThis restarts the engine and drops all active torrents. Restart anyway?");
+                if (again) {
+                    payload.force = true; // only after the user confirmed
+                    res = await send();
+                    restarted = true;
+                }
+            }
+            if (res.ok) {
+                msg = restarted ? "✓ Core settings applied (engine restarted)" : "✓ Core settings applied (live)";
+            } else if (res.status !== 409) {
+                msg = "✗ Apply error";
+            }
+            status.textContent = msg;
             status.className = "status-msg " + (res.ok ? "status-success" : "status-error");
             setTimeout(() => { status.className = "status-msg"; }, 5000);
             if (res.ok) loadCore();

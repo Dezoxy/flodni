@@ -135,6 +135,28 @@ func computePlaybackOpen() bool {
 	return open
 }
 
+// confirmedPlayingSessions counts the sessions the media server confirmed (webhook, no
+// stop) that still have a live FUSE handle: the sessions an engine restart would
+// interrupt. States restored at start stay confirmed with no handle, so the handle says
+// the stream is open. Inferred playback is not counted: it is a guess from read patterns.
+func confirmedPlayingSessions() int {
+	n := 0
+	app.playbackRegistry.Range(func(k, v any) bool {
+		ps, ok := v.(*PlaybackState)
+		if !ok || !ps.GetStatus() {
+			return true
+		}
+		ps.mu.RLock()
+		stopped := ps.IsStopped
+		ps.mu.RUnlock()
+		if !stopped && anyLiveHandleFor(k.(string)) {
+			n++
+		}
+		return true
+	})
+	return n
+}
+
 // startPumpAtOpen decides whether Open() starts the read-ahead pump (Dezoxy fork).
 func startPumpAtOpen(pumpOnOpen, confirmedPlayback bool) bool {
 	return pumpOnOpen || confirmedPlayback

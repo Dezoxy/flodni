@@ -559,37 +559,6 @@ func DropTorrent(hashHex string) {
 	bts.RemoveTorrent(hash)
 }
 
-func SetSettings(set *sets.BTSets) {
-	if sets.ReadOnly {
-		log.TLogln("API SetSettings: Read-only DB mode!")
-		return
-	}
-	// V227: Serialize — prevent concurrent SetSettings from interleaving disconnect/connect
-	settingsMu.Lock()
-	defer settingsMu.Unlock()
-
-	sets.SetBTSets(set)
-	log.TLogln("drop all torrents")
-	dropAllTorrent()
-	time.Sleep(time.Millisecond * 200)
-	log.TLogln("disconect")
-
-	btsMu.Lock()
-	bts.Disconnect()
-	btsMu.Unlock()
-
-	log.TLogln("connect")
-
-	// Connect() calls InitApiHelper() which acquires btsMu.Lock() internally.
-	// Do NOT wrap in btsMu.Lock here — RWMutex is not reentrant → deadlock.
-	if err := reconnect(bts.Connect, 30, time.Second); err != nil {
-		log.TLogln("connect failed:", err)
-	}
-
-	time.Sleep(time.Millisecond * 200)
-	log.TLogln("end set settings")
-}
-
 // reconnect retries Connect: the closed client's uTP socket is released lazily, and until
 // then the peer port fails with "address already in use", leaving bts.client nil.
 func reconnect(connect func() error, attempts int, wait time.Duration) error {
@@ -609,37 +578,6 @@ func reconnect(connect func() error, attempts int, wait time.Duration) error {
 		}
 	}
 	return err
-}
-
-func SetDefSettings() {
-	if sets.ReadOnly {
-		log.TLogln("API SetDefSettings: Read-only DB mode!")
-		return
-	}
-	// V227: Serialize — prevent concurrent settings changes
-	settingsMu.Lock()
-	defer settingsMu.Unlock()
-
-	sets.SetDefaultConfig()
-	log.TLogln("drop all torrents")
-	dropAllTorrent()
-	time.Sleep(time.Millisecond * 200)
-	log.TLogln("disconect")
-
-	btsMu.Lock()
-	bts.Disconnect()
-	btsMu.Unlock()
-
-	log.TLogln("connect")
-
-	// Connect() calls InitApiHelper() which acquires btsMu.Lock() internally.
-	// Do NOT wrap in btsMu.Lock here — RWMutex is not reentrant → deadlock.
-	if err := reconnect(bts.Connect, 30, time.Second); err != nil {
-		log.TLogln("connect failed:", err)
-	}
-
-	time.Sleep(time.Millisecond * 200)
-	log.TLogln("end set default settings")
 }
 
 func dropAllTorrent() {
@@ -684,15 +622,25 @@ func Shutdown() {
 	os.Exit(0)
 }
 
+// preloadSize is the PreloadCache share of the cache the torrent has: the size it was
+// opened with, which a later CacheSize change does not move. A torrent with no cache
+// yet gets the share of the live size.
+func preloadSize(torr *Torrent) int64 {
+	cacheSize := sets.BTsets.CacheSize
+	if torr != nil && torr.cache != nil {
+		cacheSize = torr.cache.OpenSize()
+	}
+	size := int64((float32(cacheSize) / 100.0) * float32(sets.BTsets.PreloadCache))
+	if size > cacheSize {
+		size = cacheSize
+	}
+	return size
+}
+
 func Preload(torr *Torrent, index int) {
-	cache := float32(sets.BTsets.CacheSize)
-	preload := float32(sets.BTsets.PreloadCache)
-	size := int64((cache / 100.0) * preload)
+	size := preloadSize(torr)
 	if size <= 0 {
 		return
-	}
-	if size > sets.BTsets.CacheSize {
-		size = sets.BTsets.CacheSize
 	}
 	// V239: Leak Plumbing - Use context with timeout for API preloads
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)

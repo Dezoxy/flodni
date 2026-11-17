@@ -24,8 +24,9 @@ type NativePumpState struct {
 	reader           streamReader
 	path             string
 	refCount         int32
-	playerOff        int64       // last known player position, saved on handle release
-	interruptPending atomic.Bool // prevents cascade: only the first handle per seek fires Interrupt()
+	playerOff        int64        // last known player position, saved on handle release
+	pumpOff          atomic.Int64 // where the pump fetches next; read by /api/sessions
+	interruptPending atomic.Bool  // prevents cascade: only the first handle per seek fires Interrupt()
 }
 
 // attachToExistingPump links the handle to a running pump exactly once. The caller holds
@@ -490,6 +491,7 @@ func (h *MkvHandle) nativePump(ctx context.Context, pumpReader streamReader, sta
 		// consumption rate while its lead is thin, without waiting for a player seek.
 		// A blocked read inside nativePumpChunk cannot evaluate here; fetch timeouts
 		// (p95/hedge scale) return control to the loop and the next iteration fires.
+		sharedState.pumpOff.Store(offset)
 		watchSamples = append(watchSamples, watchSample{t: now, offset: offset, playerOff: playerOff})
 		if len(watchSamples) > 16 {
 			watchSamples = watchSamples[len(watchSamples)-16:] // V752: size-bounded ring — sparse crawls must survive in the window
@@ -559,6 +561,7 @@ func (h *MkvHandle) nativePump(ctx context.Context, pumpReader streamReader, sta
 
 		pumpedBytes += (nextOffset - offset)
 		offset = nextOffset
+		sharedState.pumpOff.Store(offset)
 	}
 }
 
