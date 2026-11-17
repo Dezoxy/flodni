@@ -84,6 +84,7 @@ type MkvHandle struct {
 	lastRead        atomic.Int64 // UnixNano of the last read, primary or not; read without a lock by activeStreamingPrimary
 	seqRun          atomic.Int32 // consecutive streaming advances, primary or not (feeds streamedOnce)
 	streamedOnce    atomic.Bool  // read sequentially like a player at least once
+	coldBoostTried  atomic.Bool  // engine_cold_boost was asked for at this handle's first player read
 }
 
 // Compile-time interface checks for MkvHandle
@@ -251,6 +252,7 @@ func (h *MkvHandle) readInner(fuseCtx context.Context, dest []byte, off int64) (
 	// successor: it reads what it asked for and leaves the shared pump, the primary and the
 	// read-ahead cache alone.
 	probe := h.shadowsActivePlayer()
+	h.boostColdStart(off, probe)
 
 	// Transition WARMUP→STREAMING on resume (first read >= warmup.FileSize), seek (jump > budget),
 	// or plain sequential progression past the warmup zone (no seek ever happens during linear

@@ -58,6 +58,8 @@ type Torrent struct {
 	closed <-chan struct{}
 
 	cachedFileStats []*state.TorrentFileStat
+
+	coldBoost coldBoost // engine_cold_boost; idle and untouched with the switch off
 }
 
 // infoPublic reports metadata that is known and not flagged private (BEP 27).
@@ -342,8 +344,10 @@ func (t *Torrent) UpdateStats() {
 		return
 	}
 
+	usefulBytes := int64(-1) // unknown: the cold boost then ends on time alone
 	if t.Torrent != nil && t.Torrent.Info() != nil {
 		st := t.Torrent.Stats()
+		usefulBytes = st.BytesReadUsefulData.Int64()
 		deltaDlBytes := st.BytesRead.Int64() - t.BytesReadUsefulData
 		deltaUpBytes := st.BytesWritten.Int64() - t.BytesWrittenData
 		deltaTime := time.Since(t.lastTimeSpeed).Seconds()
@@ -364,6 +368,9 @@ func (t *Torrent) UpdateStats() {
 	t.lastTimeSpeed = time.Now()
 	t.muTorrent.Unlock()
 
+	if EngineColdBoost {
+		t.coldBoost.tick(usefulBytes, time.Now(), configuredConns())
+	}
 	t.updateRA()
 }
 
@@ -543,6 +550,11 @@ func (t *Torrent) Close() bool {
 	t.muTorrent.Lock()
 	t.Stat = state.TorrentClosed
 	t.muTorrent.Unlock()
+
+	// A boost still running ends with the torrent, while the engine torrent is still there.
+	if EngineColdBoost {
+		t.coldBoost.cancel(configuredConns())
+	}
 
 	if t.bt != nil {
 		t.bt.mu.Lock()
