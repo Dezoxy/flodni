@@ -324,6 +324,20 @@ marked "every mode". Read these before the first start of v0.3.0:
 - The library add and inspect routes accept only a `magnet:` link whose first
   `xt` is an anchored 40-hex or 32-base32 hash, in every mode; any other link,
   `http(s)` and `file:` included, is 400 before the engine is called.
+- `POST /torrents` (the engine port) no longer reads a `file:` path: the
+  link is refused as an unknown scheme. An `http(s)` link is the only fetch an
+  add makes: at most 10 MiB, 60 s in all, up to 3 redirects and only on the
+  host it started at (a redirect to a `magnet:` link still works). The poster
+  check has one 10 s deadline in total, HEAD and GET fallback together, and the
+  same redirect rule.
+- With `save_to_db` set, `POST /torrents` answers only after the record is
+  saved: 200 when it is, 504 when no metadata arrived before the timeout (the
+  optional `metadata_wait`, in seconds, bounds it), 500 when the save failed (a
+  JSON `error` says which). Without `save_to_db` it answers at once, as before.
+  `POST /torrent/upload` with `save` still saves in the background. The library
+  add sends its `metadata_wait` on, so a dead swarm answers 504 "no metadata"
+  within about that wait plus 5 s, as before, not 502; the add call is capped at
+  2 minutes (it was 30 s per call before the engine waited for the record).
 - The engine answers 404, not a 307 redirect, to `POST /torrents/` with a
   trailing slash, in every mode.
 - Scoped mode, once chosen: both ports deny by default, a wrong bearer is
