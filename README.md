@@ -324,6 +324,20 @@ marked "every mode". Read these before the first start of v0.3.0:
 - The library add and inspect routes accept only a `magnet:` link whose first
   `xt` is an anchored 40-hex or 32-base32 hash, in every mode; any other link,
   `http(s)` and `file:` included, is 400 before the engine is called.
+- `POST /torrents` (the engine port) no longer reads a `file:` path: the
+  link is refused as an unknown scheme. An `http(s)` link is the only fetch an
+  add makes: at most 10 MiB, 60 s in all, up to 3 redirects and only on the
+  host it started at (a redirect to a `magnet:` link still works). The poster
+  check has one 10 s deadline in total, HEAD and GET fallback together, and the
+  same redirect rule.
+- With `save_to_db` set, `POST /torrents` answers only after the record is
+  saved: 200 when it is, 504 when no metadata arrived before the timeout (the
+  optional `metadata_wait`, in seconds, bounds it), 500 when the save failed (a
+  JSON `error` says which). Without `save_to_db` it answers at once, as before.
+  `POST /torrent/upload` with `save` still saves in the background. The library
+  add sends its `metadata_wait` on, so a dead swarm answers 504 "no metadata"
+  within about that wait plus 5 s, as before, not 502; the add call is capped at
+  2 minutes (it was 30 s per call before the engine waited for the record).
 - The engine answers 404, not a 307 redirect, to `POST /torrents/` with a
   trailing slash, in every mode.
 - Scoped mode, once chosen: both ports deny by default, a wrong bearer is
@@ -942,6 +956,26 @@ the places they were first seen (the stale cache priorities, now dropped).
   single-seeder case after a wake is therefore not covered), and two peers
   dropping together (one address is redialed, not both). A redial the torrent
   did not take (an address it already knows) is not counted.
+- **`engine_refill_v2`** in `config.json` (default `false`, read once at
+  start: a change needs a restart). Four request-refill changes adapted from
+  upstream, none of them measured on a real swarm yet, so they are opt-in:
+  a refill sorts at most the larger of two pieces and four queues of
+  candidate chunks instead of the whole readahead window; a peer whose
+  requests another peer holds may be robbed of them when it has delivered
+  nothing for 2 s while expecting chunks (the steal grace still applies);
+  a peer's queue is topped up when it falls to half of its target instead of
+  at empty, paused for 5 s after the peer rejects a request it held; and the
+  request-update timer, which is compiled out today, would use a timer that
+  releases its function when stopped. The queue target is whatever the
+  engine's adaptive pipeline (or Gradient2) says, so the half-queue point and
+  the candidate cap follow it. With the switch off none of this code is
+  reached: the refill decisions are the ones the engine made before. To A/B
+  it on one swarm, run a period with it off and a period with it on, same
+  library and viewers, and compare `flodni_read_stalls_total`,
+  `flodni_session_first_byte_seconds` and the sessions' `stalls` and
+  `max_stall_ms`. The
+  decisions are pinned in `internal/anacrolix-torrent/refill_flagoff_test.go`
+  (switch off) and `refill_v2_test.go` (switch on).
 
 ## Readability record
 
@@ -2295,6 +2329,26 @@ file of that length (by name if several); else the open fails with `EIO`.
   stub's size (outcome `index_mismatch`). Not guarded: a torrent with no
   stored list whose stale stub shares its index with another file's warm head
   of a plausible length; `GET /api/library/audit` lists such stubs.
+
+## FUSE mount options
+
+Startup-only: the mount is made once, so a save from the Control Panel changes
+them at the next start. A timeout outside its range refuses the start (and the
+save). The reasoning, and what Flodni leaves to the host, is
+[ADR 0005](docs/architecture/decisions/0005-fuse-timeouts-splice-readahead.md).
+
+| Key | Values | Default |
+| --- | --- | --- |
+| `attr_timeout_seconds` | seconds, 0 to 60 | `1` |
+| `entry_timeout_seconds` | seconds, 0 to 60 | `1` |
+| `negative_timeout_seconds` | seconds, 0 to 60 | `0` |
+| `fuse_disable_splice` | `true`, `false` | `false` |
+
+Flodni does not invalidate the kernel's cached names when a stub is removed or
+replaced, so an `attr_timeout_seconds` or `entry_timeout_seconds` above 1 can
+keep a removed stub visible for that long. Start logs a `[Config] WARNING` line
+when either is above the default. The kernel's readahead is host policy: Flodni
+never writes it.
 
 ## Logging
 

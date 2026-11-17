@@ -19,7 +19,13 @@ func newPriorityTestCache(t *testing.T) (*torrent.Torrent, *Cache) {
 // newPriorityTestCacheN is the same with a torrent of this many 16 KiB pieces.
 func newPriorityTestCacheN(t *testing.T, pieces int) (*torrent.Torrent, *Cache) {
 	t.Helper()
-	const pieceLen = 16 << 10
+	return newPriorityTestCacheSized(t, pieces, 16<<10)
+}
+
+// newPriorityTestCacheSized is the same with a piece length of pieceLen bytes. The pieces carry
+// no data, so a large piece length costs nothing.
+func newPriorityTestCacheSized(t *testing.T, pieces int, pieceLen int64) (*torrent.Torrent, *Cache) {
+	t.Helper()
 	stor := NewStorage(int64(pieces) * pieceLen)
 
 	cfg := torrent.NewDefaultClientConfig()
