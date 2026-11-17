@@ -905,33 +905,35 @@ tree, and from a field report: a private-tracker season pack whose only
 connected seeder dropped mid-play left 0 peers for about 8 minutes, and
 episode starts whose middle was not cached stalled 10 to 12 times per
 session, up to 20 s each, with no failed reads. The order puts the
-measurement before the change it is meant to measure. Designed, not built.
+measurement before the change it is meant to measure. Steps 1 to 4 are built.
 
-1. **Panel security headers.** The panel sets only `frame-ancestors 'none'`
-   and `X-Frame-Options: DENY`. Add `X-Content-Type-Options: nosniff` and a
-   `Referrer-Policy` on the panel and the control API's responses, and
-   `Strict-Transport-Security` only when the panel is known to be https
-   (TLS, `X-Forwarded-Proto`, or `auth_panel_https`). Upstream 53aa761.
-2. **Tell the end of a file apart from an early pump exit.** The V306 check
-   warns whenever a pump exits during confirmed playback, including when it
-   simply read the file to the end; upstream found most of its warnings were
+1. **Panel security headers.** [FINISHED] The panel sets only `frame-ancestors
+   'none'` and `X-Frame-Options: DENY`. Add `X-Content-Type-Options: nosniff`
+   and a `Referrer-Policy` on the panel and the control API's responses, and
+   `Strict-Transport-Security` only when the panel is known to be https (TLS,
+   `X-Forwarded-Proto`, or `auth_panel_https`). Upstream 53aa761. Built (#244).
+2. **Tell the end of a file apart from an early pump exit.** [FINISHED] The V306
+   check warns whenever a pump exits during confirmed playback, including when
+   it simply read the file to the end; upstream found most of its warnings were
    that. Record a reached-end-of-file flag and log the end of the file as
    information, keeping the warning for a real early exit. Upstream c32cd25.
-3. **Show how far ahead of the player data is ready.** During a stall the
-   operator cannot tell how much of the file past the player's position is
-   already cached or verified, or where the download frontier is. Add both
-   to each open session in `GET /api/sessions` and as metrics: bytes
-   contiguously available ahead of the last read offset (cache plus verified
-   pieces) and the download frontier offset. Bounded labels only. This is
-   also how steps 4 and the request-refill switch get measured. Inspired by
-   upstream 7eb7000 (a piece map in its UI); no UI here.
-4. **A connection boost at cold start, opt-in.** On activation, when the
+   Built (#246).
+3. **Show how far ahead of the player data is ready.** [FINISHED] During a stall
+   the operator cannot tell how much of the file past the player's position is
+   already cached or verified, or where the download frontier is. Add both to
+   each open session in `GET /api/sessions` and as metrics: bytes contiguously
+   available ahead of the last read offset (cache plus verified pieces) and the
+   download frontier offset. Bounded labels only. This is also how steps 4 and
+   the request-refill switch get measured. Inspired by upstream 7eb7000 (a piece
+   map in its UI); no UI here. Built (#247).
+4. **A connection boost at cold start, opt-in.** [FINISHED] On a player's first
+   read past the file header (never a scan, a probe or warm-on-add), when the
    per-torrent connection limit is below 35, raise it to 35 until 1 MiB of
    useful data has arrived or 30 s have passed, then restore the configured
    limit. It helps swarms with more peers than the limit and does little for
-   small private swarms, so it ships behind a switch, default off, measured
-   with step 3. A test pins the raise and the restore, including a torrent
-   closed during the boost. Upstream 2b0df97.
+   small private swarms, so it ships behind a switch, default off, measured with
+   step 3. A test pins the raise and the restore, including a torrent closed
+   during the boost. Upstream 2b0df97. Built (#248).
 
 Not needed: upstream's season-pack name parsing (Flodni's), its shield and
 sign-in changes (Flodni has both, broader), and the commits for parts Flodni
