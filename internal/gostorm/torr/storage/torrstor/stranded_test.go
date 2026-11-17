@@ -295,9 +295,10 @@ func TestDropStrandedPartialsIsThrottledAndWiredIntoCleanPieces(t *testing.T) {
 	}
 }
 
-// Without the seam the cache asks the real torrent, whose pieces here have no dirty chunk: it
-// refuses, and the bytes stay.
-func TestDropStrandedPartialsAsksTheTorrent(t *testing.T) {
+// The real path, no seam: a failed hash pends every chunk in the engine but leaves the bytes in
+// the cache, and the reader then seeks away. The torrent forgets the piece (nothing to pend), the
+// cache frees the buffer, and the gauge reaches zero.
+func TestDropStrandedPartialsFreesAFailedHashPieceThroughTheRealTorrent(t *testing.T) {
 	const mib = int64(1 << 20)
 	tor, c := newMetricsTestCache(t)
 	quiet(c)
@@ -307,8 +308,99 @@ func TestDropStrandedPartialsAsksTheTorrent(t *testing.T) {
 		t.Fatal(err)
 	}
 	fetch(t, c, 12, int(mib/2), old)
+	if got := c.strandedPartialBytes(); got != mib/2 {
+		t.Fatalf("setup: stranded = %d, want %d", got, mib/2)
+	}
 	sweep(c)
-	if !hasBuffer(c, 12) {
-		t.Error("the torrent refused and the cache freed the piece anyway")
+	if hasBuffer(c, 12) {
+		t.Error("the buffer of an abandoned piece the engine holds no chunk of was kept")
+	}
+	if got := c.strandedPartialBytes(); got != 0 {
+		t.Errorf("stranded after the pass = %d, want 0", got)
+	}
+}
+
+// A seek followed by silence still gets swept: nothing reads, writes or closes, so only the
+// cleaner's own timer can run the pass.
+func TestStrandedPartialsAreSweptWhileIdle(t *testing.T) {
+	const mib = int64(1 << 20)
+	prev := strandedTickEvery
+	strandedTickEvery = 10 * time.Millisecond
+	t.Cleanup(func() { strandedTickEvery = prev })
+	tor, c := newMetricsTestCache(t)
+	fl := newForgetLog()
+	c.forgetPartial = fl.forget
+	quiet(c)
+	r := c.NewReader(tor.Files()[0])
+	t.Cleanup(func() { c.CloseReader(r) })
+	if _, err := r.Seek(30*mib, 0); err != nil {
+		t.Fatal(err)
+	}
+	fetch(t, c, 12, int(mib/2), 1)
+	// Let the cleaner the writes woke finish (the hold keeps it from sweeping), then let the next
+	// pass through. No further call into the cache follows.
+	time.Sleep(200 * time.Millisecond)
+	c.lastStrandedNS.Store(time.Now().Add(-strandedSweepEvery).UnixNano())
+	deadline := time.Now().Add(3 * time.Second)
+	for c.strandedPartialBytes() != 0 {
+		if time.Now().After(deadline) {
+			t.Fatalf("stranded = %d after the seek went quiet, want 0", c.strandedPartialBytes())
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+}
+
+// The sweep runs after eviction on the cleaner's goroutine: a forget that waits on the client lock
+// must not hold up eviction.
+func TestCleanPiecesEvictsBeforeSweeping(t *testing.T) {
+	const mib = int64(1 << 20)
+	tor, c := newMetricsTestCache(t)
+	entered, release := make(chan int, 8), make(chan struct{})
+	c.forgetPartial = func(id int) bool {
+		entered <- id
+		<-release
+		return true
+	}
+	quiet(c)
+	r := c.NewReader(tor.Files()[0])
+	t.Cleanup(func() { c.CloseReader(r) })
+	if _, err := r.Seek(30*mib, 0); err != nil {
+		t.Fatal(err)
+	}
+	// Eight complete pieces in a 6 MiB cache, written without MarkComplete's own eviction.
+	for id := 10; id < 18; id++ {
+		fetch(t, c, id, int(mib), int64(id))
+		c.pieces[id].Complete.Store(true)
+	}
+	fetch(t, c, 20, int(mib/2), old)
+	c.lastStrandedNS.Store(0)
+	c.lastCleanNS.Store(0)
+	done := make(chan struct{})
+	go func() { c.cleanPieces(); close(done) }()
+	t.Cleanup(func() {
+		select {
+		case <-release:
+		default:
+			close(release)
+		}
+		<-done
+	})
+	select {
+	case id := <-entered:
+		if id != 20 {
+			t.Fatalf("forget asked about piece %d, want 20", id)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("the sweep never ran")
+	}
+	// The sweep is blocked inside the forget: eviction must already be done.
+	var kept int
+	for id := 10; id < 18; id++ {
+		if sizeOf(c, id) > 0 {
+			kept++
+		}
+	}
+	if int64(kept)*mib > c.capacity {
+		t.Errorf("%d complete pieces still held while the sweep waits, capacity holds %d", kept, c.capacity/mib)
 	}
 }

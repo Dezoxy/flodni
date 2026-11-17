@@ -156,12 +156,17 @@ func NewCache(capacity int64, storage *Storage) *Cache {
 	}
 	// V227: Background cleaning goroutine
 	ret.goBG(func() {
+		// A seek followed by silence wakes nothing, so the stranded-partial sweep has its own tick.
+		tick := time.NewTicker(strandedTickEvery)
+		defer tick.Stop()
 		for {
 			select {
 			case <-ret.cleanStop:
 				return
 			case <-ret.cleanTrigger:
 				runRecovered("cleanPieces", ret.cleanPieces)
+			case <-tick.C:
+				runRecovered("sweepStranded", ret.sweepIfStranded)
 			}
 		}
 	})
@@ -404,8 +409,13 @@ func (c *Cache) cleanPieces() {
 	c.refreshPriorities()
 
 	now := time.Now()
+	c.evictIfDue(now)
+	// After eviction: each candidate waits on the engine's client lock, and eviction must not.
 	c.dropStrandedPartials(now)
+}
 
+// evictIfDue is the eviction half of cleanPieces.
+func (c *Cache) evictIfDue(now time.Time) {
 	// V138: Throttle the cleaner's eviction to at most once per second, unless we are near
 	// capacity (>90%). MarkComplete evicts through evictNow and skips this throttle.
 	if now.UnixNano()-c.lastCleanNS.Load() < int64(time.Second) && atomic.LoadInt64(&c.filled) < (c.capacity*9)/10 {

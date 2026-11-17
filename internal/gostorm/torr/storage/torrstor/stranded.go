@@ -84,3 +84,16 @@ func (c *Cache) dropStrandedPartials(now time.Time) {
 		}
 	}
 }
+
+// sweepIfStranded is the cleaner's timer step: a sweep when partial pieces sit outside the
+// windows (dropStrandedPartials still spaces the sweeps by strandedSweepEvery).
+func (c *Cache) sweepIfStranded() {
+	if c.isClosed.Load() || c.strandedPartialBytes() == 0 {
+		return
+	}
+	c.dropStrandedPartials(time.Now())
+}
+
+// strandedTickEvery is how often the cleaner checks, with no read or write to wake it, whether a
+// sweep is due. A variable so a test can shorten it.
+var strandedTickEvery = strandedSweepEvery

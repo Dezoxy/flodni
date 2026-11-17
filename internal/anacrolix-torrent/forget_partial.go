@@ -5,11 +5,20 @@ package torrent
 // behind: their requests are cancelled, the cache cannot evict them (it only evicts complete
 // pieces), and each keeps a whole piece allocated until the torrent closes.
 //
-// It refuses, returning false, while the piece is complete, wanted, being hashed or marked
-// complete, queued for hashing or has a write in flight, while it holds no dirty chunk, or while
-// any request for one of its chunks is outstanding or awaiting a cancel acknowledgement, since a
-// chunk still in flight would land after the forget. A chunk landing anyway is written and
-// marked dirty again, which keeps dirty bits and stored data consistent.
+// What makes it safe: a chunk's dirty bit is set in the same client-lock hold that counts its
+// write as pending (Peer.receiveChunk), and this runs under the client lock. So a piece with no
+// pending write and no hashing, marking or queued hash has no chunk the torrent counts as stored
+// that this call could orphan, and a chunk that lands afterwards is written and marked dirty
+// again. The storage pairs that with a write counter, so it keeps the bytes of a chunk that
+// landed between its own check and the release.
+//
+// It returns false while the piece is complete, wanted, being hashed or marked complete, queued
+// for hashing or has a write in flight, or while a request for one of its chunks is outstanding
+// or awaiting a cancel acknowledgement on a connection. Those request checks only avoid a
+// wasted re-download: webseed requests, hedge duplicates and cancels to peers without the fast
+// extension are not visible to them, and a chunk that arrives anyway is re-dirtied, so the cost
+// is that chunk downloaded twice. A piece with no dirty chunk (a failed hash pends them all but
+// keeps the buffer) is forgotten too: nothing needs pending, and the caller can free the buffer.
 //
 // Lock order: it takes the client lock and nothing else (no piece, storage or cache lock), so a
 // caller must not hold a lock that a client-lock holder can wait for. The storage's cache holds
@@ -22,7 +31,7 @@ func (t *Torrent) ForgetPartialPiece(index int) bool {
 	}
 	p := t.piece(index)
 	if t.pieceComplete(index) || t.wantPieceIndex(index) || p.hashing || p.marking ||
-		p.queuedForHash() || p.atomicPendingWrites.Load() != 0 || p.numDirtyChunks() == 0 {
+		p.queuedForHash() || p.atomicPendingWrites.Load() != 0 {
 		return false
 	}
 	start := t.pieceRequestIndexOffset(index)
@@ -37,7 +46,9 @@ func (t *Torrent) ForgetPartialPiece(index int) bool {
 			return false
 		}
 	}
-	t.pendAllChunkSpecs(index)
+	if p.hasDirtyChunks() {
+		t.pendAllChunkSpecs(index)
+	}
 	t.clearPieceTouchers(index)
 	t.updatePiecePriority(index, "Torrent.ForgetPartialPiece")
 	return true
