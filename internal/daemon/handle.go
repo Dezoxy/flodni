@@ -86,6 +86,7 @@ type MkvHandle struct {
 	streamedOnce    atomic.Bool  // read sequentially like a player at least once
 	coldBoostTried  atomic.Bool  // engine_cold_boost was asked for at this handle's first player read
 	tailHold        atomic.Int64 // >0: the last offset before a jump into the tail zone; the pump keeps following it (noteTailHold)
+	wasPrimary      atomic.Bool  // was the primary at some point: an older handle may retake it from a later incumbent only then (defersTo)
 	tailRun         atomic.Int32 // sequential streaming reads in the tail zone since that jump
 }
 
@@ -998,6 +999,17 @@ func (h *MkvHandle) releaseResources() syscall.Errno {
 	// without slot, replaced pump) would otherwise leak this entry, and both the live
 	// handle checks (anyLiveHandleFor*) and cleanup's activePaths trust the map.
 	app.activeHandles.Delete(h)
+
+	// A handle that counted itself open when it took a pump reference and has lost the pump
+	// since (a creator whose pump ended, an attached handle whose pump is gone) gives the
+	// count back here: the block below only runs while a pump is registered and the handle
+	// still holds its slot.
+	if h.pumpState != nil {
+		_, live := app.activePumps.Load(h.path)
+		if (!h.hasSlot.Load() || !live) && h.refDropped.CompareAndSwap(false, true) {
+			globalOpenTracker.Dec(h.hash, h.path)
+		}
+	}
 
 	if val, ok := app.activePumps.Load(h.path); ok {
 		ps := val.(*NativePumpState)

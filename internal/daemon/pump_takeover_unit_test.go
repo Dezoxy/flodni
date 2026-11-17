@@ -35,13 +35,14 @@ func TestMayTakeOverStreamingPrimary(t *testing.T) {
 	}
 }
 
-func TestAnOlderHandleIsNeverDeferredToALaterIncumbent(t *testing.T) {
+func TestAnOlderHandleThatWasPrimaryIsNotDeferredToALaterIncumbent(t *testing.T) {
 	newTestApp(t)
 	useTestGlobals(t)
 	const path = "/test/older-handle.mkv"
 	base := time.Now()
 	older := newTestHandle(path)
 	older.openedAt = base
+	older.wasPrimary.Store(true)
 	inc := newTestHandle(path)
 	inc.openedAt = base.Add(time.Second)
 	inc.isPrimaryHandle.Store(true)
@@ -51,6 +52,12 @@ func TestAnOlderHandleIsNeverDeferredToALaterIncumbent(t *testing.T) {
 
 	if older.shadowsActivePlayer() {
 		t.Error("the older handle is a probe behind a later incumbent: it could never retake the primary")
+	}
+	probe := newTestHandle(path)
+	probe.openedAt = base.Add(-time.Second)
+	registerHandle(t, probe)
+	if !probe.shadowsActivePlayer() {
+		t.Error("an older handle that was never primary is a probe behind the incumbent")
 	}
 	later := newTestHandle(path)
 	later.openedAt = base.Add(2 * time.Second)

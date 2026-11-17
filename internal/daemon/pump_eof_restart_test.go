@@ -274,3 +274,63 @@ func TestRebuildThenResumeThenSeekBurstThenTailReadKeepsThePumpOnThePlayer(t *te
 		t.Errorf("player position kept = %d MiB, want %d MiB", got/mb, (next-probeStep)/mb)
 	}
 }
+
+// A seek burst of older probes: handles opened before the player, never primary, stream far
+// away one after the other while the player (a later handle) reads. An older handle may
+// retake the primary only if it was the primary before (a paused player returning).
+func TestASeekBurstOfOlderNeverPrimaryProbesLeavesThePrimaryAndThePumpWithThePlayer(t *testing.T) {
+	const path = "/test/burst-older.mkv"
+	sim := newPumpSim(t, path, eofSize, eofAt, probeFetch)
+	c := sim.open("C") // the pump's creator, the only handle that was ever primary before the player
+	x1, x2, x3 := sim.open("X1"), sim.open("X2"), sim.open("X3")
+	x1.read(0, probeStep)
+	sim.settle()
+	c.release()
+	a := sim.open("A")
+	a.readRange(eofAt, 40*probeStep, probeStep)
+	sim.settle()
+	if got := sim.primaryOwner(); got != "[A]" {
+		t.Fatalf("primary owner = %s, want [A]: the scenario is not set up", got)
+	}
+
+	next := eofAt + 40*probeStep
+	burst := []*simHandle{x1, x2, x3}
+	offs := []int64{548 * mb, 700 * mb, 300 * mb}
+	for i := int64(0); i < 24; i++ {
+		for j, x := range burst {
+			x.read(offs[j]+i*probeStep, probeStep)
+		}
+		a.read(next, probeStep)
+		next += probeStep
+		if got := sim.primaryOwner(); got != "[A]" {
+			t.Fatalf("after %d burst rounds the primary owner = %s, want [A]", i+1, got)
+		}
+	}
+	sim.settle()
+	if got := sim.pumpTarget(); got > next+int64(gc().ReadAheadBudget)+8*mb {
+		t.Errorf("pump target = %d MiB: it followed the burst, the player is at %d MiB", got/mb, next/mb)
+	}
+	if got, want := sim.resumeOff(), next-probeStep; got != want {
+		t.Errorf("resume position = %d MiB, want the player's %d MiB", got/mb, want/mb)
+	}
+}
+
+// A pump creator whose pump ended gives its open count back on Release, once.
+func TestAPumpCreatorWhosePumpEndedBalancesTheOpenCountOnRelease(t *testing.T) {
+	const path = "/test/creator-tracker.mkv"
+	sim := newPumpSim(t, path, eofSize, eofAt, 0)
+	a := sim.open("A")
+	sim.settle()
+	if got := globalOpenTracker.CountByPath(path); got != 1 {
+		t.Fatalf("open count with A open = %d, want 1: the scenario is not set up", got)
+	}
+	sim.endPump()
+	a.release()
+	if got := globalOpenTracker.CountByPath(path); got != 0 {
+		t.Errorf("open count after the creator's pump ended and it was released = %d, want 0", got)
+	}
+	a.release() // idempotent
+	if got := globalOpenTracker.CountByPath(path); got != 0 {
+		t.Errorf("open count after a second Release = %d, want 0", got)
+	}
+}

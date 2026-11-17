@@ -983,12 +983,14 @@ func mayTakeOverStreamingPrimary(h, inc *MkvHandle, sessionStart time.Time) bool
 }
 
 // defersTo reports whether h must leave the primary to inc, a primary that is watching. An
-// incumbent that opened after h never wins this way: h is the older handle, and if it reads
-// again it is the player returning (after a pause, say) and retakes the primary on the normal
-// rules, a sequential proof or a seek.
+// incumbent that opened after h wins this way only over a handle that was never primary: an
+// older handle that was is the player returning (after a pause, say) and retakes the primary
+// on the normal rules, a sequential proof or a seek.
 func (h *MkvHandle) defersTo(inc *MkvHandle, sessionStart time.Time) bool {
 	if inc.openedAt.After(h.openedAt) {
-		return false
+		// The older handle is the player returning only if it was the primary before: a
+		// probe that opened ahead of the player (a library scan) never was, and defers.
+		return !h.wasPrimary.Load()
 	}
 	return !mayTakeOverStreamingPrimary(h, inc, sessionStart)
 }
@@ -1067,6 +1069,7 @@ func becomePrimary(h *MkvHandle) bool {
 	if !h.isPrimaryHandle.CompareAndSwap(false, true) {
 		return false
 	}
+	h.wasPrimary.Store(true)
 	app.activeHandles.Range(func(key, _ interface{}) bool {
 		other, ok := key.(*MkvHandle)
 		if ok && other != h && other.path == h.path && other.isPrimaryHandle.CompareAndSwap(true, false) {
