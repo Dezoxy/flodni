@@ -28,6 +28,8 @@ func useFreshReadPath(t *testing.T) {
 		Budget: func() int64 { return gc().ReadAheadBudget },
 		Logf:   func(string, ...any) {},
 		Go:     func(f func()) { go f() },
+
+		PlayerOff: raPlayerOff,
 	})
 	nativeBridge = nil
 	t.Cleanup(func() {

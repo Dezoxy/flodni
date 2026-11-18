@@ -49,7 +49,8 @@ type Config struct {
 	Logf   func(format string, args ...any) // logger
 	Go     func(fn func())                  // panic-safe background goroutine launcher
 	// PlayerOff returns the offset a path's player is reading at, false when no player is
-	// known. It is called with no cache lock held. Without it, or when it says false, a path's
+	// known (a path with a player is never idle, so a paused viewer keeps its chunks). With
+	// two primaries on a path the larger offset wins. It is called with no cache lock held. Without it, or when it says false, a path's
 	// chunks are evicted oldest-written first, as for a single unaware stream.
 	PlayerOff func(path string) (int64, bool)
 }
@@ -81,6 +82,7 @@ type Cache struct {
 	evictions [numReasons]atomic.Int64
 	// nearPlayer counts evictions of a chunk inside the player's fair-share window.
 	nearPlayer atomic.Int64
+	nearFloor  int64 // least near-player window; see nearWindow
 
 	pieceLens sync.Map // path → int64 adaptive chunk size (aligned to piece boundary)
 }
@@ -148,6 +150,7 @@ func New(cfg Config) *Cache {
 		pool:      make(chan []byte, 32), // Cap at 32 chunks (512MB max pool)
 		scratch:   make(map[string]pathStat),
 		lastNear:  make(map[string]time.Time),
+		nearFloor: 32 << 20,
 	}
 	for i := range c.shards {
 		c.shards[i] = &raShard{
@@ -440,7 +443,11 @@ func better(a, b victim) bool {
 		// Least recently touched first.
 		return atomic.LoadInt64(&a.buf.lastAccess) < atomic.LoadInt64(&b.buf.lastAccess)
 	}
-	// Ahead: the path holding the most bytes gives one up first.
+	// Ahead: a path with no player (a scan) before a viewer, then the path holding the most
+	// bytes gives one up first.
+	if a.st.hasPlayer != b.st.hasPlayer {
+		return !a.st.hasPlayer
+	}
 	if a.st.bytes != b.st.bytes {
 		return a.st.bytes > b.st.bytes
 	}
@@ -450,10 +457,12 @@ func better(a, b victim) bool {
 	return a.buf.seq < b.buf.seq // player unknown: oldest written, as for a lone stream
 }
 
-// scanPaths fills c.scratch with per-path stats, one shard read lock at a time, then asks
-// PlayerOff (no lock held) and marks idle paths. It returns the fair share per live path.
-// Caller holds muEvict.
-func (c *Cache) scanPaths(now int64, limit int64) int64 {
+// scanPaths fills c.scratch with per-path stats, one shard read lock at a time, then marks
+// idle paths and returns the near-player window. A path with a known player is never idle,
+// however long it has gone without an access: its viewer may be paused. PlayerOff (no lock
+// held) is asked for every path when allPlayers is set, else only for paths whose chunks are
+// all old, the ones the answer could still save from being idle. Caller holds muEvict.
+func (c *Cache) scanPaths(now int64, limit int64, allPlayers bool) int64 {
 	clear(c.scratch)
 	for _, s := range c.shards {
 		s.mu.RLock()
@@ -467,18 +476,28 @@ func (c *Cache) scanPaths(now int64, limit int64) int64 {
 		}
 		s.mu.RUnlock()
 	}
-	live := int64(0)
+	withPlayer := int64(0)
 	for path, st := range c.scratch {
 		st.idle = now-st.lastAcc > staleWindow.Nanoseconds()
-		if !st.idle {
-			live++
-		}
-		if c.cfg.PlayerOff != nil {
+		if c.cfg.PlayerOff != nil && (allPlayers || st.idle) {
 			st.player, st.hasPlayer = c.cfg.PlayerOff(path)
+			if st.hasPlayer {
+				st.idle = false
+			}
+		}
+		if st.hasPlayer {
+			withPlayer++
 		}
 		c.scratch[path] = st
 	}
-	return limit / max(live, 1)
+	return c.nearWindow(limit, withPlayer)
+}
+
+// nearWindow is how far past its player a chunk still counts as "near": the budget split over
+// the paths that have a player (never fewer than one), floored at nearFloor (32 MiB, the pump's
+// minLeadShare) and at most the budget. It is the share the pump's lead cap hands each stream.
+func (c *Cache) nearWindow(limit, withPlayer int64) int64 {
+	return max(limit/max(withPlayer, 1), min(c.nearFloor, limit))
 }
 
 // removeLocked drops b from s. Caller holds s.mu for writing.
@@ -501,7 +520,7 @@ func (c *Cache) evictOverBudget(fresh *raBuffer, limit int64) {
 
 	for atomic.LoadInt64(&c.used) > limit {
 		now := time.Now().UnixNano()
-		share := c.scanPaths(now, limit)
+		share := c.scanPaths(now, limit, true)
 
 		var best victim
 		found := false
@@ -558,7 +577,7 @@ func (c *Cache) Stats() (totalBytes int64, activeBytes int64, entries int) {
 	totalBytes = atomic.LoadInt64(&c.used)
 
 	now := time.Now().UnixNano()
-	staleThreshold := (120 * time.Second).Nanoseconds()
+	staleThreshold := staleWindow.Nanoseconds()
 
 	for _, shard := range c.shards {
 		shard.mu.RLock()
@@ -580,7 +599,7 @@ func (c *Cache) sweepIdle() {
 	c.muEvict.Lock()
 	defer c.muEvict.Unlock()
 
-	c.scanPaths(time.Now().UnixNano(), 1)
+	c.scanPaths(time.Now().UnixNano(), 1, false)
 	for _, s := range c.shards {
 		s.mu.Lock()
 		for key, b := range s.buffers {

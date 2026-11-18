@@ -24,13 +24,15 @@ func newCache(budget int64, run func(func())) *Cache {
 }
 
 func newPlayerCache(budget int64, run func(func()), players func(string) (int64, bool)) *Cache {
-	return New(Config{
+	c := New(Config{
 		Base:      func() int64 { return testBase },
 		Budget:    func() int64 { return budget },
 		Logf:      func(string, ...any) {},
 		Go:        run,
 		PlayerOff: players,
 	})
+	c.nearFloor = 1 // the 32 MiB floor would swallow a test budget of a few KiB
+	return c
 }
 
 func pattern(n int, seed byte) []byte {
@@ -611,5 +613,114 @@ func TestConcurrentMultiStream(t *testing.T) {
 	}
 	if sum > 12*testBase {
 		t.Fatalf("total %d over budget", sum)
+	}
+}
+
+// A path with a player is being watched, however long it has gone without a read: a paused
+// viewer's chunks survive another file's open and an over-budget eviction.
+func TestPausedViewerIsNeverIdle(t *testing.T) {
+	var pl players
+	c := newPlayerCache(6*testBase, syncRun, pl.get)
+	pl.set("paused", 0)
+	for i := int64(0); i < 3; i++ {
+		putChunk(c, "paused", i)
+	}
+	touch(c, "paused", 600*time.Second)
+	c.SwitchContext("other")
+	wantChunks(t, c, "paused", 0, 5, 0, 1, 2)
+
+	for i := int64(0); i < 3; i++ { // a scan-like path with no player, then one chunk over
+		putChunk(c, "scan", i)
+	}
+	putChunk(c, "scan", 3)
+	wantChunks(t, c, "paused", 0, 5, 0, 1, 2)
+	if got := c.EvictionsByReason(); got[ReasonIdle] != 0 {
+		t.Fatalf("by reason = %v: the paused path must not be idle", got)
+	}
+
+	// Once the player is gone it is idle like any other path.
+	pl.mu.Lock()
+	delete(pl.m, "paused")
+	pl.mu.Unlock()
+	c.SwitchContext("third")
+	wantChunks(t, c, "paused", 0, 5)
+}
+
+// Over budget a path with no player (a scan) gives up chunks before a viewer, even when the
+// viewer's path holds more bytes.
+func TestNoPlayerPathLosesChunksBeforeAViewer(t *testing.T) {
+	var pl players
+	c := newPlayerCache(10*testBase, syncRun, pl.get)
+	pl.set("viewer", 0)
+	for i := int64(0); i < 6; i++ {
+		putChunk(c, "viewer", i)
+	}
+	for i := int64(0); i < 4; i++ {
+		putChunk(c, "scan", i)
+	}
+	for i := int64(4); i < 7; i++ {
+		putChunk(c, "scan", i)
+	}
+	wantChunks(t, c, "viewer", 0, 9, 0, 1, 2, 3, 4, 5)
+	if n := len(present(c, "scan", 0, 9)); n != 4 {
+		t.Fatalf("scan chunks = %d, want 4", n)
+	}
+}
+
+// The order differs from oldest-written-first in two places, pinned here.
+func TestEvictionOrderDiffersFromFIFO(t *testing.T) {
+	t.Run("a cached tail chunk goes before the chunks at the player", func(t *testing.T) {
+		var pl players
+		c := newPlayerCache(4*testBase, syncRun, pl.get)
+		pl.set("a", 0)
+		for _, i := range []int64{0, 1, 2, 50, 3} { // the tail is written fourth, not first
+			putChunk(c, "a", i)
+		}
+		wantChunks(t, c, "a", 0, 60, 0, 1, 2, 3)
+	})
+	t.Run("a backward re-read keeps the re-read chunk behind the player", func(t *testing.T) {
+		var pl players
+		c := newPlayerCache(4*testBase, syncRun, pl.get)
+		pl.set("a", 3*testBase+1)
+		for i := int64(0); i < 4; i++ {
+			putChunk(c, "a", i)
+			touchChunk(c, "a", i, time.Duration(10-i)*time.Second)
+		}
+		c.Get("a", 0, 9) // the viewer seeks back into chunk 0: it is touched now
+		putChunk(c, "a", 4)
+		wantChunks(t, c, "a", 0, 4, 0, 2, 3, 4)
+	})
+}
+
+// The near-player window is the budget over the paths with a player, floored (the lead
+// floor), and never under one path.
+func TestNearPlayerWindowIsBudgetOverPlayersWithAFloor(t *testing.T) {
+	var pl players
+	c := newPlayerCache(100*testBase, syncRun, pl.get)
+	c.nearFloor = 40 * testBase
+	for _, p := range []string{"a", "b", "c"} {
+		pl.set(p, 0)
+	}
+	for i := int64(0); i < 38; i++ { // a 38, b 31, c 30: 99 chunks
+		putChunk(c, "a", i)
+	}
+	for i := int64(0); i < 31; i++ {
+		putChunk(c, "b", i)
+	}
+	for i := int64(0); i < 30; i++ {
+		putChunk(c, "c", i)
+	}
+	putChunk(c, "a", 38) // 100: fits
+	if n := c.NearPlayerEvictions(); n != 0 {
+		t.Fatalf("near = %d before any eviction", n)
+	}
+	// 101: a's farthest chunk other than the new one, chunk 38, is 38 chunks ahead. The
+	// share is 100/3 = 33, floored to 40, so it counts; without the floor it would not.
+	putChunk(c, "a", 39)
+	if n := c.NearPlayerEvictions(); n != 1 {
+		t.Fatalf("near = %d, want 1", n)
+	}
+	if got := c.EvictionsByReason(); got[ReasonAhead] != 1 {
+		t.Fatalf("by reason = %v", got)
 	}
 }
