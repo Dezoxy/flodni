@@ -3,6 +3,7 @@ package readahead
 import (
 	"bytes"
 	"fmt"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -19,11 +20,16 @@ func newTestCache(t *testing.T, budget int64) *Cache {
 }
 
 func newCache(budget int64, run func(func())) *Cache {
+	return newPlayerCache(budget, run, nil)
+}
+
+func newPlayerCache(budget int64, run func(func()), players func(string) (int64, bool)) *Cache {
 	return New(Config{
-		Base:   func() int64 { return testBase },
-		Budget: func() int64 { return budget },
-		Logf:   func(string, ...any) {},
-		Go:     run,
+		Base:      func() int64 { return testBase },
+		Budget:    func() int64 { return budget },
+		Logf:      func(string, ...any) {},
+		Go:        run,
+		PlayerOff: players,
 	})
 }
 
@@ -172,76 +178,6 @@ func TestPieceLenChunkSize(t *testing.T) {
 	}
 }
 
-func TestSwitchContextMarksStaleSessions(t *testing.T) {
-	c := newTestCache(t, 1<<20)
-	c.SwitchContext("a")
-	c.Put("a", 0, testBase-1, pattern(testBase, 0))
-	c.Put("b", 0, testBase-1, pattern(testBase, 0)) // not the active path: session 0
-
-	c.muContext.Lock()
-	id1 := c.currentSessionID
-	c.muContext.Unlock()
-	if id1 != 1 {
-		t.Fatalf("session id = %d, want 1", id1)
-	}
-	if got := c.getShard("a").buffers["a:0"].sessionID; got != 1 {
-		t.Fatalf("active buffer session = %d, want 1", got)
-	}
-	if got := c.getShard("b").buffers["b:0"].sessionID; got != 0 {
-		t.Fatalf("stale buffer session = %d, want 0", got)
-	}
-
-	c.SwitchContext("a") // same path: no change
-	c.muContext.Lock()
-	same := c.currentSessionID
-	c.muContext.Unlock()
-	if same != id1 {
-		t.Fatal("same path must not bump the session")
-	}
-
-	c.SwitchContext("b")
-	c.muContext.Lock()
-	id2 := c.currentSessionID
-	c.muContext.Unlock()
-	if id2 != 2 {
-		t.Fatalf("session id = %d, want 2", id2)
-	}
-}
-
-// Eviction policy (triggerGlobalEviction): a buffer is dropped when its session is
-// not the active one and its path is not the active path, or when it was not read
-// within 120 s (60 s for the active path).
-func TestTriggerGlobalEviction(t *testing.T) {
-	c := newTestCache(t, 1<<20)
-	c.SwitchContext("act") // session 1
-	c.Put("act", 0, testBase-1, pattern(testBase, 0))
-	c.Put("act", testBase, 2*testBase-1, pattern(testBase, 0))
-	c.Put("old", 0, testBase-1, pattern(testBase, 0)) // session 0: stale
-
-	age := func(path string, key string, d time.Duration) {
-		s := c.getShard(path)
-		s.mu.Lock()
-		s.buffers[key].lastAccess = time.Now().Add(-d).UnixNano()
-		s.mu.Unlock()
-	}
-	age("act", "act:1", 90*time.Second) // active path, idle > 60 s
-
-	c.triggerGlobalEviction("act", 1)
-
-	if !c.Exists("act", 0) {
-		t.Fatal("fresh active chunk must survive")
-	}
-	if c.Exists("act", testBase) {
-		t.Fatal("active chunk idle > 60s must be evicted")
-	}
-	if c.Exists("old", 0) {
-		t.Fatal("stale-session chunk of another path must be evicted")
-	}
-	if total, _, entries := c.Stats(); total != testBase || entries != 1 {
-		t.Fatalf("after eviction total=%d entries=%d", total, entries)
-	}
-}
-
 func TestPutKeepsTotalUnderBudget(t *testing.T) {
 	const budget = 4 * testBase
 	c := newTestCache(t, budget)
@@ -387,5 +323,293 @@ func TestCoveredRunLeavesLastAccess(t *testing.T) {
 	c.CoveredRun("a", 0, testBase)
 	if b.lastAccess != 42 {
 		t.Fatalf("lastAccess changed to %d", b.lastAccess)
+	}
+}
+
+// players is a settable player table for tests.
+type players struct {
+	mu sync.Mutex
+	m  map[string]int64
+}
+
+func (p *players) set(path string, off int64) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.m == nil {
+		p.m = map[string]int64{}
+	}
+	p.m[path] = off
+}
+
+func (p *players) get(path string) (int64, bool) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	off, ok := p.m[path]
+	return off, ok
+}
+
+func syncRun(fn func()) { fn() }
+
+func putChunk(c *Cache, path string, i int64) {
+	c.Put(path, i*testBase, (i+1)*testBase-1, pattern(testBase, byte(i)))
+}
+
+// touch sets the last access of every chunk of path to now-age.
+func touch(c *Cache, path string, age time.Duration) {
+	for _, s := range c.shards {
+		s.mu.Lock()
+		for k, b := range s.buffers {
+			if strings.HasPrefix(k, path+":") {
+				b.lastAccess = time.Now().Add(-age).UnixNano()
+			}
+		}
+		s.mu.Unlock()
+	}
+}
+
+// touchChunk sets the last access of chunk i of path.
+func touchChunk(c *Cache, path string, i int64, age time.Duration) {
+	s := c.getShard(path)
+	s.mu.Lock()
+	s.buffers[c.chunkKey(path, i*testBase)].lastAccess = time.Now().Add(-age).UnixNano()
+	s.mu.Unlock()
+}
+
+func present(c *Cache, path string, from, to int64) []int64 {
+	var out []int64
+	for i := from; i <= to; i++ {
+		if c.Exists(path, i*testBase) {
+			out = append(out, i)
+		}
+	}
+	return out
+}
+
+func wantChunks(t *testing.T, c *Cache, path string, from, to int64, want ...int64) {
+	t.Helper()
+	got := present(c, path, from, to)
+	if fmt.Sprint(got) != fmt.Sprint(want) {
+		t.Fatalf("%s chunks present = %v, want %v", path, got, want)
+	}
+}
+
+// Opening file B must not drop file A's chunks while A is being read; once A is idle past
+// the window, the next open sweeps it.
+func TestOpenDoesNotDropAliveOtherPath(t *testing.T) {
+	c := newCache(1<<20, syncRun)
+	c.SwitchContext("A")
+	for i := int64(0); i < 4; i++ {
+		putChunk(c, "A", i)
+	}
+	c.Get("A", 0, 9) // A is being read
+	c.SwitchContext("B")
+	putChunk(c, "B", 0)
+	wantChunks(t, c, "A", 0, 5, 0, 1, 2, 3)
+
+	// A's old chunks inside a live path stay too: the player will still reach them.
+	touchChunk(c, "A", 3, time.Second)
+	touchChunk(c, "A", 0, 200*time.Second)
+	c.SwitchContext("C")
+	wantChunks(t, c, "A", 0, 5, 0, 1, 2, 3)
+
+	// A goes idle: the next open drops it, and B (alive) stays.
+	touch(c, "A", 200*time.Second)
+	c.SwitchContext("D")
+	wantChunks(t, c, "A", 0, 5)
+	wantChunks(t, c, "B", 0, 1, 0)
+	if total, _, _ := c.Stats(); total != testBase {
+		t.Fatalf("total = %d, want %d", total, testBase)
+	}
+}
+
+// Over budget, idle paths go first even when a live path has chunks behind its player.
+func TestEvictIdlePathFirst(t *testing.T) {
+	var pl players
+	c := newPlayerCache(6*testBase, syncRun, pl.get)
+	pl.set("A", 3*testBase)
+	for i := int64(0); i < 3; i++ {
+		putChunk(c, "A", i) // all behind A's player
+	}
+	for i := int64(0); i < 3; i++ {
+		putChunk(c, "idle", i)
+	}
+	touch(c, "idle", 300*time.Second)
+	putChunk(c, "A", 3)
+	if got := c.EvictionsByReason(); got != [3]int64{1, 0, 0} {
+		t.Fatalf("by reason = %v, want one idle", got)
+	}
+	wantChunks(t, c, "A", 0, 5, 0, 1, 2, 3)
+	if n := len(present(c, "idle", 0, 5)); n != 2 {
+		t.Fatalf("idle chunks left = %d, want 2", n)
+	}
+}
+
+// Two streams over budget: consumed chunks go first, then the farthest-ahead chunk of the
+// stream holding the most bytes; the chunks just ahead of each player survive.
+func TestTwoStreamsEvictBehindThenFarthestAhead(t *testing.T) {
+	var pl players
+	c := newPlayerCache(10*testBase, syncRun, pl.get)
+	pl.set("A", 3*testBase+5) // inside chunk 3: chunks 0..2 are consumed
+	pl.set("B", 5)
+	for i := int64(0); i < 8; i++ {
+		putChunk(c, "A", i)
+		touchChunk(c, "A", i, time.Duration(20-i)*time.Second) // chunk 0 least recently touched
+	}
+	putChunk(c, "B", 0)
+	putChunk(c, "B", 1)
+
+	putChunk(c, "B", 2)
+	putChunk(c, "B", 3)
+	putChunk(c, "B", 4)
+	wantChunks(t, c, "A", 0, 7, 3, 4, 5, 6, 7) // the three consumed chunks went
+	wantChunks(t, c, "B", 0, 4, 0, 1, 2, 3, 4)
+	if got := c.EvictionsByReason(); got != [3]int64{0, 3, 0} {
+		t.Fatalf("by reason = %v, want 3 behind", got)
+	}
+
+	// Nothing is consumed now. A holds 5, B 5: B's new chunk makes B the larger, so B
+	// gives up its farthest-ahead chunk that is not the new one.
+	putChunk(c, "B", 5)
+	wantChunks(t, c, "B", 0, 5, 0, 1, 2, 3, 5)
+	wantChunks(t, c, "A", 0, 7, 3, 4, 5, 6, 7)
+
+	// A grows past B: its farthest chunk other than the new one goes each time, the ones
+	// at its player stay.
+	putChunk(c, "A", 8)
+	putChunk(c, "A", 9)
+	wantChunks(t, c, "A", 0, 9, 3, 4, 5, 6, 9)
+	if got := c.EvictionsByReason(); got[ReasonAhead] != 3 || got[ReasonIdle] != 0 {
+		t.Fatalf("by reason = %v", got)
+	}
+	if total, _, _ := c.Stats(); total > 10*testBase {
+		t.Fatalf("total %d over budget", total)
+	}
+}
+
+// The regression seen live: with the budget full, stream B's pump writing ahead used to
+// evict B's own oldest chunk, the one at its player, so the contiguous run from the player
+// collapsed to nothing. Both runs must stay, and no eviction may land near a player.
+func TestFullBudgetPumpKeepsRunFromPlayer(t *testing.T) {
+	var pl players
+	c := newPlayerCache(10*testBase, syncRun, pl.get)
+	pl.set("A", 0)
+	pl.set("B", 0)
+	for i := int64(0); i < 4; i++ {
+		putChunk(c, "A", i)
+		putChunk(c, "B", i)
+	}
+	for i := int64(4); i < 40; i++ {
+		putChunk(c, "B", i) // B pumps on; its player does not move
+		if run := c.CoveredRun("B", 0, 50*testBase); run < 4*testBase {
+			t.Fatalf("after B chunk %d: run from B's player = %d", i, run)
+		}
+		if run := c.CoveredRun("A", 0, 50*testBase); run != 4*testBase {
+			t.Fatalf("after B chunk %d: run from A's player = %d, want %d", i, run, 4*testBase)
+		}
+	}
+	if n := c.NearPlayerEvictions(); n != 0 {
+		t.Fatalf("near-player evictions = %d, want 0", n)
+	}
+	if c.EvictionsByReason()[ReasonAhead] == 0 {
+		t.Fatal("expected ahead evictions")
+	}
+}
+
+// A chunk dropped inside the player's fair-share window is counted as harmful.
+func TestNearPlayerEvictionCounted(t *testing.T) {
+	var pl players
+	c := newPlayerCache(4*testBase, syncRun, pl.get)
+	pl.set("A", 0)
+	for i := int64(0); i < 4; i++ {
+		putChunk(c, "A", i)
+	}
+	putChunk(c, "A", 4) // alone on the cache: evicts chunk 3, 3 chunks from the player < share (4)
+	if n := c.NearPlayerEvictions(); n != 1 {
+		t.Fatalf("near-player evictions = %d, want 1", n)
+	}
+}
+
+// One stream: chunks behind the player go oldest first and everything from the player on is
+// kept, exactly as the oldest-written rule did for a player that keeps ahead of its pump.
+func TestSingleStreamEvictsBehindKeepsAhead(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		pl   func(string) (int64, bool)
+		move func(*players, int64)
+	}{
+		{"player known", nil, nil},
+		{"player unknown", func(string) (int64, bool) { return 0, false }, nil},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var pl players
+			get := tc.pl
+			if get == nil {
+				get = pl.get
+			}
+			c := newPlayerCache(5*testBase, syncRun, get)
+			for i := int64(0); i < 20; i++ {
+				pl.set("a", (i-2)*testBase+1) // the player trails the pump by 2 chunks
+				putChunk(c, "a", i)
+				if total, _, _ := c.Stats(); total > 5*testBase {
+					t.Fatalf("put %d: total %d over budget", i, total)
+				}
+			}
+			wantChunks(t, c, "a", 0, 19, 15, 16, 17, 18, 19)
+			if got := c.Evictions(); got != 15 {
+				t.Fatalf("evictions = %d, want 15", got)
+			}
+		})
+	}
+}
+
+// Parallel Put/Get/SwitchContext with players; accounting must stay exact.
+func TestConcurrentMultiStream(t *testing.T) {
+	var pl players
+	var bg sync.WaitGroup
+	c := newPlayerCache(12*testBase, func(fn func()) {
+		bg.Add(1)
+		go func() { defer bg.Done(); fn() }()
+	}, pl.get)
+	var wg sync.WaitGroup
+	for g := 0; g < 8; g++ {
+		wg.Add(1)
+		go func(g int) {
+			defer wg.Done()
+			path := fmt.Sprintf("p%d", g%4)
+			dest := make([]byte, 64)
+			for i := int64(0); i < 300; i++ {
+				pl.set(path, (i/2)*testBase)
+				putChunk(c, path, i%40)
+				c.Covered(path, 0, 63)
+				c.Get(path, (i/2%40)*testBase, (i/2%40)*testBase+63)
+				c.CopyTo(path, (i%40)*testBase, (i%40)*testBase+63, dest)
+				c.CoveredRun(path, 0, 40*testBase)
+				c.Stats()
+				if i%25 == 0 {
+					c.SwitchContext(path)
+				}
+			}
+		}(g)
+	}
+	wg.Wait()
+	bg.Wait()
+	var sum int64
+	for _, s := range c.shards {
+		s.mu.RLock()
+		var shardSum int64
+		for _, b := range s.buffers {
+			shardSum += int64(len(b.data))
+		}
+		if shardSum != s.total {
+			t.Errorf("shard total %d != sum %d", s.total, shardSum)
+		}
+		sum += shardSum
+		s.mu.RUnlock()
+	}
+	if used := c.used; used != sum {
+		t.Fatalf("used %d != sum of chunks %d", used, sum)
+	}
+	if sum > 12*testBase {
+		t.Fatalf("total %d over budget", sum)
 	}
 }

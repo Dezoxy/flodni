@@ -1,5 +1,5 @@
-// Package readahead is the sharded, session-aware chunk cache that sits between
-// the torrent pump and FUSE reads.
+// Package readahead is the sharded chunk cache that sits between the torrent pump and FUSE
+// reads. One budget is shared by every stream that is being read.
 package readahead
 
 import (
@@ -13,39 +13,74 @@ import (
 	"time"
 )
 
+// staleWindow is how long a path may go without a chunk being read or written before it
+// counts as idle: no stream is reading it, so its chunks are the first to go.
+const staleWindow = 120 * time.Second
+
+// nearLogEvery is the least time between two "evicted near the player" log lines for one path.
+const nearLogEvery = 30 * time.Second
+
+// Why a chunk was evicted over budget, in the order the cache tries them.
+const (
+	ReasonIdle   = 0 // its path had no access within staleWindow
+	ReasonBehind = 1 // entirely behind its stream's player (already consumed)
+	ReasonAhead  = 2 // farthest ahead of the player, on the path holding the most bytes
+	numReasons   = 3
+)
+
+// ReasonNames labels the Reason* indexes of EvictionsByReason.
+var ReasonNames = [numReasons]string{"idle", "behind", "ahead"}
+
 type raBuffer struct {
+	path           string
 	start, end     int64
 	data           []byte
 	lastAccess     int64
-	sessionID      int64
-	responsiveOnly bool // true if written in non-verified mode (responsive shield active)
+	seq            int64 // write order, for the eviction of a path whose player is unknown
+	responsiveOnly bool  // true if written in non-verified mode (responsive shield active)
 }
 
 // Config injects what the cache needs from the daemon. Base and Budget are read
 // on every use (config can be reloaded, and is not yet loaded when the cache is
-// constructed); all four fields are required.
+// constructed); Base, Budget, Logf and Go are required, PlayerOff is optional.
 type Config struct {
 	Base   func() int64                     // chunk size (ReadAheadBase), 0 means 16MB
 	Budget func() int64                     // total budget in bytes (ReadAheadBudget)
 	Logf   func(format string, args ...any) // logger
 	Go     func(fn func())                  // panic-safe background goroutine launcher
+	// PlayerOff returns the offset a path's player is reading at, false when no player is
+	// known. It is called with no cache lock held. Without it, or when it says false, a path's
+	// chunks are evicted oldest-written first, as for a single unaware stream.
+	PlayerOff func(path string) (int64, bool)
 }
 
-// Cache is a 32-shard LRU cache with session-aware eviction.
+// Cache is a 32-shard chunk cache shared by every stream.
+//
+// Lock order (outermost first): muEvict, then ONE shard lock. No code holds two shard locks,
+// and none takes muEvict while holding a shard lock (Put releases its shard before it
+// evicts). muContext is a leaf: never held while taking another lock. cfg.PlayerOff, cfg.Go
+// and cfg.Logf are never called under a shard lock.
 type Cache struct {
 	cfg       Config
 	shards    [32]*raShard
 	shardMask uint64
 	used      int64
 	pool      chan []byte // recycled 16MB chunks
+	seq       atomic.Int64
 
-	muContext        sync.Mutex
-	activePath       string
-	currentSessionID int64
-	isEvicting       int32 // atomic flag prevents concurrent global evictions
+	muContext  sync.Mutex
+	activePath string // last opened path; only used to notice a change
 
-	// evictions counts chunks Put dropped to stay under budget; only rises.
-	evictions atomic.Int64
+	// muEvict serializes eviction decisions (Put over budget, the idle sweep) and guards the
+	// two fields below.
+	muEvict  sync.Mutex
+	scratch  map[string]pathStat
+	lastNear map[string]time.Time
+
+	// evictions counts chunks Put dropped to stay under budget, by reason; only rises.
+	evictions [numReasons]atomic.Int64
+	// nearPlayer counts evictions of a chunk inside the player's fair-share window.
+	nearPlayer atomic.Int64
 
 	pieceLens sync.Map // path → int64 adaptive chunk size (aligned to piece boundary)
 }
@@ -99,7 +134,6 @@ func (c *Cache) ChunkSize(path string) int64 {
 type raShard struct {
 	mu      sync.RWMutex
 	buffers map[string]*raBuffer
-	order   []string
 	total   int64
 }
 
@@ -112,6 +146,8 @@ func New(cfg Config) *Cache {
 		cfg:       cfg,
 		shardMask: 31,
 		pool:      make(chan []byte, 32), // Cap at 32 chunks (512MB max pool)
+		scratch:   make(map[string]pathStat),
+		lastNear:  make(map[string]time.Time),
 	}
 	for i := range c.shards {
 		c.shards[i] = &raShard{
@@ -227,23 +263,17 @@ func (c *Cache) chunkKey(path string, offset int64) string {
 	return fmt.Sprintf("%s:%d", path, offset/c.ChunkSize(path))
 }
 
-// SwitchContext increments SessionID on path change to invalidate stale data.
+// SwitchContext is called when a file is opened. It never drops a chunk of another path that
+// is still being read: a path counts as alive while any of its chunks was read or written
+// within staleWindow. Only when the opened path changes it sweeps the paths that are idle.
 func (c *Cache) SwitchContext(newPath string) {
 	c.muContext.Lock()
 	pathChanged := newPath != c.activePath
-	if pathChanged {
-		c.activePath = newPath
-		// Increment session ID: All old buffers (with old ID) become "stale" instantly
-		c.currentSessionID++
-	}
-	activePath := c.activePath
-	activeSessionID := c.currentSessionID
+	c.activePath = newPath
 	c.muContext.Unlock()
 
 	if pathChanged {
-		c.cfg.Go(func() {
-			c.triggerGlobalEviction(activePath, activeSessionID)
-		})
+		c.cfg.Go(c.sweepIdle)
 	}
 }
 
@@ -330,20 +360,8 @@ func (c *Cache) CopyTo(p string, off, end int64, dest []byte) int {
 }
 
 func (c *Cache) Put(p string, start, end int64, d []byte) {
-	c.muContext.Lock()
-	sessID := c.currentSessionID
-	// Active path uses current session ID; stale pumps use sessID=0 so eviction can identify them.
-	if p != c.activePath {
-		sessID = 0
-	}
-	c.muContext.Unlock()
-
 	shard := c.getShard(p)
-	shard.mu.Lock()
-	defer shard.mu.Unlock()
-
 	key := c.chunkKey(p, start)
-
 	dataSize := int64(len(d))
 
 	// Pooled buffers all have cap == ReadAheadBase; adaptive chunk sizes are always <= base
@@ -373,69 +391,165 @@ func (c *Cache) Put(p string, start, end int64, d []byte) {
 	if globalLimit <= 0 {
 		globalLimit = 256 * 1024 * 1024 // Fail-safe default
 	}
+	responsiveOnly := torrstor.IsResponsive()
 
-	// 1. Account for overwrite
+	shard.mu.Lock()
+	// Account for an overwrite; the new chunk gets a fresh write sequence.
 	if old, ok := shard.buffers[key]; ok {
 		shard.total -= int64(len(old.data))
 		atomic.AddInt64(&c.used, -int64(len(old.data)))
 		c.recycle(old.data)
-		// Promote to MRU on overwrite to prevent premature eviction of recently refreshed chunks.
-		for i, k := range shard.order {
-			if k == key {
-				shard.order = append(shard.order[:i], shard.order[i+1:]...)
-				break
-			}
-		}
 	}
-	shard.order = append(shard.order, key)
-
-	// 2. Add new data
+	fresh := &raBuffer{p, start, end, dataCopy, time.Now().UnixNano(), c.seq.Add(1), responsiveOnly}
+	shard.buffers[key] = fresh
 	shard.total += dataSize
 	newUsed := atomic.AddInt64(&c.used, dataSize)
-	responsiveOnly := torrstor.IsResponsive()
-	shard.buffers[key] = &raBuffer{start, end, dataCopy, time.Now().UnixNano(), sessID, responsiveOnly}
+	shard.mu.Unlock()
 
-	// Evict from this shard while over budget; keep last item to avoid evicting the chunk just added.
-	for newUsed > globalLimit && len(shard.order) > 1 {
-		v := shard.order[0]
-		shard.order = shard.order[1:]
-		if old, ok := shard.buffers[v]; ok {
-			evictedSize := int64(len(old.data))
-			shard.total -= evictedSize
-			delete(shard.buffers, v)
-			newUsed = atomic.AddInt64(&c.used, -evictedSize)
-			c.evictions.Add(1)
-			c.recycle(old.data)
+	if newUsed > globalLimit {
+		c.evictOverBudget(fresh, globalLimit)
+	}
+}
+
+// pathStat is what one eviction scan learns about a path.
+type pathStat struct {
+	bytes     int64
+	lastAcc   int64
+	player    int64
+	hasPlayer bool
+	idle      bool
+}
+
+// victim is the best eviction candidate found so far.
+type victim struct {
+	reason int
+	st     pathStat
+	shard  *raShard
+	key    string
+	buf    *raBuffer
+}
+
+// better reports whether a should be evicted before b (same-reason candidates compare by the
+// reason's own rule).
+func better(a, b victim) bool {
+	if a.reason != b.reason {
+		return a.reason < b.reason
+	}
+	switch a.reason {
+	case ReasonIdle, ReasonBehind:
+		// Least recently touched first.
+		return atomic.LoadInt64(&a.buf.lastAccess) < atomic.LoadInt64(&b.buf.lastAccess)
+	}
+	// Ahead: the path holding the most bytes gives one up first.
+	if a.st.bytes != b.st.bytes {
+		return a.st.bytes > b.st.bytes
+	}
+	if a.st.hasPlayer && b.st.hasPlayer {
+		return a.buf.start > b.buf.start // farthest ahead of its player
+	}
+	return a.buf.seq < b.buf.seq // player unknown: oldest written, as for a lone stream
+}
+
+// scanPaths fills c.scratch with per-path stats, one shard read lock at a time, then asks
+// PlayerOff (no lock held) and marks idle paths. It returns the fair share per live path.
+// Caller holds muEvict.
+func (c *Cache) scanPaths(now int64, limit int64) int64 {
+	clear(c.scratch)
+	for _, s := range c.shards {
+		s.mu.RLock()
+		for _, b := range s.buffers {
+			st := c.scratch[b.path]
+			st.bytes += int64(len(b.data))
+			if la := atomic.LoadInt64(&b.lastAccess); la > st.lastAcc {
+				st.lastAcc = la
+			}
+			c.scratch[b.path] = st
 		}
+		s.mu.RUnlock()
 	}
-
-	// Local shard exhausted: trigger global eviction to free stale data from other shards.
-	if newUsed > globalLimit && len(shard.order) <= 1 {
-		c.muContext.Lock()
-		ap := c.activePath
-		sid := c.currentSessionID
-		c.muContext.Unlock()
-		c.cfg.Go(func() {
-			c.triggerGlobalEviction(ap, sid)
-		})
+	live := int64(0)
+	for path, st := range c.scratch {
+		st.idle = now-st.lastAcc > staleWindow.Nanoseconds()
+		if !st.idle {
+			live++
+		}
+		if c.cfg.PlayerOff != nil {
+			st.player, st.hasPlayer = c.cfg.PlayerOff(path)
+		}
+		c.scratch[path] = st
 	}
+	return limit / max(live, 1)
+}
 
-	if newUsed > globalLimit && len(shard.order) == 0 {
-		// If we reach here, it means even after global eviction we are over budget.
-		// However, to allow the new stream to start, we must NOT drop the only chunk it has.
-		// So we do nothing and allow a tiny over-budget for the first few chunks.
-		c.cfg.Logf("[RaCache] Budget full (%d MB), allowing active chunk to persist for handoff: %s", newUsed/(1024*1024), filepath.Base(p))
-	}
+// removeLocked drops b from s. Caller holds s.mu for writing.
+func (c *Cache) removeLocked(s *raShard, key string, b *raBuffer) {
+	size := int64(len(b.data))
+	s.total -= size
+	delete(s.buffers, key)
+	atomic.AddInt64(&c.used, -size)
+	c.recycle(b.data)
+}
 
-	// Periodic compaction of order slice
-	if len(shard.order) > 100 && len(shard.order) > len(shard.buffers)*2 {
-		newOrder := make([]string, 0, len(shard.buffers))
-		for _, v := range shard.order {
-			if _, exists := shard.buffers[v]; exists {
-				newOrder = append(newOrder, v)
+// evictOverBudget drops chunks until the cache fits its budget, never fresh (the chunk just
+// written). Order: chunks of idle paths; chunks entirely behind their player; then the chunk
+// farthest ahead of its player on the path holding the most bytes (a path whose player is
+// unknown gives up its oldest-written chunk instead). It scans every chunk once per eviction,
+// which is cheap beside the multi-MiB Put that triggers it. It holds no two locks at once.
+func (c *Cache) evictOverBudget(fresh *raBuffer, limit int64) {
+	c.muEvict.Lock()
+	defer c.muEvict.Unlock()
+
+	for atomic.LoadInt64(&c.used) > limit {
+		now := time.Now().UnixNano()
+		share := c.scanPaths(now, limit)
+
+		var best victim
+		found := false
+		for _, s := range c.shards {
+			s.mu.RLock()
+			for key, b := range s.buffers {
+				if b == fresh {
+					continue
+				}
+				st := c.scratch[b.path]
+				cand := victim{shard: s, key: key, buf: b, st: st, reason: ReasonAhead}
+				if st.idle {
+					cand.reason = ReasonIdle
+				} else if st.hasPlayer && b.end < st.player {
+					cand.reason = ReasonBehind
+				}
+				if !found || better(cand, best) {
+					best, found = cand, true
+				}
+			}
+			s.mu.RUnlock()
+		}
+		if !found {
+			// Only the chunk just written is left: let it persist so a new stream can start.
+			c.cfg.Logf("[RaCache] Budget full (%d MB), allowing active chunk to persist for handoff: %s",
+				atomic.LoadInt64(&c.used)/(1024*1024), filepath.Base(fresh.path))
+			return
+		}
+
+		best.shard.mu.Lock()
+		if cur, ok := best.shard.buffers[best.key]; !ok || cur != best.buf {
+			best.shard.mu.Unlock() // changed since the scan: look again
+			continue
+		}
+		c.removeLocked(best.shard, best.key, best.buf)
+		best.shard.mu.Unlock()
+		c.evictions[best.reason].Add(1)
+
+		st := best.st
+		if st.hasPlayer && best.buf.start >= st.player && best.buf.start < st.player+share {
+			c.nearPlayer.Add(1)
+			last, seen := c.lastNear[best.buf.path]
+			if !seen || time.Since(last) >= nearLogEvery {
+				c.lastNear[best.buf.path] = time.Now()
+				c.cfg.Logf("[RaCache] evicted a chunk %d MiB ahead of the player: %s reason=%s",
+					(best.buf.start-st.player)/(1024*1024), filepath.Base(best.buf.path), ReasonNames[best.reason])
 			}
 		}
-		shard.order = newOrder
 	}
 }
 
@@ -460,72 +574,48 @@ func (c *Cache) Stats() (totalBytes int64, activeBytes int64, entries int) {
 	return totalBytes, activeBytes, entries
 }
 
-// triggerGlobalEviction removes stale session data and old chunks from all shards.
-func (c *Cache) triggerGlobalEviction(activePath string, activeSessionID int64) {
-	// Single-flight: skip if already evicting.
-	if !atomic.CompareAndSwapInt32(&c.isEvicting, 0, 1) {
-		return
-	}
-	defer atomic.StoreInt32(&c.isEvicting, 0)
+// sweepIdle drops every chunk of a path with no access within staleWindow. A path that is
+// being read, however old some of its chunks are, is left alone.
+func (c *Cache) sweepIdle() {
+	c.muEvict.Lock()
+	defer c.muEvict.Unlock()
 
-	now := time.Now().UnixNano()
-	staleThreshold := (120 * time.Second).Nanoseconds()
-
-	evictShard := func(s *raShard) {
-		var newOrder []string
-		for _, key := range s.order {
-			keep := true
-			if buf, ok := s.buffers[key]; ok {
-				// 1. Session ID Check (Fastest)
-				if buf.sessionID != activeSessionID && !strings.HasPrefix(key, activePath+":") {
-					keep = false
-				} else {
-					threshold := staleThreshold
-					if strings.HasPrefix(key, activePath+":") {
-						threshold = (60 * time.Second).Nanoseconds()
-					}
-
-					lastAcc := atomic.LoadInt64(&buf.lastAccess)
-					if now-lastAcc > threshold {
-						keep = false
-					}
-				}
-
-				if !keep {
-					size := int64(len(buf.data))
-					s.total -= size
-					delete(s.buffers, key)
-					atomic.AddInt64(&c.used, -size)
-					c.recycle(buf.data)
-				}
-			}
-
-			if keep {
-				newOrder = append(newOrder, key)
-			}
-		}
-		s.order = newOrder
-	}
-
-	skipped := 0
+	c.scanPaths(time.Now().UnixNano(), 1)
 	for _, s := range c.shards {
-		if !s.mu.TryLock() {
-			skipped++
-			continue
+		s.mu.Lock()
+		for key, b := range s.buffers {
+			if c.scratch[b.path].idle {
+				c.removeLocked(s, key, b)
+			}
 		}
-		evictShard(s)
 		s.mu.Unlock()
 	}
-
-	// If all shards were busy, force blocking eviction on first shard to prevent budget overflow.
-	if skipped == len(c.shards) {
-		s := c.shards[0]
-		s.mu.Lock()
-		evictShard(s)
-		s.mu.Unlock()
+	for path := range c.lastNear {
+		if st, ok := c.scratch[path]; !ok || st.idle {
+			delete(c.lastNear, path)
+		}
 	}
 }
 
 // Evictions returns how many chunks Put has dropped to stay under budget since the cache was
-// built. Chunks removed by the stale sweep are not counted. Lock-free.
-func (c *Cache) Evictions() int64 { return c.evictions.Load() }
+// built, over all reasons. Chunks removed by the idle sweep are not counted. Lock-free.
+func (c *Cache) Evictions() int64 {
+	var n int64
+	for i := range c.evictions {
+		n += c.evictions[i].Load()
+	}
+	return n
+}
+
+// EvictionsByReason splits Evictions by ReasonIdle, ReasonBehind and ReasonAhead.
+func (c *Cache) EvictionsByReason() [numReasons]int64 {
+	var out [numReasons]int64
+	for i := range c.evictions {
+		out[i] = c.evictions[i].Load()
+	}
+	return out
+}
+
+// NearPlayerEvictions counts evictions of a chunk that starts within [player, player + the
+// path's fair share) for a path whose player is known: the harmful kind. Lock-free.
+func (c *Cache) NearPlayerEvictions() int64 { return c.nearPlayer.Load() }

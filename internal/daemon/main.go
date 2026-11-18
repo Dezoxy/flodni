@@ -70,6 +70,12 @@ var raCache = readahead.New(readahead.Config{
 	Budget: func() int64 { return gc().ReadAheadBudget },
 	Logf:   func(format string, args ...any) { flog.Printf(logger, format, args...) },
 	Go:     safeGo,
+	// The offset the pump follows for the path: how the cache tells chunks behind a
+	// player from the ones it still needs. 0 means no primary reader.
+	PlayerOff: func(path string) (int64, bool) {
+		off := primaryFollowOffset(path)
+		return off, off > 0
+	},
 })
 
 // engineReadyBound is how long start-up waits for the engine before it goes on.
