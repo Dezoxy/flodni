@@ -872,7 +872,7 @@ DATA_READY:
 		// The bytes are already in dest and the read-ahead window behind them is still
 		// filling; raCache.Put and the SSD warmup writes happen in FetchAhead's callback.
 		ttffRead(h.path, srcFetchBlock, timing.HTTPFetchTime, n, off)
-		noteFetchStall(h.path)
+		noteFetchStall(h.path, probe)
 
 		// Update sequential detection state
 		atomic.StoreInt64(&h.lastOff, off)

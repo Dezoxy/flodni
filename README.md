@@ -1746,15 +1746,17 @@ It is on by default and does nothing for one viewer.
   must-serve margin **M** the pump is never gated. Only the chunks beyond M draw tokens
   from one global bucket, and a pump that is denied parks for 100 ms (the park of the
   hard limit) and tries again, so its jump, re-anchor and watchdog logic keeps running.
-  `M = min(fill_pace_margin_mb, lead limit / 2)`, never below two chunks.
+  `M = min(fill_pace_margin_mb, lead limit / 2)`, never below one chunk.
 - **Order.** The pump nearest its player is served first: a draw succeeds only
   when the bucket holds a chunk and no other waiting pump (seen in the last
   300 ms) has a smaller lead. A stream that starts late gets its tokens before
   the older ones, and the leads of the streams converge to within one chunk.
-  The burst is two chunks.
+  The burst is two chunks of `read_ahead_base`; it does not change with the chunk
+  size of the pump asking.
 - **Where the lead is measured from.** The player's offset, or, when no primary handle
   reports one (it reads 0 until a handle has read, and 0 also when the player is at the
-  start of the file), the offset the pump started at.
+  start of the file), the offset the pump started at. That fallback matters only for an
+  offset within the lead limit of 0, where it can only shrink the lead.
 - **When it is engaged.** Only with two or more playing pumps, for a pump with a live
   playback, whose lead is above M, and while at least one playing pump is still
   filling: below 70% of its lead limit (the soft limit) and younger than 300 s. Once
@@ -1762,8 +1764,22 @@ It is on by default and does nothing for one viewer.
   or a probe is never gated and never draws. With fewer than two playing pumps the gate
   is not entered at all, so a single viewer is served exactly as before.
 - **A seek** moves the pump to the player: its lead falls to M or less and needs no
-  tokens. Tokens are taken for a chunk and given back if it was already cached or the
-  read came up short, so only bytes actually read are charged.
+  tokens. Only a chunk that will be read draws: a chunk already cached is skipped
+  before the gate, and a read that comes up short gives its unread tokens back.
+- **Where it has an effect.** Pacing needs a lead limit above M plus a chunk, because
+  a pump's lead limit is its share of `read_ahead_budget_mb` (the budget divided by the
+  playing pumps) minus three chunks of slack. A small budget with big chunks leaves
+  nothing to meter. Chunks of a pump's lead that lie beyond M, per pump, for the
+  default 16 MiB chunk and `fill_pace_margin_mb` 128:
+
+  | `read_ahead_budget_mb` | 2 streams | 4 streams | 8 streams | 16 streams |
+  | --- | --- | --- | --- | --- |
+  | 256 (default) | 3 | 1 | 0 | 0 |
+  | 1024 | 21 | 7 | 3 | 1 |
+  | 2048 | 53 | 21 | 7 | 3 |
+
+  At the default budget five or more streams leave pacing with nothing to do; the
+  fairness it adds is for budgets of 1 GiB and up.
 - **The default is a fairness setting.** At 500 Mbit/s the bucket seldom runs dry on a
   fast link; it mostly enforces the order above. To take load off a host (a small
   passively cooled box that must not run flat out while several streams fill), lower
@@ -1773,7 +1789,7 @@ It is on by default and does nothing for one viewer.
 | --- | --- | --- |
 | `fill_pace_enabled` | `true` | Switch for the whole feature. |
 | `fill_pace_mbit` | `500` | Bulk fill rate for all pumps together, in megabits per second (1 to 1000000; a value outside is logged and replaced by 500). |
-| `fill_pace_margin_mb` | `128` | The must-serve margin, in MB (0 to 1048576; outside is replaced by 128). |
+| `fill_pace_margin_mb` | `128` | The must-serve margin, in MiB (0 to 1048576; outside is replaced by 128). |
 
 All three are read live: a config save applies to the next chunk. The log carries
 `[Pace] engaged streams=N filling=K` and, rate-limited,
@@ -2817,7 +2833,7 @@ scraper on the same host or Docker network.
 | `flodni_pump_fill_rate_bytes` | gauge | none | Bulk fill rate in bytes per second, a 5 s moving average. |
 | `flodni_pump_pacing_engaged` | gauge | none | 1 while fill pacing is limiting bulk fills (two or more playing pumps and one still filling), else 0. |
 | `flodni_pump_paced_wait_seconds_total` | counter | none | Seconds pumps spent parked by fill pacing, summed over pumps. 0 from start. |
-| `flodni_pump_time_to_full_lead_seconds` | histogram | none | Time from a pump's start to its lead reaching the soft limit (70% of its lead limit), once per pump. Buckets 1, 2, 5, 10, 20, 30, 60, 120 and 300 s. |
+| `flodni_pump_time_to_full_lead_seconds` | histogram | none | Time from a pump's start to its lead reaching the soft limit (70% of its lead limit), once per pump, scan pumps included. Buckets 1, 2, 5, 10, 20, 30, 60, 120 and 300 s. |
 | `flodni_pump_paced_stalls_total` | counter | none | Reads that missed the read-ahead cache and went to FetchBlock while fill pacing had their path's pump parked. Expected to stay near 0; if it moves, the rate is too low or the margin too small. |
 | `flodni_readahead_evictions_total` | counter | `reason` | Chunks the cache dropped on a `Put` to stay under its budget: `idle` (path not read for 120 s), `behind` (already consumed by the player) or `ahead` (farthest ahead on the path holding the most bytes). Chunks the idle sweep removes are not counted. The split is breaking for an unlabelled query: wrap it in `sum()`. 0 from start. |
 | `flodni_readahead_evictions_near_player_total` | counter | none | Evictions of a chunk that starts within the player's fair share of the budget (the budget divided by the paths with a player, never under 32 MiB, the pump's lead floor), for a path whose player is known. The harmful kind, expected to stay near 0. 0 from start. |

@@ -52,29 +52,32 @@ func useFillPaceConfig(t *testing.T, mbit int, marginMB int64) {
 	globalConfig.Store(&cfg)
 }
 
-const paceChunk = 4 * mb
+const (
+	paceChunk = 4 * mb
+	testBurst = paceBurstChunks * paceChunk // what the gate derives from a 4 MiB read_ahead_base
+)
 
 // drain empties a fresh pacer's bucket (it starts with its burst, two chunks).
 func drain(t *testing.T, p *fillPacer, rate int64) {
 	t.Helper()
 	for i := 0; i < paceBurstChunks; i++ {
-		if !p.Draw("drain", 1000*mb, 10*mb, paceChunk, rate) {
+		if !p.Draw("drain", 1000*mb, 10*mb, paceChunk, rate, testBurst) {
 			t.Fatalf("burst draw %d was denied", i)
 		}
 	}
-	if p.Draw("drain", 1000*mb, 10*mb, paceChunk, rate) {
+	if p.Draw("drain", 1000*mb, 10*mb, paceChunk, rate, testBurst) {
 		t.Fatal("a third draw was granted from an empty bucket")
 	}
 }
 
 func TestPaceMarginAndAnchor(t *testing.T) {
 	t.Parallel()
-	// M = min(margin, limit/2), never below two chunks.
+	// M = min(margin, limit/2), never below one chunk.
 	for _, c := range []struct{ margin, limit, chunk, want int64 }{
 		{128 * mb, 1000 * mb, paceChunk, 128 * mb},
 		{128 * mb, 100 * mb, paceChunk, 50 * mb},
-		{128 * mb, 10 * mb, paceChunk, 2 * paceChunk},
-		{0, 1000 * mb, paceChunk, 2 * paceChunk},
+		{128 * mb, 4 * mb, paceChunk, paceChunk},
+		{0, 1000 * mb, paceChunk, paceChunk},
 	} {
 		if got := paceMargin(c.margin, c.limit, c.chunk); got != c.want {
 			t.Errorf("paceMargin(%d, %d, %d) = %d, want %d", c.margin, c.limit, c.chunk, got, c.want)
@@ -99,14 +102,14 @@ func TestPaceEmptyBucketStillServesTheMargin(t *testing.T) {
 	const rate = 10 * mb
 	drain(t, p, rate)
 	for i := 0; i < 50; i++ {
-		if !p.Draw("a", 10*mb, 10*mb, paceChunk, rate) {
+		if !p.Draw("a", 10*mb, 10*mb, paceChunk, rate, testBurst) {
 			t.Fatalf("draw %d at the margin was denied with an empty bucket", i)
 		}
-		if !p.Draw("b", 0, 10*mb, paceChunk, rate) {
+		if !p.Draw("b", 0, 10*mb, paceChunk, rate, testBurst) {
 			t.Fatalf("draw %d at lead 0 was denied", i)
 		}
 	}
-	if p.Draw("c", 10*mb+1, 10*mb, paceChunk, rate) {
+	if p.Draw("c", 10*mb+1, 10*mb, paceChunk, rate, testBurst) {
 		t.Fatal("bulk was granted from an empty bucket")
 	}
 	if got := p.draws.Load(); got != paceBurstChunks {
@@ -127,7 +130,7 @@ func TestPaceSevenPumpsAdmitAtMostRateTimesTimePlusBurst(t *testing.T) {
 	const secs = 60
 	for step := 0; step < secs*10; step++ {
 		for i := range leads {
-			if p.Draw(fmt.Sprint("p", i), leads[i], margin, paceChunk, rate) {
+			if p.Draw(fmt.Sprint("p", i), leads[i], margin, paceChunk, rate, testBurst) {
 				granted += paceChunk
 				leads[i] += paceChunk
 			}
@@ -152,15 +155,15 @@ func TestPaceLateJoinerIsServedFirst(t *testing.T) {
 		id   string
 		lead int64
 	}{{"old-a", 100 * mb}, {"old-b", 120 * mb}, {"late", margin + paceChunk}} {
-		if p.Draw(c.id, c.lead, margin, paceChunk, rate) {
+		if p.Draw(c.id, c.lead, margin, paceChunk, rate, testBurst) {
 			t.Fatalf("%s drew from an empty bucket", c.id)
 		}
 	}
 	clk.advance(100 * time.Millisecond) // one chunk of tokens, and the three waiters are still fresh
-	if p.Draw("old-a", 100*mb, margin, paceChunk, rate) || p.Draw("old-b", 120*mb, margin, paceChunk, rate) {
+	if p.Draw("old-a", 100*mb, margin, paceChunk, rate, testBurst) || p.Draw("old-b", 120*mb, margin, paceChunk, rate, testBurst) {
 		t.Fatal("an older pump was served ahead of the late joiner")
 	}
-	if !p.Draw("late", margin+paceChunk, margin, paceChunk, rate) {
+	if !p.Draw("late", margin+paceChunk, margin, paceChunk, rate, testBurst) {
 		t.Fatal("the late joiner was not served first")
 	}
 }
@@ -173,7 +176,7 @@ func TestPaceLeadsEqualizeWithinAChunk(t *testing.T) {
 	leads := []int64{20 * mb, 40 * mb, 60 * mb}
 	for step := 0; step < 600; step++ {
 		for i := range leads {
-			if p.Draw(fmt.Sprint("p", i), leads[i], margin, paceChunk, rate) {
+			if p.Draw(fmt.Sprint("p", i), leads[i], margin, paceChunk, rate, testBurst) {
 				leads[i] += paceChunk
 			}
 		}
@@ -196,14 +199,14 @@ func TestPaceJumpLeavesNoStuckWaiter(t *testing.T) {
 		clk := &fakePaceClock{t: time.Unix(1, 0)}
 		p := newFillPacer(clk.clock())
 		drain(t, p, rate)
-		if p.Draw("a", 50*mb, margin, paceChunk, rate) || p.Draw("b", 100*mb, margin, paceChunk, rate) {
+		if p.Draw("a", 50*mb, margin, paceChunk, rate, testBurst) || p.Draw("b", 100*mb, margin, paceChunk, rate, testBurst) {
 			t.Fatal("drew from an empty bucket")
 		}
-		if !p.Draw("a", margin, margin, paceChunk, rate) { // a's player seeked: a is at the margin now
+		if !p.Draw("a", margin, margin, paceChunk, rate, testBurst) { // a's player seeked: a is at the margin now
 			t.Fatal("the jumped pump was denied")
 		}
 		clk.advance(100 * time.Millisecond)
-		if !p.Draw("b", 100*mb, margin, paceChunk, rate) {
+		if !p.Draw("b", 100*mb, margin, paceChunk, rate, testBurst) {
 			t.Fatal("b is held back by the waiter a left behind")
 		}
 	})
@@ -211,14 +214,14 @@ func TestPaceJumpLeavesNoStuckWaiter(t *testing.T) {
 		clk := &fakePaceClock{t: time.Unix(1, 0)}
 		p := newFillPacer(clk.clock())
 		drain(t, p, rate)
-		p.Draw("a", 50*mb, margin, paceChunk, rate) // a waits once and never comes back
-		p.Draw("b", 100*mb, margin, paceChunk, rate)
+		p.Draw("a", 50*mb, margin, paceChunk, rate, testBurst) // a waits once and never comes back
+		p.Draw("b", 100*mb, margin, paceChunk, rate, testBurst)
 		clk.advance(100 * time.Millisecond)
-		if p.Draw("b", 100*mb, margin, paceChunk, rate) {
+		if p.Draw("b", 100*mb, margin, paceChunk, rate, testBurst) {
 			t.Fatal("b was granted while a was still a fresh waiter")
 		}
 		clk.advance(paceWaiterTTL)
-		if !p.Draw("b", 100*mb, margin, paceChunk, rate) {
+		if !p.Draw("b", 100*mb, margin, paceChunk, rate, testBurst) {
 			t.Fatal("b is still held back by a waiter that has gone quiet")
 		}
 	})
@@ -226,11 +229,11 @@ func TestPaceJumpLeavesNoStuckWaiter(t *testing.T) {
 		clk := &fakePaceClock{t: time.Unix(1, 0)}
 		p := newFillPacer(clk.clock())
 		drain(t, p, rate)
-		p.Draw("a", 50*mb, margin, paceChunk, rate)
-		p.Draw("b", 100*mb, margin, paceChunk, rate)
+		p.Draw("a", 50*mb, margin, paceChunk, rate, testBurst)
+		p.Draw("b", 100*mb, margin, paceChunk, rate, testBurst)
 		p.Forget("a") // a's pump ended
 		clk.advance(100 * time.Millisecond)
-		if !p.Draw("b", 100*mb, margin, paceChunk, rate) {
+		if !p.Draw("b", 100*mb, margin, paceChunk, rate, testBurst) {
 			t.Fatal("b is held back by an ended pump")
 		}
 	})
@@ -245,25 +248,25 @@ func TestPaceDisengagesAtTheSoftLimit(t *testing.T) {
 	p := fillPace
 	const limit = 100 * mb
 	start := clk.now()
-	if !p.Observe("/test/pace-a.mkv", start, 10*mb, limit, 2) || !p.engaged.Load() {
+	if !p.Observe("/test/pace-a.mkv", "/test/pace-a.mkv", start, 10*mb, limit, 2) || !p.engaged.Load() {
 		t.Fatal("a filling pump did not engage pacing")
 	}
-	if !p.Observe("/test/pace-b.mkv", start, 90*mb, limit, 2) {
+	if !p.Observe("/test/pace-b.mkv", "/test/pace-b.mkv", start, 90*mb, limit, 2) {
 		t.Fatal("one pump at its soft limit disengaged pacing while the other still fills")
 	}
-	if p.Observe("/test/pace-a.mkv", start, 71*mb, limit, 2) || p.engaged.Load() {
+	if p.Observe("/test/pace-a.mkv", "/test/pace-a.mkv", start, 71*mb, limit, 2) || p.engaged.Load() {
 		t.Fatal("pacing stayed engaged with every pump at its soft limit")
 	}
 	// A pump below the soft limit but older than 300 s is not filling.
 	clk.advance(paceFillWindow + time.Second)
-	if p.Observe("/test/pace-a.mkv", start, 10*mb, limit, 2) {
+	if p.Observe("/test/pace-a.mkv", "/test/pace-a.mkv", start, 10*mb, limit, 2) {
 		t.Fatal("a pump older than 300 s still counts as filling")
 	}
-	if !p.Observe("/test/pace-a.mkv", clk.now(), 10*mb, limit, 2) {
+	if !p.Observe("/test/pace-a.mkv", "/test/pace-a.mkv", clk.now(), 10*mb, limit, 2) {
 		t.Fatal("a fresh pump did not re-engage")
 	}
 	clk.advance(paceViewTTL + time.Second) // a pump that stops reporting drops out
-	if p.Observe("/test/pace-b.mkv", start, 90*mb, limit, 2) {
+	if p.Observe("/test/pace-b.mkv", "/test/pace-b.mkv", start, 90*mb, limit, 2) {
 		t.Fatal("a silent pump's view still counts")
 	}
 }
@@ -281,8 +284,9 @@ func pacedPair(t *testing.T, clk *fakePaceClock, startOff int64) (*MkvHandle, *N
 	return h, ps
 }
 
-// Case 8: playerOff == 0 falls back to the start offset, so a pump that began deep into the
-// file is not seen as a multi-GiB lead.
+// Case 8: playerOff == 0 falls back to the start offset. The fallback is live only for an
+// offset within the lead limit of 0 (a deeper pump is parked by the hard limit before the gate,
+// which measures from 0), and there it can only shrink the lead.
 func TestPaceGateAnchorsAtTheStartWhenThePlayerIsUnknown(t *testing.T) {
 	useEngineReadPath(t)
 	clk := usePaceClock(t)
@@ -333,7 +337,7 @@ func TestPaceProbesAndScansNeverDraw(t *testing.T) {
 // and its reads are untouched, whatever the lead.
 func TestPaceSinglePumpHasNoWaitsOrDraws(t *testing.T) {
 	useEngineReadPath(t) // budget 64 MiB, 4 MiB chunks
-	clk := usePaceClock(t)
+	usePaceClock(t)
 	useFillPaceConfig(t, 1, 0) // the slowest bucket and the smallest margin: any gate would show
 	const path = "/test/pace-single.mkv"
 	h := engineHandle(path, 8*gb)
@@ -341,7 +345,6 @@ func TestPaceSinglePumpHasNoWaitsOrDraws(t *testing.T) {
 	rd := &fakeReader{}
 	player := 100 * mb
 	offset := player
-	before := clk.now()
 	limit := streamLeadLimit(gc().ReadAheadBudget, 1, paceChunk)
 	for offset-player < limit-paceChunk {
 		stop, next := h.nativePumpChunk(rd, offset, paceChunk, player)
@@ -356,9 +359,6 @@ func TestPaceSinglePumpHasNoWaitsOrDraws(t *testing.T) {
 	if d, w, e := fillPace.draws.Load(), fillPace.waitNS.Load(), fillPace.engaged.Load(); d != 0 || w != 0 || e {
 		t.Fatalf("single pump: draws=%d wait=%d engaged=%v", d, w, e)
 	}
-	if !clk.now().Equal(before) {
-		t.Fatal("the pacer's clock was used for a single pump")
-	}
 	// The bytes are still counted by class.
 	if fillPace.mustBytes.Load() == 0 || fillPace.bulkBytes.Load() == 0 {
 		t.Fatalf("fill bytes not counted: must %d bulk %d", fillPace.mustBytes.Load(), fillPace.bulkBytes.Load())
@@ -370,17 +370,28 @@ func TestPaceSinglePumpHasNoWaitsOrDraws(t *testing.T) {
 // the bulk beyond it is admitted at no more than the configured rate (plus the burst) while
 // pacing is engaged, and pacing disengages once every pump holds its soft-limit lead.
 func TestPaceSimulatorSevenPaths(t *testing.T) {
+	runPaceSim(t, 256*mb, 4*mb, 7) // seven leads must fit the budget, or the cache evicts what the test checks
+}
+
+// At the default 16 MiB chunk with a 1 GiB budget, four streams still have bulk to pace.
+func TestPaceSimulatorDefaultChunkLargeBudget(t *testing.T) {
+	runPaceSim(t, 1024*mb, 16*mb, 4)
+}
+
+func runPaceSim(t *testing.T, budget, chunk int64, streams int) {
 	useEngineReadPath(t)
 	cfg := *gc()
-	cfg.ReadAheadBudget = 256 * mb // seven leads must fit, or the cache evicts what the test checks
+	cfg.ReadAheadBudget, cfg.ReadAheadBase = budget, chunk
 	globalConfig.Store(&cfg)
+	prevPool := readBufferPool
+	readBufferPool = &sync.Pool{New: func() any { b := make([]byte, chunk); return &b }}
+	t.Cleanup(func() { readBufferPool = prevPool })
 	const rateMbit = 8 // 1 MB/s
 	const rate = rateMbit * 1_000_000 / 8
 	useFillPaceConfig(t, rateMbit, 128)
 	clk := usePaceClock(t)
-	const streams = 7
-	limit := streamLeadLimit(gc().ReadAheadBudget, streams, paceChunk)
-	margin := paceMargin(128*mb, limit, paceChunk)
+	limit := streamLeadLimit(gc().ReadAheadBudget, int64(streams), chunk)
+	margin := paceMargin(128*mb, limit, chunk)
 
 	type simPump struct {
 		path   string
@@ -400,7 +411,7 @@ func TestPaceSimulatorSevenPaths(t *testing.T) {
 		pumps[i] = &simPump{path: path, h: engineHandle(path, 16*gb), rd: &fakeReader{}, player: player, offset: player}
 	}
 	step := func(sp *simPump) (advanced bool) {
-		stop, next := sp.h.nativePumpChunk(sp.rd, sp.offset, paceChunk, sp.player)
+		stop, next := sp.h.nativePumpChunk(sp.rd, sp.offset, chunk, sp.player)
 		if stop {
 			t.Fatalf("%s: the pump stopped", sp.path)
 		}
@@ -425,7 +436,7 @@ func TestPaceSimulatorSevenPaths(t *testing.T) {
 	if d, b := fillPace.draws.Load(), fillPace.bulkBytes.Load(); d != 0 || b != 0 {
 		t.Fatalf("before pacing: %d draws, %d bulk bytes", d, b)
 	}
-	if got, want := fillPace.mustBytes.Load(), streams*span; got != want {
+	if got, want := fillPace.mustBytes.Load(), int64(streams)*span; got != want {
 		t.Fatalf("must-serve bytes %d, want %d", got, want)
 	}
 
@@ -450,7 +461,7 @@ func TestPaceSimulatorSevenPaths(t *testing.T) {
 		clk.advance(100 * time.Millisecond)
 		if fillPace.engaged.Load() {
 			elapsed := clk.now().Sub(startOfBulk)
-			max := int64(float64(rate)*elapsed.Seconds()) + paceBurstChunks*paceChunk
+			max := int64(float64(rate)*elapsed.Seconds()) + paceBurstChunks*chunk
 			bulk := fillPace.bulkBytes.Load()
 			if bulk > max {
 				t.Fatalf("round %d: %d bulk bytes in %v while engaged, over rate*dt+burst = %d", round, bulk, elapsed, max)
@@ -461,7 +472,7 @@ func TestPaceSimulatorSevenPaths(t *testing.T) {
 	if fillPace.engaged.Load() {
 		t.Fatal("pacing is still engaged with every pump at its limit")
 	}
-	if bulkAtEngagedEnd < streams*(limit*7/10-margin)/2 {
+	if bulkAtEngagedEnd < int64(streams)*(limit*7/10-margin)/2 {
 		t.Fatalf("only %d bulk bytes went through the bucket", bulkAtEngagedEnd)
 	}
 	if fillPace.waitNS.Load() == 0 {
@@ -494,46 +505,174 @@ func TestPaceStallsCountOnlyWhileParked(t *testing.T) {
 	clk := usePaceClock(t)
 	const path = "/test/pace-stall.mkv"
 	registerPump(t, path, true)
-	noteFetchStall(path)
+	noteFetchStall(path, false)
 	if fillPace.stalls.Load() != 0 {
 		t.Fatal("a stall was counted with the pump running")
 	}
-	pumpStateFor(path).pacedUntil.Store(clk.now().Add(2 * pacePark).UnixNano())
-	noteFetchStall(path)
+	pumpStateFor(path).pacedUntil.Store(clk.now().Add(pacePark).UnixNano())
+	noteFetchStall(path, true)
+	if fillPace.stalls.Load() != 0 {
+		t.Fatal("a probe read was counted as a paced stall")
+	}
+	noteFetchStall(path, false)
 	if fillPace.stalls.Load() != 1 {
 		t.Fatal("a stall under the park was not counted")
 	}
 	clk.advance(time.Second)
-	noteFetchStall(path)
+	noteFetchStall(path, false)
 	if fillPace.stalls.Load() != 1 {
 		t.Fatal("a stall long after the park was counted")
 	}
 }
 
-// A seek moves the pump to the player, so its lead is the margin or less and needs no tokens,
-// and the bucket is back for the others: tokens are taken only for bytes actually read.
-func TestPaceRefundsAChunkThatWasNotRead(t *testing.T) {
+// Only a chunk that will be read draws: after a backward seek into cached territory the pump
+// walks cached chunks, and the walk makes no draw and no park.
+func TestPaceCachedChunksNeverDraw(t *testing.T) {
 	useEngineReadPath(t)
 	clk := usePaceClock(t)
-	useFillPaceConfig(t, 500, 8)
+	useFillPaceConfig(t, 1, 8)
 	h, _ := pacedPair(t, clk, 0)
-	before := fillPace.draws.Load()
+	player := 48 * mb // two playing pumps share 64 MiB: a 20 MiB lead limit, M = 8 MiB
 	rd := &fakeReader{}
-	player := 48 * mb // two playing pumps share the 64 MiB budget: a 20 MiB lead limit, M = 8 MiB
-	// A chunk already in the cache is skipped: its tokens come back.
-	off := player + 12*mb
-	raCache.Put(h.path, off, off+paceChunk-1, make([]byte, paceChunk))
-	if _, next := h.nativePumpChunk(rd, off, paceChunk, player); next != off+paceChunk {
-		t.Fatalf("the covered chunk was not skipped (next %d)", next)
+	for off := player; off < player+20*mb; off += paceChunk {
+		raCache.Put(h.path, off, off+paceChunk-1, make([]byte, paceChunk))
+	}
+	for off := player; off <= player+16*mb; off += paceChunk {
+		if _, next := h.nativePumpChunk(rd, off, paceChunk, player); next != off+paceChunk {
+			t.Fatalf("the cached chunk at lead %d MiB was not skipped (next %d)", (off-player)/mb, next)
+		}
 	}
 	if len(rd.readCalls()) != 0 {
 		t.Fatal("a cached chunk was read")
 	}
+	if d, w := fillPace.draws.Load(), fillPace.waitNS.Load(); d != 0 || w != 0 {
+		t.Fatalf("cached chunks made %d draws and %d ns of parks", d, w)
+	}
+}
+
+// Tokens are taken for a chunk and given back for the part that was not read.
+func TestPaceRefundsAShortRead(t *testing.T) {
+	useEngineReadPath(t)
+	clk := usePaceClock(t)
+	useFillPaceConfig(t, 500, 8)
+	h, _ := pacedPair(t, clk, 0)
+	rd := &fakeReader{readFn: func(int, []byte, int64) (int, error) { return int(mb), nil }}
+	player := 48 * mb
+	if _, _ = h.nativePumpChunk(rd, player+12*mb, paceChunk, player); fillPace.draws.Load() != 1 {
+		t.Fatalf("draws = %d, want 1", fillPace.draws.Load())
+	}
 	fillPace.mu.Lock()
-	tokens, burst := fillPace.tokens, fillPace.burst
+	tokens := fillPace.tokens
 	fillPace.mu.Unlock()
-	if fillPace.draws.Load() == before || tokens != burst {
-		t.Fatalf("draws %d->%d, tokens %.0f of %.0f: the skipped chunk kept its tokens", before, fillPace.draws.Load(), tokens, burst)
+	if want := float64(testBurst - mb); tokens != want {
+		t.Fatalf("tokens = %.0f, want %.0f (one MiB was read)", tokens, want)
+	}
+}
+
+// A denied park is one park long for the stall counter, and a probe's read never counts.
+func TestPaceDeniedParkIsExactlyOnePark(t *testing.T) {
+	useEngineReadPath(t)
+	clk := usePaceClock(t)
+	useFillPaceConfig(t, 8, 8)
+	h, ps := pacedPair(t, clk, 0)
+	drain(t, fillPace, 1_000_000)
+	if denied, _ := h.paceGate(ps, 2, 100*mb, paceChunk, 90*mb, 20*mb*10); !denied {
+		t.Fatal("an empty bucket did not deny")
+	}
+	if got, want := ps.pacedUntil.Load(), clk.now().Add(pacePark).UnixNano(); got != want {
+		t.Fatalf("pacedUntil = %d, want exactly one park ahead (%d)", got, want)
+	}
+}
+
+// The burst is set by read_ahead_base, not by the chunk size of whoever calls: a 9 MiB caller
+// neither shrinks it nor is starved beside a 16 MiB one, and tokens that accumulated are kept.
+func TestPaceBurstDoesNotFollowTheCaller(t *testing.T) {
+	clk := &fakePaceClock{t: time.Unix(1, 0)}
+	p := newFillPacer(clk.clock())
+	const burst, rate, margin = 32 * mb, 40 * mb, 10 * mb
+	small, big := int64(9*mb), int64(16*mb)
+	if !p.Draw("s", 100*mb, margin, small, rate, burst) { // arms the bucket, takes 9
+		t.Fatal("first draw denied")
+	}
+	if p.Draw("s", 100*mb, margin, small, rate, burst) != true { // 32-9-9: still granted
+		t.Fatal("second small draw denied")
+	}
+	clk.advance(time.Minute) // fills to the burst, not to two 9 MiB chunks
+	for i := 0; i < 2; i++ {
+		if !p.Draw("b", 100*mb, margin, big, rate, burst) {
+			t.Fatalf("16 MiB draw %d was denied: the tokens were clamped to the last caller's chunk", i)
+		}
+	}
+	// Fairness across sizes: lead goes to whoever is behind, whatever the chunk.
+	leads := map[string]int64{"s": 50 * mb, "b": 50 * mb}
+	size := map[string]int64{"s": small, "b": big}
+	got := map[string]int{}
+	for step := 0; step < 1200; step++ {
+		for _, id := range []string{"s", "b"} {
+			if p.Draw(id, leads[id], margin, size[id], rate, burst) {
+				leads[id] += size[id]
+				got[id]++
+			}
+		}
+		clk.advance(100 * time.Millisecond)
+	}
+	if got["s"] == 0 || got["b"] == 0 || leads["s"]-leads["b"] > big || leads["b"]-leads["s"] > big {
+		t.Fatalf("unfair across chunk sizes: grants %v, leads %d and %d MiB", got, leads["s"]/mb, leads["b"]/mb)
+	}
+}
+
+// Views and waiters belong to the pump state: a pump whose entry was deleted elsewhere
+// (terminateOrphanPump, a stop) still leaves the pacer when it ends, and pacing disengages at once.
+func TestPaceForgetsAPumpWhoseEntryWasDeleted(t *testing.T) {
+	useEngineReadPath(t)
+	clk := usePaceClock(t)
+	h, ps := pacedPair(t, clk, 0)
+	other := pumpStateFor("/test/gate-b.mkv")
+	const limit = 100 * mb
+	fillPace.Observe(ps, h.path, clk.now(), 10*mb, limit, 2)
+	fillPace.Observe(other, "/test/gate-b.mkv", clk.now(), 90*mb, limit, 2)
+	if !fillPace.engaged.Load() {
+		t.Fatal("not engaged")
+	}
+	app.activePumps.Delete(h.path) // deleted elsewhere: the "still registered" exit does not run
+	h.hasSlot.Store(false)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	h.nativePump(ctx, &fakeReader{}, 0, ps)
+	fillPace.mu.Lock()
+	_, stale := fillPace.views[any(ps)]
+	fillPace.mu.Unlock()
+	if stale || fillPace.engaged.Load() {
+		t.Fatalf("the ended pump is still known to the pacer (view %v, engaged %v)", stale, fillPace.engaged.Load())
+	}
+}
+
+// Disengaging and engaging again does not hand out a fresh burst each time: over any span the
+// grants stay within rate*dt + burst.
+func TestPaceFlappingDoesNotMintTokens(t *testing.T) {
+	useEngineReadPath(t)
+	clk := usePaceClock(t)
+	registerPump(t, "/test/flap-a.mkv", true)
+	registerPump(t, "/test/flap-b.mkv", true)
+	p := fillPace
+	const rate, margin, limit = 10 * mb, 10 * mb, 100 * mb
+	lead := 200 * mb
+	var granted int64
+	const steps = 600
+	for i := 0; i < steps; i++ {
+		if i%2 == 0 { // a filling pump: engaged
+			p.Observe("a", "/test/flap-a.mkv", clk.now(), 10*mb, limit, 2)
+		} else { // everyone at the soft limit: disengaged
+			p.Observe("a", "/test/flap-a.mkv", clk.now(), 90*mb, limit, 2)
+		}
+		if p.engaged.Load() && p.Draw("x", lead, margin, paceChunk, rate, testBurst) {
+			granted += paceChunk
+			lead += paceChunk
+		}
+		clk.advance(100 * time.Millisecond)
+	}
+	if max := int64(rate*steps/10) + testBurst; granted > max {
+		t.Fatalf("granted %d over rate*dt+burst = %d: every engage minted a burst", granted, max)
 	}
 }
 
@@ -553,5 +692,42 @@ func TestPrimaryFollowOffsetCanBeZeroAtPumpStart(t *testing.T) {
 	t.Cleanup(func() { app.activeHandles.Delete(h) })
 	if off, found := primaryFollowOffsetFound(path); off != 0 || !found {
 		t.Fatalf("a primary that has not read (lastOff -1): offset %d found %v, want 0 true", off, found)
+	}
+}
+
+// pacedChunks is how many chunks of one pump's lead lie beyond M, the ones pacing can meter.
+func pacedChunks(budget, chunk, streams int64) int {
+	limit := streamLeadLimit(budget, streams, chunk)
+	margin := paceMargin(128*mb, limit, chunk)
+	n := 0
+	for lead := chunk; lead <= limit; lead += chunk {
+		if lead > margin {
+			n++
+		}
+	}
+	return n
+}
+
+// The README's table: at the default 256 MiB budget and 16 MiB chunk pacing is a no-op from
+// five streams up, while a 1 or 2 GiB budget leaves bulk to meter for many more.
+func TestPaceHasBulkAtTheDocumentedBudgets(t *testing.T) {
+	t.Parallel()
+	for _, c := range []struct {
+		budget  int64
+		streams [4]int64 // 2, 4, 8 and 16 streams
+		want    [4]int
+	}{
+		{256 * mb, [4]int64{2, 4, 8, 16}, [4]int{3, 1, 0, 0}},
+		{1024 * mb, [4]int64{2, 4, 8, 16}, [4]int{21, 7, 3, 1}},
+		{2048 * mb, [4]int64{2, 4, 8, 16}, [4]int{53, 21, 7, 3}},
+	} {
+		for i, n := range c.streams {
+			if got := pacedChunks(c.budget, 16*mb, n); got != c.want[i] {
+				t.Errorf("budget %d MiB, %d streams: %d paced chunks, want %d", c.budget/mb, n, got, c.want[i])
+			}
+		}
+	}
+	if pacedChunks(256*mb, 16*mb, 3) == 0 {
+		t.Error("three streams at the default budget have no paced chunk")
 	}
 }

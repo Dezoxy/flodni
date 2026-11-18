@@ -396,11 +396,13 @@ func (h *MkvHandle) nativePump(ctx context.Context, pumpReader streamReader, sta
 			}
 		}
 
+		// The pacer's records follow the pump state, whoever deleted its entry.
+		fillPace.Forget(sharedState)
+
 		h.mu.Lock()
 		// Only delete if our sharedState is still the registered one (prevents pump A's defer from deleting pump B).
 		if val, ok := app.activePumps.Load(h.path); ok && val == sharedState {
 			app.activePumps.Delete(h.path)
-			fillPace.Forget(h.path)
 			// Purge the adaptive chunk size set at this pump's start (SetPieceLen, main.go:1075):
 			// otherwise pieceLens keeps growing with entries for paths no pump is streaming
 			// anymore, and a future pump for the same path with a different piece length would
@@ -876,21 +878,6 @@ func (h *MkvHandle) nativePumpChunk(r streamReader, offset, chunkSize, playerOff
 		return false, offset
 	}
 
-	// Fill pacing: with two or more playing pumps, the bulk beyond the must-serve margin
-	// draws from a shared token bucket. A denied draw parks like the hard limit and returns,
-	// so the loop's jump, re-anchor and watchdog logic keeps running. Alone, nothing here runs.
-	ps := pumpStateFor(h.path)
-	denied, drawn := h.paceGate(ps, playing, offset, chunkSize, playerOff, leadLimit)
-	if denied {
-		return false, offset
-	}
-	// settle gives a draw back for the bytes of the chunk that were not read.
-	settle := func(read int64) {
-		if drawn {
-			fillPace.Refund(chunkSize - read)
-		}
-	}
-
 	if diff > (leadLimit * 7 / 10) {
 		// Soft limit (70%): Slow down gradually.
 		sleepMs := (diff - (leadLimit * 7 / 10)) / (1024 * 1024)
@@ -929,7 +916,6 @@ func (h *MkvHandle) nativePumpChunk(r streamReader, offset, chunkSize, playerOff
 				warmup.DiskWarmup.WriteChunk(h.hash, h.fileID, data, offset)
 			}
 		}
-		settle(0)
 		return false, offset + chunkSize
 	}
 
@@ -938,8 +924,23 @@ func (h *MkvHandle) nativePumpChunk(r streamReader, offset, chunkSize, playerOff
 	if h.usesWarmup && warmup.DiskWarmup != nil && h.hash != "" && h.state.Load() == stateWarmup {
 		warmupCoverage := warmup.DiskWarmup.GetAvailableRange(h.hash, h.fileID)
 		if warmupCoverage >= offset+chunkSize {
-			settle(0)
 			return false, offset + chunkSize
+		}
+	}
+
+	// Fill pacing: with two or more playing pumps, the bulk beyond the must-serve margin
+	// draws from a shared token bucket, but only for a chunk that will be read (the skip
+	// checks above are free). A denied draw parks like the hard limit and returns, so the
+	// loop's jump, re-anchor and watchdog logic keeps running. Alone, nothing here runs.
+	ps := pumpStateFor(h.path)
+	denied, drawn := h.paceGate(ps, playing, offset, chunkSize, playerOff, leadLimit)
+	if denied {
+		return false, offset
+	}
+	// settle gives a draw back for the bytes of the chunk that were not read.
+	settle := func(read int64) {
+		if drawn {
+			fillPace.Refund(min(chunkSize-read, paceBurst(chunkSize)))
 		}
 	}
 

@@ -49,9 +49,9 @@ func realPaceClock() paceClock {
 }
 
 // paceMargin is M, the lead a pump may always build with no tokens: the configured margin,
-// at most half the pump's lead limit, never under two chunks.
+// at most half the pump's lead limit, never under one chunk.
 func paceMargin(margin, leadLimit, chunkSize int64) int64 {
-	return max(min(margin, leadLimit/2), 2*chunkSize)
+	return max(min(margin, leadLimit/2), chunkSize)
 }
 
 // paceAnchor is the position a pump's lead is measured from: the player's, or, when no
@@ -76,6 +76,7 @@ type paceWaiter struct {
 }
 
 type paceView struct {
+	path        string
 	lead, limit int64
 	started     time.Time
 	seen        time.Time
@@ -90,8 +91,8 @@ type fillPacer struct {
 	tokens   float64
 	burst    float64
 	last     time.Time
-	waiters  map[string]paceWaiter
-	views    map[string]paceView
+	waiters  map[any]paceWaiter // keyed by the pump's *NativePumpState
+	views    map[any]paceView
 	ewma     float64 // bulk bytes per second
 	lastFold time.Time
 	// One engaged span, for the [Pace] lines.
@@ -111,7 +112,7 @@ type fillPacer struct {
 }
 
 func newFillPacer(c paceClock) *fillPacer {
-	return &fillPacer{clock: c, waiters: map[string]paceWaiter{}, views: map[string]paceView{}, lastLog: map[string]time.Time{}}
+	return &fillPacer{clock: c, waiters: map[any]paceWaiter{}, views: map[any]paceView{}, lastLog: map[string]time.Time{}}
 }
 
 // fillPace is the process's pacer.
@@ -120,8 +121,10 @@ var fillPace = newFillPacer(realPaceClock())
 // Draw asks for one chunk of bulk. A pump whose lead is at or under margin is always
 // granted and touches neither the tokens nor the queue. Otherwise it is granted only when
 // the bucket holds a chunk and no waiter seen in the last paceWaiterTTL has a smaller lead
-// (the pump closest to its player is served first). rate is bytes per second.
-func (p *fillPacer) Draw(id string, lead, margin, chunk, rate int64) bool {
+// (the pump closest to its player is served first). rate is bytes per second; burst is the
+// bucket's depth, fixed by the configuration (two read_ahead_base chunks), never by the caller:
+// a chunk larger than the burst is charged the burst, or it could never be granted.
+func (p *fillPacer) Draw(id any, lead, margin, chunk, rate, burst int64) bool {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	if lead <= margin {
@@ -129,7 +132,7 @@ func (p *fillPacer) Draw(id string, lead, margin, chunk, rate int64) bool {
 		return true
 	}
 	now := p.clock.Now()
-	p.refillLocked(now, rate, chunk)
+	p.refillLocked(now, rate, burst)
 	p.waiters[id] = paceWaiter{lead: lead, seen: now}
 	first := true
 	for k, w := range p.waiters {
@@ -139,17 +142,18 @@ func (p *fillPacer) Draw(id string, lead, margin, chunk, rate int64) bool {
 			first = false
 		}
 	}
-	if !first || p.tokens < float64(chunk) {
+	need := float64(min(chunk, burst))
+	if !first || p.tokens < need {
 		return false
 	}
-	p.tokens -= float64(chunk)
+	p.tokens -= need
 	delete(p.waiters, id)
 	p.draws.Add(1)
 	return true
 }
 
-func (p *fillPacer) refillLocked(now time.Time, rate, chunk int64) {
-	p.burst = float64(paceBurstChunks * chunk)
+func (p *fillPacer) refillLocked(now time.Time, rate, burst int64) {
+	p.burst = float64(burst)
 	if !p.armed {
 		p.armed, p.tokens, p.last = true, p.burst, now
 		return
@@ -172,23 +176,33 @@ func (p *fillPacer) Refund(n int64) {
 }
 
 // Forget drops everything the pacer holds for a pump that ended.
-func (p *fillPacer) Forget(id string) {
+// Pacing disengages at once when fewer than two pumps remain or none is filling.
+func (p *fillPacer) Forget(id any) {
+	var msg string
 	p.mu.Lock()
 	delete(p.waiters, id)
 	delete(p.views, id)
+	if p.engaged.Load() {
+		now := p.clock.Now()
+		if filling := p.fillingLocked(now); filling == 0 || len(p.views) < 2 {
+			if p.engaged.CompareAndSwap(true, false) {
+				p.foldLocked(now)
+				msg = p.disengageMsgLocked(now)
+			}
+		}
+	}
 	p.mu.Unlock()
+	if msg != "" {
+		logger.Info(msg)
+	}
 }
 
-// Observe records where a playing pump stands and returns whether pacing is engaged: at
-// least one playing pump is still filling. Engaging and disengaging log a [Pace] line.
-func (p *fillPacer) Observe(id string, started time.Time, lead, limit, streams int64) bool {
-	var msg string
-	p.mu.Lock()
-	now := p.clock.Now()
-	p.views[id] = paceView{lead: lead, limit: limit, started: started, seen: now}
+// fillingLocked prunes the views of pumps that stopped reporting or no longer play, and counts
+// those still filling.
+func (p *fillPacer) fillingLocked(now time.Time) int {
 	filling := 0
 	for k, v := range p.views {
-		if now.Sub(v.seen) > paceViewTTL || !pathPlaybackLive(k) {
+		if now.Sub(v.seen) > paceViewTTL || !pathPlaybackLive(v.path) {
 			delete(p.views, k)
 			continue
 		}
@@ -196,10 +210,20 @@ func (p *fillPacer) Observe(id string, started time.Time, lead, limit, streams i
 			filling++
 		}
 	}
+	return filling
+}
+
+// Observe records where a playing pump stands and returns whether pacing is engaged: at
+// least one playing pump is still filling. Engaging and disengaging log a [Pace] line.
+func (p *fillPacer) Observe(id any, path string, started time.Time, lead, limit, streams int64) bool {
+	var msg string
+	p.mu.Lock()
+	now := p.clock.Now()
+	p.views[id] = paceView{path: path, lead: lead, limit: limit, started: started, seen: now}
+	filling := p.fillingLocked(now)
 	p.foldLocked(now)
 	engaged := filling > 0
 	if engaged && p.engaged.CompareAndSwap(false, true) {
-		p.armed = false
 		p.engagedAt, p.bulkAtStart, p.peak = now, p.bulkBytes.Load(), 0
 		msg = p.logLimitedLocked("engaged", now, fmt.Sprintf("[Pace] engaged streams=%d filling=%d", streams, filling))
 	} else if !engaged && p.engaged.CompareAndSwap(true, false) {
@@ -347,12 +371,17 @@ func pumpStateFor(path string) *NativePumpState {
 	return nil
 }
 
-// paceMarginFor is M for this pump under the live configuration.
-func paceMarginFor(leadLimit, chunkSize int64) int64 {
-	return paceMargin(gc().FillPaceMarginMB<<20, leadLimit, chunkSize)
+// paceBurst is the bucket's depth: paceBurstChunks of read_ahead_base, the largest chunk. A
+// chunk size the engine adapts to a piece length above it is charged at most this much.
+func paceBurst(chunkSize int64) int64 {
+	if base := gc().ReadAheadBase; base > 0 {
+		return paceBurstChunks * base
+	}
+	return paceBurstChunks * chunkSize
 }
 
-// paceGate runs between the hard and the soft limit of nativePumpChunk. n is the number of
+// paceGate runs in nativePumpChunk after the hard limit and the skip checks, so only a chunk
+// that will be read draws. n is the number of
 // playing pumps. It returns denied when the pump must wait (the caller returns and the loop
 // runs again after the park) and drawn when a chunk's tokens were taken, to be refunded if
 // the chunk is not read. Only the bulk beyond M of a playing pump is ever denied.
@@ -367,14 +396,14 @@ func (h *MkvHandle) paceGate(ps *NativePumpState, n, offset, chunkSize, playerOf
 	}
 	lead := offset - paceAnchor(playerOff, ps.startOff.Load())
 	margin := paceMargin(cfg.FillPaceMarginMB<<20, leadLimit, chunkSize)
-	if !fillPace.Observe(h.path, ps.startedTime(), lead, leadLimit, n) || lead <= margin {
+	if !fillPace.Observe(ps, h.path, ps.startedTime(), lead, leadLimit, n) || lead <= margin {
 		return false, false
 	}
 	rate := int64(cfg.FillPaceMbit) * 1_000_000 / 8
-	if fillPace.Draw(h.path, lead, margin, chunkSize, rate) {
+	if fillPace.Draw(ps, lead, margin, chunkSize, rate, paceBurst(chunkSize)) {
 		return false, true
 	}
-	ps.pacedUntil.Store(fillPace.clock.Now().Add(2 * pacePark).UnixNano())
+	ps.pacedUntil.Store(fillPace.clock.Now().Add(pacePark).UnixNano())
 	fillPace.Park(h.path)
 	return true, false
 }
@@ -396,13 +425,16 @@ func (h *MkvHandle) paceAfterRead(ps *NativePumpState, n, offset, readLen, chunk
 		}
 	}
 	if n >= 2 && cfg.FillPaceEnabled && h.playbackIsLive() {
-		fillPace.Observe(h.path, ps.startedTime(), newLead, leadLimit, n)
+		fillPace.Observe(ps, h.path, ps.startedTime(), newLead, leadLimit, n)
 	}
 }
 
 // noteFetchStall counts a read that missed the read-ahead cache and went to FetchBlock while
 // the pacer had its path's pump parked. The counter should stay near 0.
-func noteFetchStall(path string) {
+func noteFetchStall(path string, probe bool) {
+	if probe {
+		return
+	}
 	if ps := pumpStateFor(path); ps != nil && fillPace.clock.Now().UnixNano() < ps.pacedUntil.Load() {
 		fillPace.stalls.Add(1)
 	}
