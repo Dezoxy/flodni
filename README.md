@@ -892,7 +892,13 @@ play is confirmed.
   128 MB), and its peer connections. Size the cap so that cap x `CacheSize`
   stays well under the container's memory limit: four held torrents at 512 MB
   is about 2 GB. The read-ahead cache is one global budget and does not grow
-  with the number of plays. A held torrent keeps uploading what its cache
+  with the number of plays. That budget, `read_ahead_budget_mb`, is shared by
+  every playing stream: each pump may lead its player by the budget divided by
+  the pumps alive, minus three chunks of slack (never under 32 MiB, or two
+  chunks if larger, while the budget allows), so streams do not evict each
+  other's chunks just ahead of the player. One stream gets the whole budget
+  minus the slack, as before. The share is in `flodni_pump_lead_limit_bytes`.
+  A held torrent keeps uploading what its cache
   holds, under the configured limits, for the play plus the ceiling.
 - **The off switch.** `playback_keepalive_minutes` (default 15, read live) is
   the one switch: 0 turns the keep-alive off and every torrent idle-closes, a
@@ -2644,6 +2650,8 @@ scraper on the same host or Docker network.
 | `flodni_readahead_cache_active_bytes` | gauge | none | The part that is not stale. |
 | `flodni_readahead_cache_entries` | gauge | none | Entries in the cache. |
 | `flodni_readahead_cache_budget_bytes` | gauge | none | The cache's size budget. |
+| `flodni_active_pumps` | gauge | none | Read-ahead pumps alive now; `read_ahead_budget_mb` is shared among them. 0 when none runs. |
+| `flodni_pump_lead_limit_bytes` | gauge | none | How far one pump may read ahead of its player: its share of `read_ahead_budget_mb` (the budget divided by the live pumps, minus three chunks of slack), worked out for a chunk of `read_ahead_base`. With no pump running it is the single-stream limit. |
 | `flodni_readahead_evictions_total` | counter | none | Chunks the cache dropped on a `Put` to stay under its budget. Chunks the stale sweep removes are not counted. 0 from start. |
 | `flodni_warmup_head_fill_duration_seconds` | histogram | none | Time from the first chunk to the last of a head fill, per file whose head completed. Buckets 2, 5, 10, 15, 30, 60 and 120 s. |
 | `flodni_fuse_short_reads_total` | counter | none | Reads served with fewer bytes than requested away from EOF. |

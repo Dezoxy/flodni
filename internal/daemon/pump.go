@@ -578,7 +578,7 @@ func (h *MkvHandle) nativePump(ctx context.Context, pumpReader streamReader, sta
 			}
 			// The primary is still far from the end (it went to the tail for its index and came
 			// back, say): the pump goes with it rather than end behind it.
-			if to, ok := eofReanchor(primaryFollowOffset(h.path), h.size, pumpLeadLimit(gc().ReadAheadBudget, chunkSize), chunkSize); ok {
+			if to, ok := eofReanchor(primaryFollowOffset(h.path), h.size, streamLeadLimit(gc().ReadAheadBudget, livePumpCount(), chunkSize), chunkSize); ok {
 				logger.Info(fmt.Sprintf("[V306] Pump reached EOF ahead of the player; re-anchoring to %dMB (player at %dMB): %s", to/(1024*1024), primaryFollowOffset(h.path)/(1024*1024), filepath.Base(h.path)), "file", filepath.Base(h.path))
 				offset = to
 				pumpedBytes = 0
@@ -765,14 +765,57 @@ func pumpLeadLimit(budget, chunkSize int64) int64 {
 	return lead
 }
 
+// minLeadShare is the least a stream's share of the read-ahead budget may shrink to. Below
+// it a pump would hold too thin a lead to ride out one slow piece; with enough streams the
+// shares then add up to more than the budget, the old overcommit, but only past that point.
+const minLeadShare = 32 << 20
+
+// livePumpCount is the number of registered pumps. It ranges over a handful of entries (one
+// per playing file) and runs once per pumped chunk, a multi-MiB fetch, so it is not a hot path
+// and needs no counter kept in step with the seven Store/Delete sites.
+func livePumpCount() int64 {
+	var n int64
+	app.activePumps.Range(func(_, _ any) bool { n++; return true })
+	return n
+}
+
+// leadBudget is one stream's share of the global read-ahead budget. The cache evicts oldest
+// written first, so streams that each lead by the whole budget evict each other's chunks just
+// ahead of the player. One stream (or none) keeps the whole budget, exactly as before.
+func leadBudget(budget, streams int64) int64 {
+	if streams <= 1 || budget <= 0 {
+		return budget
+	}
+	return max(budget/streams, min(minLeadShare, budget))
+}
+
+// leadShare is the share pumpLeadLimit works from: leadBudget, but never under two chunks
+// (or the whole budget, if that is smaller) so a crowded cache still lets a pump hold a chunk
+// ahead of its player.
+func leadShare(budget, streams, chunkSize int64) int64 {
+	share := leadBudget(budget, streams)
+	if streams > 1 && chunkSize > 0 {
+		share = max(share, min(budget, 2*chunkSize))
+	}
+	return share
+}
+
+// streamLeadLimit is the lead one pump may hold with `streams` pumps alive.
+func streamLeadLimit(budget, streams, chunkSize int64) int64 {
+	return pumpLeadLimit(leadShare(budget, streams, chunkSize), chunkSize)
+}
+
 func (h *MkvHandle) nativePumpChunk(r streamReader, offset, chunkSize, playerOff int64) (stop bool, nextOffset int64) {
 	// Don't pump beyond file size
 	if offset >= h.size {
 		return true, offset
 	}
 
-	budget := gc().ReadAheadBudget
-	leadLimit := pumpLeadLimit(budget, chunkSize)
+	// The cache budget is global: this stream may lead by its share of it, not by all of it
+	// (see leadBudget). The soft limit and the pressure threshold are relative to the share too:
+	// "worn thin" is measured against what the stream may hold. One stream: the whole budget.
+	share := leadShare(gc().ReadAheadBudget, livePumpCount(), chunkSize)
+	leadLimit := pumpLeadLimit(share, chunkSize)
 	diff := offset - playerOff
 
 	if !chunkWithinLead(offset, playerOff, leadLimit) {
@@ -796,7 +839,7 @@ func (h *MkvHandle) nativePumpChunk(r streamReader, offset, chunkSize, playerOff
 	// chunk like SetWarmupActive already is; both just store atomics, cheap either way.
 	if h.hash != "" {
 		if tr := torr.PeekTorrent(h.hash); tr != nil && tr.Torrent != nil {
-			tr.Torrent.SetPlaybackPressure(diff < budget*20/100, offset)
+			tr.Torrent.SetPlaybackPressure(diff < share*20/100, offset)
 		}
 	}
 

@@ -373,6 +373,15 @@ func collectReadAheadProm(w *promtext.Writer) {
 	if b := gc(); b != nil {
 		w.Gauge("flodni_readahead_cache_budget_bytes", "Size budget of the read-ahead cache.", promSample(b.ReadAheadBudget))
 	}
+	pumps := livePumpCount()
+	w.Gauge("flodni_active_pumps", "Read-ahead pumps alive now. read_ahead_budget_mb is shared among them.", promSample(pumps))
+	var lead int64
+	if b := gc(); b != nil {
+		lead = streamLeadLimit(b.ReadAheadBudget, pumps, b.ReadAheadBase)
+	}
+	w.Gauge("flodni_pump_lead_limit_bytes",
+		"How far one pump may read ahead of its player: its share of read_ahead_budget_mb (the budget divided by the live pumps, minus a few chunks of slack), for a chunk of read_ahead_base.",
+		promSample(lead))
 }
 
 // openSessionCount counts the sessions /api/sessions lists as open, without building
