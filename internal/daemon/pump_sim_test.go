@@ -27,9 +27,9 @@ type pumpSim struct {
 }
 
 type simRead struct {
-	off     int64
-	n       int
-	fetched int // engine fetches this read caused; the pump's reads are not counted
+	off  int64
+	n    int
+	took time.Duration
 }
 
 type simHandle struct {
@@ -151,9 +151,9 @@ func (s *pumpSim) open(name string) *simHandle {
 // read serves one FUSE read through MkvHandle.Read, checks the bytes and records the call.
 func (sh *simHandle) read(off int64, n int) simRead {
 	sh.sim.t.Helper()
-	before := len(sh.sim.demandFetches())
+	start := time.Now()
 	res, errno := sh.h.Read(context.Background(), make([]byte, n), off)
-	fetched := len(sh.sim.demandFetches()) - before
+	took := time.Since(start)
 	if errno != 0 || res == nil {
 		sh.sim.t.Fatalf("%s: Read(%d, %d) = (%v, %v)", sh.name, n, off, res, errno)
 	}
@@ -161,7 +161,7 @@ func (sh *simHandle) read(off int64, n int) simRead {
 	if !bytes.Equal(got, wantPattern(n, off)) {
 		sh.sim.t.Fatalf("%s: Read(%d, %d) returned the wrong bytes", sh.name, n, off)
 	}
-	r := simRead{off: off, n: n, fetched: fetched}
+	r := simRead{off: off, n: n, took: took}
 	sh.mu.Lock()
 	sh.reads = append(sh.reads, r)
 	sh.mu.Unlock()
@@ -244,6 +244,17 @@ func (s *pumpSim) demandFetches() []int64 {
 		offs = append(offs, c.off)
 	}
 	return offs
+}
+
+// idle waits until no background prefetch is in flight: the reads spawn asynchronous fetches,
+// and one that lands after a sample is taken would be counted in the wrong window.
+func (s *pumpSim) idle() {
+	s.t.Helper()
+	waitUntil(s.t, "background prefetches to end", func() bool {
+		idle := true
+		app.inFlightPrefetches.Range(func(_, _ any) bool { idle = false; return false })
+		return idle
+	})
 }
 
 // settle waits until the pump has made no read for a while: parked at its lead limit, or

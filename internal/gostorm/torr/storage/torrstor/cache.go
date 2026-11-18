@@ -265,7 +265,9 @@ func (c *Cache) Piece(m metainfo.Piece) storage.PieceImpl {
 // cleanups) have finished. A repeated Close joins them too.
 //
 // Those goroutines take the engine's client lock, so Close must not run under anything the
-// client lock's holders can wait for. The engine's own storage-close hook, which runs under the
+// client lock's holders can wait for: not Storage.mu (OpenTorrent takes it under the client
+// lock; Storage.CloseHash and Close release it before calling this), not the engine's storage
+// lock. The engine's own storage-close hook, which runs under the
 // torrent's storage write lock (a piece hash start holds the client lock while it waits for
 // that lock), is closeNoWait for that reason.
 func (c *Cache) Close() error {

@@ -25,7 +25,8 @@ type probeRun struct {
 	a   *simHandle
 	b   *simHandle
 
-	aBaselineFetches int // engine fetches A's reads made before B opened
+	aBaselineFetches int // engine fetches in A's region before B opened
+	aFetchesAfterB   int // engine fetches in A's region since B opened
 	aLastBeforeB     int64
 	pumpReadsBeforeB int
 	fetchesBeforeB   int
@@ -56,11 +57,10 @@ func runProbeScenario(t *testing.T, path string, probeFrom, probeLen int64) *pro
 	run.a = sim.open("A")
 	sim.settle() // the pump fills its lead past A
 	run.a.readRange(probeAt, 40*probeStep, probeStep)
-	for _, r := range run.a.served() {
-		run.aBaselineFetches += r.fetched
-	}
 	run.aLastBeforeB = probeAt + 39*probeStep
+	sim.idle()
 	run.fetchesBeforeB = len(sim.demandFetches())
+	run.aBaselineFetches = inARegion(sim.demandFetches(), probeAt, run.aLastBeforeB)
 	run.interruptsBefore = sim.interrupts()
 	sim.settle()
 	run.pumpReadsBeforeB = len(sim.pumpReads())
@@ -92,7 +92,9 @@ func runProbeScenario(t *testing.T, path string, probeFrom, probeLen int64) *pro
 	run.aAfterProbe = run.a.served()[40:]
 	run.aLastOff = aNext
 	run.pumpAfterProbe = sim.pumpReads()[run.pumpReadsBeforeB:]
+	sim.idle()
 	run.demandAfterB = sim.demandFetches()[run.fetchesBeforeB:]
+	run.aFetchesAfterB = inARegion(run.demandAfterB, probeAt, run.aLastOff)
 	run.pumpState = sim.pumpState()
 	run.a.release()
 	run.playerOffAtRelease = atomic.LoadInt64(&run.pumpState.playerOff)
@@ -144,10 +146,8 @@ func checkProbeProperties(t *testing.T, run *probeRun) {
 		}
 	})
 	sub("A's reads cause no engine fetch after B started", func(t *testing.T) {
-		for _, r := range run.aAfterProbe {
-			if r.fetched != 0 {
-				t.Errorf("A's read at %d MiB made %d engine fetches after B started, baseline %d", r.off/mb, r.fetched, run.aBaselineFetches)
-			}
+		if run.aFetchesAfterB != 0 {
+			t.Errorf("%d engine fetches landed in A's region [%d, %d] MiB since B opened (baseline %d)", run.aFetchesAfterB, probeAt/mb, run.aLastOff/mb, run.aBaselineFetches)
 		}
 	})
 	sub("B's reads and Release never persist a resume position", func(t *testing.T) {
@@ -174,6 +174,19 @@ func checkProbeProperties(t *testing.T, run *probeRun) {
 			}
 		}
 	})
+}
+
+// inARegion counts the fetches whose offset lies in A's read region [from, to], one chunk of
+// slack below for chunk alignment. The count is by offset, not by when a read ran: the read path
+// spawns asynchronous fetches, and B's fetches (the header and the probed region) lie far from A.
+func inARegion(offs []int64, from, to int64) int {
+	n := 0
+	for _, o := range offs {
+		if o >= from-4*mb && o <= to {
+			n++
+		}
+	}
+	return n
 }
 
 // inRange reports whether off lies in a window one of sh's own reads fetched. The probe
