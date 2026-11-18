@@ -81,6 +81,13 @@ func (ft *fakeTracker) set(f func(*fakeTracker)) {
 
 func newPrivateTorrent(t *testing.T, tr *fakeTracker) (*Client, *Torrent, *fakeDht) {
 	t.Helper()
+	return newTorrentWith(t, tr, true, 100*time.Millisecond)
+}
+
+// newTorrentWith adds a one-piece torrent listing tr, private or public, to a client whose
+// announce floor is floor.
+func newTorrentWith(t *testing.T, tr *fakeTracker, private bool, floor time.Duration) (*Client, *Torrent, *fakeDht) {
+	t.Helper()
 	cfg := NewDefaultClientConfig()
 	cfg.DataDir = t.TempDir()
 	cfg.ListenHost = func(string) string { return "127.0.0.1" }
@@ -89,7 +96,7 @@ func newPrivateTorrent(t *testing.T, tr *fakeTracker) (*Client, *Torrent, *fakeD
 	cfg.DisableIPv6 = true
 	cfg.NoDHT = true
 	cfg.PeriodicallyAnnounceTorrentsToDht = true
-	cfg.MinAnnounceInterval = 100 * time.Millisecond
+	cfg.MinAnnounceInterval = floor
 	cfg.FailedAnnounceMinInterval = 300 * time.Millisecond
 	cfg.FailedAnnounceMaxInterval = 5 * time.Second
 	cl, err := NewClient(cfg)
@@ -100,13 +107,15 @@ func newPrivateTorrent(t *testing.T, tr *fakeTracker) (*Client, *Torrent, *fakeD
 	fd := &fakeDht{}
 	cl.AddDhtServer(fd)
 
-	yes := true
 	info := metainfo.Info{
 		Name:        "private-forced",
 		Length:      16384,
 		PieceLength: 16384,
 		Pieces:      make([]byte, 20),
-		Private:     &yes,
+	}
+	if private {
+		yes := true
+		info.Private = &yes
 	}
 	b, err := bencode.Marshal(info)
 	if err != nil {
@@ -120,6 +129,9 @@ func newPrivateTorrent(t *testing.T, tr *fakeTracker) (*Client, *Torrent, *fakeD
 	tor, _, err := cl.AddTorrentSpec(spec)
 	if err != nil {
 		t.Fatal(err)
+	}
+	if !private {
+		tor.DownloadAll() // a torrent with nothing to download never wants peers
 	}
 	return cl, tor, fd
 }
@@ -147,6 +159,30 @@ func waitFor(t *testing.T, what string, d time.Duration, f func() bool) {
 		time.Sleep(10 * time.Millisecond)
 	}
 	t.Fatalf("timed out waiting for %s", what)
+}
+
+// settled waits until the tracker has seen n announces and Run or a forced announce has
+// recorded the last one: the tracker's hit is logged before the client has processed the
+// response, so the hit alone says nothing about the engine's state.
+func settled(t *testing.T, tr *fakeTracker, ts *trackerScraper, n int) {
+	t.Helper()
+	waitFor(t, fmt.Sprintf("announce %d to be recorded", n), 8*time.Second, func() bool {
+		if len(tr.snapshot()) != n {
+			return false
+		}
+		ts.ann.mu.Lock()
+		defer ts.ann.mu.Unlock()
+		return !ts.ann.inFlight
+	})
+}
+
+// sleepSinceLastAnnounce sleeps until d has passed since the last recorded announce finished,
+// the instant the engine measures every wait from.
+func sleepSinceLastAnnounce(ts *trackerScraper, d time.Duration) {
+	ts.ann.mu.Lock()
+	until := ts.ann.lastDone.Add(d)
+	ts.ann.mu.Unlock()
+	time.Sleep(time.Until(until))
 }
 
 // Run and a forced announce, polled every 20 ms for three intervals against a tracker that
@@ -234,7 +270,7 @@ func TestForcedAnnounceNeedsAMinIntervalBelowTheInterval(t *testing.T) {
 			tr := newFakeTracker(t)
 			tr.set(set)
 			_, tor, _ := newPrivateTorrent(t, tr)
-			waitFor(t, "the first announce", 3*time.Second, func() bool { return len(tr.snapshot()) == 1 })
+			settled(t, tr, scraperOf(t, tor), 1)
 			end := time.Now().Add(fakeMinInterval + 1500*time.Millisecond)
 			for time.Now().Before(end) {
 				if n := tor.AnnounceWhenDue(); n != 0 {
@@ -261,40 +297,53 @@ func TestForcedAnnounceWaitsForASuccessfulRegularOne(t *testing.T) {
 	}
 }
 
-// A failed forced announce keeps Run's backoff level: it neither resets the failures Run has
-// counted nor records a wait of zero, and nothing is forced again until Run has announced.
-func TestFailedForcedAnnounceKeepsTheBackoff(t *testing.T) {
-	tr := newFakeTracker(t)
-	_, tor, _ := newPrivateTorrent(t, tr)
-	ts := scraperOf(t, tor)
-	waitFor(t, "the first announce", 3*time.Second, func() bool { return len(tr.snapshot()) == 1 })
+// A failed forced announce moves Run's next announce to the later of its previous due time and
+// one min interval after the failure: never a full interval from the failure, never sooner than
+// the min interval. Case "Run far off": the previous due time wins. Case "Run close": the due
+// time is inside the min interval after the failure, so the min interval wins.
+func TestFailedForcedAnnounceDueTime(t *testing.T) {
+	for _, tc := range []struct {
+		name                  string
+		interval, minInterval time.Duration
+		keepsPreviousDue      bool
+	}{
+		{"Run far off", 4 * time.Second, 1 * time.Second, true},
+		{"Run close", 3 * time.Second, 2 * time.Second, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			tr := newFakeTracker(t)
+			tr.set(func(ft *fakeTracker) { ft.interval, ft.minInterval = tc.interval, tc.minInterval })
+			_, tor, _ := newPrivateTorrent(t, tr)
+			ts := scraperOf(t, tor)
+			settled(t, tr, ts, 1)
+			ts.ann.mu.Lock()
+			prevDue := ts.ann.lastDone.Add(ts.ann.wait)
+			ts.ann.mu.Unlock()
 
-	// Pretend Run had failed twice before this success: level 2 is the backoff to keep.
-	ts.ann.mu.Lock()
-	ts.ann.failures = 2
-	ts.ann.mu.Unlock()
-	ts.consecutiveFailures = 2 // only Run writes it; Run is asleep for 4 s
-	tr.set(func(ft *fakeTracker) { ft.fail = true })
-	time.Sleep(fakeMinInterval + 100*time.Millisecond)
-
-	if n := tor.AnnounceWhenDue(); n != 1 {
-		t.Fatalf("AnnounceWhenDue sent %d, want the one forced announce", n)
-	}
-	ts.ann.mu.Lock()
-	wait, ok, failures := ts.ann.wait, ts.ann.ok, ts.ann.failures
-	ts.ann.mu.Unlock()
-	want := tor.cl.config.failedAnnounceInterval(2)
-	if failures != 2 || ts.consecutiveFailures != 2 {
-		t.Errorf("a failed forced announce changed Run's failure count: state %d, scraper %d, want 2", failures, ts.consecutiveFailures)
-	}
-	if wait < want {
-		t.Errorf("a failed forced announce left a wait of %v, below Run's backoff level of %v", wait, want)
-	}
-	if ok {
-		t.Error("a failed forced announce was recorded as a success")
-	}
-	if n := tor.AnnounceWhenDue(); n != 0 {
-		t.Errorf("a second forced announce went out (%d) right after a failed one", n)
+			tr.set(func(ft *fakeTracker) { ft.fail = true })
+			sleepSinceLastAnnounce(ts, tc.minInterval+50*time.Millisecond)
+			if n := tor.AnnounceWhenDue(); n != 1 {
+				t.Fatalf("AnnounceWhenDue sent %d, want the one forced announce", n)
+			}
+			ts.ann.mu.Lock()
+			failedAt, wait, ok := ts.ann.lastDone, ts.ann.wait, ts.ann.ok
+			ts.ann.mu.Unlock()
+			if ok {
+				t.Error("a failed forced announce was recorded as a success")
+			}
+			due := failedAt.Add(wait)
+			want := failedAt.Add(tc.minInterval)
+			if tc.keepsPreviousDue {
+				want = prevDue
+			}
+			if d := due.Sub(want); d < -time.Microsecond || d > time.Microsecond {
+				t.Errorf("Run is next due %v after the failure, want %v (off by %v)",
+					due.Sub(failedAt), want.Sub(failedAt), d)
+			}
+			if n := tor.AnnounceWhenDue(); n != 0 {
+				t.Errorf("a second forced announce went out (%d) right after a failed one", n)
+			}
+		})
 	}
 }
 
@@ -302,11 +351,12 @@ func TestFailedForcedAnnounceKeepsTheBackoff(t *testing.T) {
 func TestForcedAnnounceCountsOnlyWhatWasSent(t *testing.T) {
 	tr := newFakeTracker(t)
 	_, tor, _ := newPrivateTorrent(t, tr)
-	waitFor(t, "the first announce", 3*time.Second, func() bool { return len(tr.snapshot()) == 1 })
+	ts := scraperOf(t, tor)
+	settled(t, tr, ts, 1)
 	if n := tor.AnnounceWhenDue(); n != 0 {
 		t.Fatalf("sent %d inside the min interval, want 0", n)
 	}
-	time.Sleep(fakeMinInterval + 50*time.Millisecond)
+	sleepSinceLastAnnounce(ts, fakeMinInterval+50*time.Millisecond)
 	if n := tor.AnnounceWhenDue(); n != 1 {
 		t.Fatalf("sent %d after the min interval, want 1", n)
 	}
@@ -324,8 +374,9 @@ func TestForcedAnnounceCountsOnlyWhatWasSent(t *testing.T) {
 func TestPrivateForcedAnnounceReachesOnlyItsOwnTracker(t *testing.T) {
 	own, other := newFakeTracker(t), newFakeTracker(t)
 	_, tor, fd := newPrivateTorrent(t, own)
-	waitFor(t, "the first announce", 3*time.Second, func() bool { return len(own.snapshot()) == 1 })
-	time.Sleep(fakeMinInterval + 50*time.Millisecond)
+	ts := scraperOf(t, tor)
+	settled(t, own, ts, 1)
+	sleepSinceLastAnnounce(ts, fakeMinInterval+50*time.Millisecond)
 	if n := tor.AnnounceWhenDue(); n != 1 {
 		t.Fatalf("forced announce sent %d, want 1", n)
 	}
@@ -359,7 +410,7 @@ func TestForcedAnnounceStraddlingTheRegularDueTime(t *testing.T) {
 	tr := newFakeTracker(t)
 	tr.set(func(ft *fakeTracker) { ft.interval, ft.minInterval = 3*time.Second, 2*time.Second })
 	_, tor, _ := newPrivateTorrent(t, tr)
-	waitFor(t, "the first announce", 3*time.Second, func() bool { return len(tr.snapshot()) == 1 })
+	settled(t, tr, scraperOf(t, tor), 1)
 	tr.set(func(ft *fakeTracker) { ft.delay = 1500 * time.Millisecond })
 	for end := time.Now().Add(9 * time.Second); time.Now().Before(end); time.Sleep(20 * time.Millisecond) {
 		tor.AnnounceWhenDue()
@@ -386,12 +437,7 @@ func TestForcedAnnounceGuardsOneByOne(t *testing.T) {
 	tr.set(func(ft *fakeTracker) { ft.interval = 60 * time.Second })
 	_, tor, _ := newPrivateTorrent(t, tr)
 	ts := scraperOf(t, tor)
-	waitFor(t, "the first announce", 3*time.Second, func() bool { return len(tr.snapshot()) == 1 })
-	waitFor(t, "the first announce to be recorded", 3*time.Second, func() bool {
-		ts.ann.mu.Lock()
-		defer ts.ann.mu.Unlock()
-		return !ts.ann.inFlight
-	})
+	settled(t, tr, ts, 1)
 	set := func(f func(a *announceState)) {
 		ts.ann.mu.Lock()
 		defer ts.ann.mu.Unlock()
@@ -429,10 +475,202 @@ func TestForcedAnnounceGuardsOneByOne(t *testing.T) {
 func TestAnnounceTrackedNeverAnnouncesAPrivateTorrent(t *testing.T) {
 	own := newFakeTracker(t)
 	_, tor, _ := newPrivateTorrent(t, own)
-	waitFor(t, "the first announce", 3*time.Second, func() bool { return len(own.snapshot()) == 1 })
+	settled(t, own, scraperOf(t, tor), 1)
 	tor.AnnounceTracked(nil)
 	time.Sleep(300 * time.Millisecond)
 	if n := len(own.snapshot()); n != 1 {
 		t.Errorf("AnnounceTracked reached a private torrent's tracker: %d announces, want only the regular one", n)
+	}
+}
+
+// Run's own announce re-arms the forced one: with interval 2 s and min interval 1 s the tracker
+// sees forced, regular, forced, regular-or-later in turn, so a second forced announce goes out
+// after the first regular one that followed the first forced one.
+func TestForcedAnnounceIsRearmedByTheNextRegularOne(t *testing.T) {
+	tr := newFakeTracker(t)
+	tr.set(func(ft *fakeTracker) { ft.interval, ft.minInterval = 2*time.Second, 1*time.Second })
+	_, tor, _ := newPrivateTorrent(t, tr)
+	var forced int
+	for end := time.Now().Add(4600 * time.Millisecond); time.Now().Before(end); time.Sleep(20 * time.Millisecond) {
+		forced += tor.AnnounceWhenDue()
+	}
+	// Timeline: regular at 0, forced at 1, regular at 3, forced at 4.
+	if forced != 2 {
+		t.Errorf("%d forced announces in 4.6 s, want 2 (one before and one after the regular announce at 3 s)", forced)
+	}
+	if n := len(tr.snapshot()); n != 4 {
+		t.Errorf("tracker saw %d announces, want 4", n)
+	}
+}
+
+// The client's announce floor bounds the forced gap from below when the tracker's min interval
+// is smaller: min interval 1 s, floor 2 s, interval 6 s.
+func TestForcedAnnounceHonoursTheClientFloor(t *testing.T) {
+	tr := newFakeTracker(t)
+	tr.set(func(ft *fakeTracker) { ft.interval, ft.minInterval = 6*time.Second, 1*time.Second })
+	_, tor, _ := newTorrentWith(t, tr, true, 2*time.Second)
+	ts := scraperOf(t, tor)
+	settled(t, tr, ts, 1)
+	sleepSinceLastAnnounce(ts, 1200*time.Millisecond)
+	if n := tor.AnnounceWhenDue(); n != 0 {
+		t.Fatalf("sent %d announces 1.2 s after the last, inside the 2 s client floor", n)
+	}
+	sleepSinceLastAnnounce(ts, 2100*time.Millisecond)
+	if n := tor.AnnounceWhenDue(); n != 1 {
+		t.Fatalf("sent %d announces after the client floor, want 1", n)
+	}
+}
+
+// Each successful response replaces the interval and min interval kept for the tracker, from
+// Run's announce as well as from a forced one.
+func TestForcedAnnounceTakesChangedTrackerValues(t *testing.T) {
+	read := func(ts *trackerScraper) (interval, minInterval, wait time.Duration) {
+		ts.ann.mu.Lock()
+		defer ts.ann.mu.Unlock()
+		return ts.ann.interval, ts.ann.minInterval, ts.ann.wait
+	}
+	t.Run("forced announce", func(t *testing.T) {
+		tr := newFakeTracker(t)
+		_, tor, _ := newPrivateTorrent(t, tr)
+		ts := scraperOf(t, tor)
+		settled(t, tr, ts, 1)
+		tr.set(func(ft *fakeTracker) { ft.interval, ft.minInterval = 7*time.Second, 3*time.Second })
+		sleepSinceLastAnnounce(ts, fakeMinInterval+50*time.Millisecond)
+		if n := tor.AnnounceWhenDue(); n != 1 {
+			t.Fatalf("sent %d, want 1", n)
+		}
+		if i, m, w := read(ts); i != 7*time.Second || m != 3*time.Second || w != 7*time.Second {
+			t.Errorf("interval %v, min interval %v, wait %v; want 7 s, 3 s, 7 s", i, m, w)
+		}
+	})
+	t.Run("regular announce", func(t *testing.T) {
+		tr := newFakeTracker(t)
+		tr.set(func(ft *fakeTracker) { ft.interval, ft.minInterval = 2*time.Second, 1*time.Second })
+		_, tor, _ := newPrivateTorrent(t, tr)
+		ts := scraperOf(t, tor)
+		settled(t, tr, ts, 1)
+		tr.set(func(ft *fakeTracker) { ft.interval, ft.minInterval = 5*time.Second, 3*time.Second })
+		settled(t, tr, ts, 2)
+		if i, m, w := read(ts); i != 5*time.Second || m != 3*time.Second || w != 5*time.Second {
+			t.Errorf("interval %v, min interval %v, wait %v; want 5 s, 3 s, 5 s", i, m, w)
+		}
+	})
+}
+
+// A forced announce is the torrent's last announce: the status line and the failed-announce
+// check read lastAnnounce, so it carries the forced announce's completion and next wait.
+func TestForcedAnnounceUpdatesLastAnnounce(t *testing.T) {
+	tr := newFakeTracker(t)
+	_, tor, _ := newPrivateTorrent(t, tr)
+	ts := scraperOf(t, tor)
+	settled(t, tr, ts, 1)
+	sleepSinceLastAnnounce(ts, fakeMinInterval+50*time.Millisecond)
+	ts.ann.mu.Lock()
+	before := ts.ann.lastDone
+	ts.ann.mu.Unlock()
+	if n := tor.AnnounceWhenDue(); n != 1 {
+		t.Fatalf("sent %d, want 1", n)
+	}
+	ts.ann.mu.Lock()
+	doneAt, wait := ts.ann.lastDone, ts.ann.wait
+	ts.ann.mu.Unlock()
+	tor.cl.rLock()
+	last := ts.lastAnnounce
+	tor.cl.rUnlock()
+	if !doneAt.After(before) {
+		t.Fatal("the forced announce was not recorded")
+	}
+	if !last.Completed.Equal(doneAt) || last.Interval != wait || last.Err != nil {
+		t.Errorf("lastAnnounce is completed %v interval %v err %v; want the forced announce (%v, %v)",
+			last.Completed, last.Interval, last.Err, doneAt, wait)
+	}
+}
+
+// Without a ClientTrackerConfig floor, two announces to one tracker are a minute apart at least.
+func TestForcedAnnounceDefaultFloorIsAMinute(t *testing.T) {
+	if got := NewDefaultClientConfig().announceFloor(); got != time.Minute {
+		t.Errorf("default announce floor = %v, want 1m", got)
+	}
+}
+
+// Run's due check never waits on a timer of its own: when a forced announce has moved the last
+// announce it returns at once, so Run recalculates (and sees wantPeers again); when one is in
+// flight it returns the channel that ends it. Neither reserves.
+func TestForcedAnnounceTryBeginReturnsInsteadOfWaiting(t *testing.T) {
+	tr := newFakeTracker(t)
+	_, tor, _ := newPrivateTorrent(t, tr)
+	ts := scraperOf(t, tor)
+	settled(t, tr, ts, 1)
+	a := &ts.ann
+	a.mu.Lock()
+	a.lastDone = time.Now()
+	a.mu.Unlock()
+	if retry, ok := ts.tryBegin(time.Hour); ok || retry != nil {
+		t.Errorf("not due: ok=%v retry=%v, want false and no channel", ok, retry)
+	}
+	a.mu.Lock()
+	inFlight := a.inFlight
+	a.inFlight, a.done = true, make(chan struct{})
+	a.mu.Unlock()
+	if retry, ok := ts.tryBegin(0); ok || retry == nil {
+		t.Errorf("in flight: ok=%v retry=%v, want false and the in-flight channel", ok, retry)
+	}
+	a.mu.Lock()
+	a.inFlight = inFlight
+	a.mu.Unlock()
+	if _, ok := ts.tryBegin(0); !ok {
+		t.Error("control: a due tracker was not reserved")
+	}
+}
+
+// A public torrent that wants peers announces at the client floor, as before forced announces
+// existed.
+func TestForcedAnnouncePublicTorrentStillShortensToTheFloor(t *testing.T) {
+	tr := newFakeTracker(t)
+	_, _, _ = newTorrentWith(t, tr, false, 100*time.Millisecond)
+	time.Sleep(1500 * time.Millisecond)
+	if n := len(tr.snapshot()); n < 5 {
+		t.Errorf("%d announces in 1.5 s with a 4 s tracker interval and a 100 ms floor, want at least 5", n)
+	}
+}
+
+// A public torrent that did not want peers when a forced announce moved the last announce wants
+// them again later: Run, whose own timer has just fired, announces at the floor at once, not a
+// whole interval after the forced announce.
+func TestPublicRunHonoursWantPeersAfterAForcedAnnounce(t *testing.T) {
+	tr := newFakeTracker(t)
+	tr.set(func(ft *fakeTracker) { ft.delay = 300 * time.Millisecond })
+	_, tor, _ := newTorrentWith(t, tr, false, 100*time.Millisecond)
+	ts := scraperOf(t, tor)
+	setWant := func(want bool) {
+		max := 0
+		if want {
+			max = 50
+		}
+		tor.SetMaxEstablishedConns(max)
+		tor.cl.lock()
+		tor.updateWantPeersEvent()
+		tor.cl.unlock()
+	}
+	setWant(false) // while the first announce is in flight, so Run reads it as not wanting
+	settled(t, tr, ts, 1)
+	tr.set(func(ft *fakeTracker) { ft.delay = 0 })
+	ts.ann.mu.Lock()
+	t0 := ts.ann.lastDone
+	ts.ann.mu.Unlock()
+	// Forced at 2 s; Run's own timer (interval 4 s) fires at 4 s and, with the forced announce
+	// in between, would wait until 6 s.
+	time.Sleep(time.Until(t0.Add(2 * time.Second)))
+	if n := tor.AnnounceWhenDue(); n != 1 {
+		t.Fatalf("forced announce sent %d, want 1", n)
+	}
+	time.Sleep(time.Until(t0.Add(4300 * time.Millisecond)))
+	if n := len(tr.snapshot()); n != 2 {
+		t.Fatalf("%d announces before wanting peers, want 2", n)
+	}
+	setWant(true)
+	time.Sleep(700 * time.Millisecond) // t0+5.0 s: before the 6 s a stuck Run would wait for
+	if n := len(tr.snapshot()); n < 3 {
+		t.Errorf("%d announces 0.7 s after wanting peers, want Run's third at the floor", n)
 	}
 }

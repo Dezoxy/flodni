@@ -55,8 +55,8 @@ go-check:
 ## go-test         Go tests with the race detector (Linux, libfuse3-dev)
 go-test:
 	go test -race -count=1 $(GO_PKGS)
-	cd internal/anacrolix-torrent && go test -race -count=1 -run 'Private|PeerRequestServer|PeerWake|ProcessCounters|Malformed|RefillV2|RefillFlagOff|ForgetPartial|CompletePieces' .
-	cd internal/anacrolix-torrent && go test -race -count=1 -run Malformed ./tracker/http ./webseed
+	cd internal/anacrolix-torrent && go test -race -count=1 -run 'Private|PeerRequestServer|PeerWake|ProcessCounters|Malformed|RefillV2|RefillFlagOff|ForgetPartial|CompletePieces|Forced|AnnounceTracked' .
+	cd internal/anacrolix-torrent && go test -race -count=1 -run 'Malformed|MinInterval' ./tracker/http ./webseed
 	cd internal/anacrolix-torrent && go test -race -count=1 -run DecodeDepth ./bencode
 
 ## e2e             end-to-end stream test: seed a private torrent, read it through FUSE in the real image (Docker, /dev/fuse)

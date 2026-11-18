@@ -974,10 +974,13 @@ the places they were first seen (the stale cache priorities, now dropped).
   and returns 0. The regular announce loop and the
   forced announce share one per-tracker record, so neither starts while the
   other is in flight, the regular loop waits its normal interval from the
-  forced announce's end, a failed forced announce leaves the regular loop's
-  backoff alone, and at most one forced announce goes out between two regular
-  ones. A private torrent reaches only the trackers it carries: no DHT, PEX
-  or added tracker. Implemented and tested with a fake tracker in
+  forced announce's end, and at most one forced announce goes out between two
+  regular ones. A forced announce follows only a successful regular one; if it
+  fails, the regular loop's next announce moves to the later of its previous
+  due time and one min interval after the failure (never a full interval from
+  it, never sooner than the min interval). A malformed `min interval` is
+  ignored and the announce proceeds. A private torrent reaches only the
+  trackers it carries: no DHT, PEX or added tracker. Implemented and tested with a fake tracker in
   `internal/anacrolix-torrent/forced_announce_test.go`; the daemon does not
   call it yet, so a private torrent still gets nothing beyond the regular
   loop in a running Flodni.

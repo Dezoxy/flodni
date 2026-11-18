@@ -67,8 +67,8 @@ jobs:
       - name: Engine private-torrent, request-server and malformed-input tests
         working-directory: internal/anacrolix-torrent
         run: |
-          go test -race -count=1 -run 'Private|PeerRequestServer|PeerWake|ProcessCounters|Malformed|RefillV2|RefillFlagOff|ForgetPartial|CompletePieces' .
-          go test -race -count=1 -run Malformed ./tracker/http ./webseed
+          go test -race -count=1 -run 'Private|PeerRequestServer|PeerWake|ProcessCounters|Malformed|RefillV2|RefillFlagOff|ForgetPartial|CompletePieces|Forced|AnnounceTracked' .
+          go test -race -count=1 -run 'Malformed|MinInterval' ./tracker/http ./webseed
           go test -race -count=1 -run DecodeDepth ./bencode
 
   workflow-lint:

@@ -47,9 +47,6 @@ type announceState struct {
 	// The tracker's interval and min interval from its last successful response; 0 for a min
 	// interval it did not send (a UDP tracker never does).
 	interval, minInterval time.Duration
-	// Run's consecutive failures as of its last announce: the backoff level a failed forced
-	// announce keeps instead of resetting it.
-	failures int
 	// Whether a forced announce has gone out since Run's last one: at most one per regular
 	// announce, or forced announces every min interval would keep pushing Run's out.
 	forcedSinceRun bool
@@ -68,8 +65,9 @@ func (a *announceState) releaseLocked() {
 }
 
 // tryBegin reserves the tracker for Run's next announce when none is in flight and interval has
-// passed since the last announce of either kind. Otherwise it returns a channel that fires when
-// that is worth rechecking.
+// passed since the last announce of either kind. Otherwise it returns false, with a channel that
+// fires when the announce in flight ends, or nil when Run should recalculate at once: a forced
+// announce moved the last announce, and the new wait must see wantPeers like any other.
 func (me *trackerScraper) tryBegin(interval time.Duration) (retry <-chan struct{}, ok bool) {
 	a := &me.ann
 	a.mu.Lock()
@@ -77,10 +75,8 @@ func (me *trackerScraper) tryBegin(interval time.Duration) (retry <-chan struct{
 	if a.inFlight {
 		return a.done, false
 	}
-	if d := time.Until(a.lastDone.Add(interval)); d > 0 {
-		c := make(chan struct{})
-		time.AfterFunc(d, func() { close(c) })
-		return c, false
+	if time.Until(a.lastDone.Add(interval)) > 0 {
+		return nil, false
 	}
 	a.reserveLocked()
 	return nil, true
@@ -93,7 +89,6 @@ func (me *trackerScraper) finishRun(raw trackerAnnounceResult, wait time.Duratio
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	a.record(raw, wait)
-	a.failures = me.consecutiveFailures
 	a.forcedSinceRun = false
 	a.releaseLocked()
 }
@@ -119,11 +114,12 @@ func (a *announceState) nextWait() (lastDone time.Time, wait time.Duration, shor
 // announceWhenDue sends one announce outside Run's schedule, when the tracker allows it and
 // Run is not about to announce anyway: none in flight, the last announce of either kind
 // succeeded, no forced one has gone out since Run's last, the tracker sent a min interval
-// smaller than its interval, that min interval (and
-// never less than the client's announce floor) has passed since the last announce, and Run's
-// own next announce is still ahead. It reports whether an announce went out. Run then waits
-// its normal interval from this one's completion, and a failure here leaves Run's backoff level
-// alone.
+// smaller than its interval, that min interval (never less than the client's announce floor)
+// has passed since the last announce, and Run's own next announce is still ahead. It reports
+// whether an announce went out. After a success Run waits the tracker's interval from this
+// announce's completion. After a failure Run's next announce is due at the later of its previous
+// due time and one min interval after the failure, so the tracker is neither hit sooner than
+// its min interval nor left a full interval from the failure.
 func (me *trackerScraper) announceWhenDue(ctx context.Context) bool {
 	a := &me.ann
 	floor := me.t.cl.config.announceFloor()
@@ -138,6 +134,7 @@ func (me *trackerScraper) announceWhenDue(ctx context.Context) bool {
 		a.mu.Unlock()
 		return false
 	}
+	prevDue := a.lastDone.Add(a.wait)
 	a.reserveLocked()
 	a.forcedSinceRun = true
 	a.mu.Unlock()
@@ -152,12 +149,9 @@ func (me *trackerScraper) announceWhenDue(ctx context.Context) bool {
 			wait = floor
 		}
 	} else {
-		level := a.failures
-		if level < 1 {
-			level = 1
-		}
-		if w := me.t.cl.config.failedAnnounceInterval(level); wait < w {
-			wait = w
+		wait = prevDue.Sub(ar.Completed)
+		if wait < gap {
+			wait = gap
 		}
 	}
 	a.record(ar, wait)
@@ -467,10 +461,12 @@ func (me *trackerScraper) Run() {
 		// the wait was computed; otherwise wait again.
 		retry, ok := me.tryBegin(interval)
 		if !ok {
-			select {
-			case <-me.t.closed.Done():
-				return
-			case <-retry:
+			if retry != nil {
+				select {
+				case <-me.t.closed.Done():
+					return
+				case <-retry:
+				}
 			}
 			goto recalculate
 		}
