@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"regexp"
 	"strings"
 	"testing"
 	"time"
@@ -107,10 +108,14 @@ func runTrk(args ...string) (code int, out, errOut string) {
 func noLeak(t *testing.T, outs ...string) {
 	t.Helper()
 	for _, s := range outs {
-		for _, bad := range []string{"://", "announce", trkPasskey, "passkey", "?"} {
+		for _, bad := range []string{"announce", trkPasskey, "passkey", "?"} {
 			if strings.Contains(s, bad) {
 				t.Errorf("output leaks %q: %q", bad, s)
 			}
+		}
+		// the audit prints scheme://host:port: a "/" after the authority would be a path
+		if re := regexp.MustCompile(`://[^\s"/]*/`); re.MatchString(s) {
+			t.Errorf("output carries a URL path: %q", s)
 		}
 	}
 }
@@ -666,5 +671,83 @@ func TestTrackersRemoveHostVerifiesBeforeWriting(t *testing.T) {
 				t.Error("config.db changed")
 			}
 		})
+	}
+}
+
+// The audit lists scheme://host:port per tracker URL, default ports explicit, split by private and
+// public with record counts, and nothing else of the URL: no path, query, userinfo or passkey.
+func TestTrackersAuditEndpointsNeverLeakSecrets(t *testing.T) {
+	const (
+		pathKey  = "PATHSECRETKEY123"
+		queryKey = "QUERYSECRETKEY456"
+		userKey  = "USERSECRETKEY789"
+	)
+	dir := trkState(t,
+		trkRecord{1, true, [][]string{{"https://tracker.example/announce/" + pathKey}, {"http://plain.example/announce?passkey=" + queryKey}}},
+		trkRecord{2, true, [][]string{{"https://user:" + userKey + "@tracker.example:443/announce"}, {"udp://u.example:6969/announce", "https://tracker.example/announce/" + pathKey + "#frag"}}},
+		trkRecord{3, false, [][]string{{"udp://u.example:1337/announce"}, {"http://plain.example:8080/announce"}, {"https://[2001:db8::1]/announce"}}},
+		trkRecord{4, false, [][]string{{"http://%zz/announce/" + pathKey}, {"not a url " + queryKey}}},
+	)
+	code, out, errOut := runTrk("audit", "--state", dir)
+	if code != 0 {
+		t.Fatalf("exit %d, %q", code, errOut)
+	}
+	code, js, errOut := runTrk("audit", "--state", dir, "--json")
+	if code != 0 {
+		t.Fatalf("exit %d, %q", code, errOut)
+	}
+	for _, s := range []string{out, js, errOut} {
+		for _, secret := range []string{pathKey, queryKey, userKey, "user:", "frag", "passkey", "announce"} {
+			if strings.Contains(s, secret) {
+				t.Errorf("output contains %q:\n%s", secret, s)
+			}
+		}
+	}
+	// a path separator after the authority would mean a path got through
+	if re := regexp.MustCompile(`://[^\s"/]*/`); re.MatchString(out) || re.MatchString(js) {
+		t.Errorf("an endpoint carries a path:\n%s\n%s", out, js)
+	}
+
+	var got struct {
+		Endpoints struct {
+			Private []struct {
+				Endpoint string
+				Records  int
+			} `json:"private"`
+			Public []struct {
+				Endpoint string
+				Records  int
+			} `json:"public"`
+			Unparsed int `json:"unparsed"`
+		} `json:"endpoints"`
+	}
+	if err := json.Unmarshal([]byte(js), &got); err != nil {
+		t.Fatalf("not json: %v\n%s", err, js)
+	}
+	// private: record 1 and 2 both list https://tracker.example (a record counts once per endpoint)
+	wantPriv := []string{"http://plain.example:80=1", "https://tracker.example:443=2", "udp://u.example:6969=1"}
+	wantPub := []string{"http://plain.example:8080=1", "https://[2001:db8::1]:443=1", "udp://u.example:1337=1"}
+	flat := func(es []struct {
+		Endpoint string
+		Records  int
+	}) (o []string) {
+		for _, e := range es {
+			o = append(o, fmt.Sprintf("%s=%d", e.Endpoint, e.Records))
+		}
+		return o
+	}
+	if g := flat(got.Endpoints.Private); !reflect.DeepEqual(g, wantPriv) {
+		t.Errorf("private endpoints %v, want %v", g, wantPriv)
+	}
+	if g := flat(got.Endpoints.Public); !reflect.DeepEqual(g, wantPub) {
+		t.Errorf("public endpoints %v, want %v", g, wantPub)
+	}
+	if got.Endpoints.Unparsed != 2 {
+		t.Errorf("unparsed %d, want 2", got.Endpoints.Unparsed)
+	}
+	for _, want := range []string{"https://tracker.example:443  records=2\n", "udp://u.example:1337  records=1\n", "unparsed=2"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("text lacks %q:\n%s", want, out)
+		}
 	}
 }

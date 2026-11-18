@@ -32,3 +32,18 @@ func TestConfigureThreadsTrackerTLSInsecure(t *testing.T) {
 		t.Fatal("tracker_tls_insecure did not reach the engine client config")
 	}
 }
+
+// configure hands the engine the TLS failure hook, so announce failures reach the daemon's log
+// and counter.
+func TestConfigureSetsTheAnnounceErrorHook(t *testing.T) {
+	prev, prevArgs, prevIP := settings.BTsets, settings.Args, settings.PubIPv4
+	t.Cleanup(func() { settings.BTsets, settings.Args, settings.PubIPv4 = prev, prevArgs, prevIP })
+	settings.PubIPv4 = "93.184.216.34"
+	settings.Args = &settings.ExecArgs{}
+	settings.BTsets = &settings.BTSets{CacheSize: 1 << 20, ConnectionsLimit: 5}
+	bt := NewBTS()
+	bt.configure(context.Background())
+	if bt.config.OnTrackerAnnounceError == nil {
+		t.Fatal("no announce error hook on the engine client config")
+	}
+}

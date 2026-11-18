@@ -23,6 +23,7 @@ import (
 	"flodni/internal/gostorm/torr/utils"
 	"flodni/internal/gostorm/version"
 	"flodni/internal/redact"
+	"flodni/internal/tlsverify"
 )
 
 type BTServer struct {
@@ -225,6 +226,7 @@ func (bt *BTServer) configure(ctx context.Context) {
 	bt.config = torrent.NewDefaultClientConfig()
 	bt.config.RefillV2 = EngineRefillV2
 	bt.config.TrackerInsecureSkipVerify = TrackerTLSInsecure
+	bt.config.OnTrackerAnnounceError = tlsverify.Report
 
 	bt.storage = torrstor.NewStorage(settings.BTsets.CacheSize)
 	bt.config.DefaultStorage = bt.storage

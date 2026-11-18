@@ -567,6 +567,15 @@ flodni trackers remove-host [--dry-run] [--hashes] [--allow-same-site] [--allow-
   own, because a record whose `.torrent` lists a foreign tracker first has that
   tracker as its primary. A record whose metainfo is missing or unreadable counts as
   private. The domain rule is an approximation, not the Public Suffix List.
+  An "endpoints" section lists `scheme://host:port` for every tracker URL, with
+  the default port made explicit (`http` 80, `https` 443; a `udp` URL keeps its
+  port and one without a port is unparsed), sorted, split into private and public
+  records, with `records=N` (a record counts once per endpoint) and
+  `endpoints unparsed=N` for entries that gave none. `--json` carries the same
+  as `endpoints: {private: [{endpoint, records}], public: [...], unparsed}`. The
+  path, query, fragment and userinfo are dropped before anything is built, and a
+  URL that does not parse is only counted: the endpoints show which `https`
+  trackers a certificate change would reach.
 - `remove-host <host>` removes every tracker with that host (case-insensitive,
   trailing dot ignored) from every record, drops tiers left empty and keeps the
   order of the rest. Nothing else in the record changes; each changed record is
@@ -1089,17 +1098,28 @@ URL.
 
 | Key in `config.json` | Default | Read | Effect |
 |---|---|---|---|
-| `tracker_tls_insecure` | `false` | once at start (a change needs a restart) | `true` skips certificate verification for every `https` tracker, the engine's own announces included. A start with it on logs `[Tracker] TLS certificate verification is OFF (tracker_tls_insecure)` at WARN. |
+| `tracker_tls_insecure` | `false` | once at start (a change needs a restart) | `true` skips certificate verification for the engine's announces to every `https` tracker. The tracker scrape (`/api/torrents/scrape`) always verifies. A start with it on logs `[Tracker] TLS certificate verification is OFF (tracker_tls_insecure)` at WARN. |
 
 The trade-off: a tracker with a self-signed, expired or mismatched certificate
 stops announcing until the key is set, and the torrents that depend on it find
 no peers from that tracker. `http://` and `udp://` trackers are not affected;
 neither has a certificate to check. The switch is global; there is no
-per-tracker setting. Pinned in
+per-tracker setting.
+
+While verification is on, an announce or scrape that fails it logs
+`[Tracker] TLS verify failed for <host>:<port>: <reason>` at WARN, at most once
+an hour per `host:port`. The reason is `unknown authority`, `hostname mismatch`,
+`expired` or `not yet valid` (a certificate error of another kind reads
+`other`); the line never carries the URL, path, query or passkey. Every failure
+also counts in `flodni_tracker_tls_verify_failures_total{reason}` (reasons
+`unknown_authority`, `hostname`, `expired` (also not yet valid) and `other`,
+all present from 0, no host label). Pinned in
 `internal/anacrolix-torrent/tracker/http/tls_verify_test.go` (the client),
 `internal/anacrolix-torrent/tracker_tls_test.go` (the engine's announce),
 `internal/gostorm/torr/tracker_tls_test.go` (the client configuration) and
-`internal/config/opt_in_switches_test.go` (the key).
+`internal/config/opt_in_switches_test.go` (the key) and
+`internal/tlsverify/tlsverify_test.go` (the warning, its rate limit and the
+counter).
 
 #### Upgrading: tracker certificates are now verified
 
@@ -2725,6 +2745,7 @@ scraper on the same host or Docker network.
 | `flodni_readahead_refetched_bytes_total` | counter | none | Bytes the engine fetched again for a piece that had completed and been evicted from the in-memory piece cache (kept per torrent while it is open). Counted, not acted on: the baseline for judging eviction. 0 from start. |
 | `flodni_readahead_stranded_partial_bytes` | gauge | none | Bytes held by partially written pieces outside every reader's protected window, over open torrents. Eviction only takes complete pieces, so after a seek these bytes stay until the cache frees them, on its clean pass or its own 5 s timer (at most every 5 s), for a piece untouched for 20 s that the engine no longer wants and has nothing in flight for (it forgets the chunks first, so a later read downloads them again). Sampled at scrape under each cache's reader read lock; no engine lock. Alert on a value that stays high with no one playing. |
 | `flodni_engine_peer_redials_total` | counter | none | Peers the opt-in redial (`redial_dropped_peer`) added back to a private torrent after its only connected peer dropped. 0 with the switch off. See Engine stall gaps. |
+| `flodni_tracker_tls_verify_failures_total` | counter | `reason` | Announces and scrapes to an `https` tracker that failed certificate verification, by `reason`: `unknown_authority`, `hostname`, `expired` (also not yet valid) or `other`. No host label. All four present from 0. See Tracker TLS. |
 | `flodni_engine_db_write_errors_total` | counter | `op` | Engine database (`config.db`) commits that failed, by `op`: `set` (a record save), `rem` (a removal) or `clear`. Each is a record not saved or not removed; alert on any increase. All three present from 0. See Engine state and backup. |
 | `flodni_engine_hedge_triggers_total` | counter | none | Tail-hedge duplicate requests the engine fired. A process counter: unlike `hedge_trigger_count` in `/metrics`, it does not fall when a torrent expires. |
 | `flodni_engine_peer_ejects_total` | counter | `transport` | Outlier peers the engine dropped for a rate far under the swarm median, `tcp` or `utp`. Process counter. |

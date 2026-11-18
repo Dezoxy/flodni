@@ -12,6 +12,8 @@ import (
 	"net/url"
 	"strings"
 	"time"
+
+	"flodni/internal/tlsverify"
 )
 
 // MaxUDPHashes is BEP 15's practical limit of hashes per scrape packet.
@@ -101,6 +103,9 @@ func HTTPScrape(ctx context.Context, c *http.Client, scrapeURL string, hashes []
 	req.Header.Set("User-Agent", userAgent)
 	resp, err := c.Do(req)
 	if err != nil {
+		if u, perr := url.Parse(scrapeURL); perr == nil {
+			tlsverify.Report(tlsverify.HostPort(u), err)
+		}
 		return nil, 0, classify(err)
 	}
 	defer func() { _ = resp.Body.Close() }()
