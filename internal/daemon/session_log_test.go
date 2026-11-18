@@ -120,7 +120,7 @@ func TestSessionLogContractKeys(t *testing.T) {
 	sort.Strings(keys)
 	want := []string{"bytes_fetch_block", "bytes_racache_hit", "bytes_served", "bytes_warmup_head",
 		"bytes_warmup_tail", "confirmed", "duration_ms", "failed_reads", "failure_reason", "file_index",
-		"first_byte_ms", "hash", "id", "max_stall_ms", "opened_at", "outcome", "path", "reads", "reopens",
+		"first_byte_ms", "hash", "id", "max_stall_ms", "opened_at", "outcome", "paced_ms", "path", "reads", "reopens",
 		"resumed_from", "size", "stalls", "swarm_served"}
 	// closed_at is omitted while a session is open; the log line always has it.
 	if !reflect.DeepEqual(keys, want) {

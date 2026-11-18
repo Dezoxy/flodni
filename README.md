@@ -1419,7 +1419,7 @@ goes to stdout only. A session still open at shutdown is closed then, with
 the same rules: one younger than 25 s is never condemned as a dead swarm.
 
 ```text
-[GoProxy] 2026/11/12 09:02:10 [Session] {"path":"/mnt/flodni-real/tv/Example/Example.S01E01_0123abcd.mkv","hash":"0123456789abcdef0123456789abcdef01234567","size":31461601,"opened_at":"2026-11-12T09:00:05Z","closed_at":"2026-11-12T09:02:10Z","bytes_served":31461601,"first_byte_ms":12,"reads":241,"failed_reads":0,"outcome":"served","file_index":1,"bytes_fetch_block":135393,"bytes_racache_hit":31326208,"bytes_warmup_head":0,"bytes_warmup_tail":0,"swarm_served":true,"duration_ms":125000,"failure_reason":null,"reopens":0,"stalls":0,"max_stall_ms":0,"confirmed":false,"id":7,"resumed_from":0}
+[GoProxy] 2026/11/12 09:02:10 [Session] {"path":"/mnt/flodni-real/tv/Example/Example.S01E01_0123abcd.mkv","hash":"0123456789abcdef0123456789abcdef01234567","size":31461601,"opened_at":"2026-11-12T09:00:05Z","closed_at":"2026-11-12T09:02:10Z","bytes_served":31461601,"first_byte_ms":12,"reads":241,"failed_reads":0,"outcome":"served","file_index":1,"bytes_fetch_block":135393,"bytes_racache_hit":31326208,"bytes_warmup_head":0,"bytes_warmup_tail":0,"swarm_served":true,"duration_ms":125000,"failure_reason":null,"reopens":0,"stalls":0,"max_stall_ms":0,"confirmed":false,"id":7,"resumed_from":0,"paced_ms":0}
 ```
 
 Everything after `[Session] ` is one JSON object on one line, the same
@@ -1453,6 +1453,7 @@ and `[DeadSwarm]` lines are unchanged, and their wording is not a contract.
 | `stalls`, `max_stall_ms` | number | Served reads that took over one second, and the slowest one in milliseconds. Failed reads are not counted. |
 | `confirmed` | boolean | A play webhook confirmed the file while the session was open, or it was confirmed when the session started. Sticky: a later stop webhook does not clear it. |
 | `id`, `resumed_from` | number | A number for the session, unique within one daemon run (it restarts at 1), and the `id` of the session this one continues; 0 for a session that began with an open. Follow `resumed_from` to stitch a paused playback back together. |
+| `paced_ms` | number | Milliseconds the file's read-ahead pump was parked by fill pacing during the session; 0 with one viewer or pacing off. See Fill pacing. |
 | `outcome` | string | `served`: 1 MiB or more, or over 64 KiB with a read past 8 MiB or in the tail window. `probe`: fewer bytes, a scan. `unserved`: no bytes. `dead_swarm`: the session counted as a failure in the readability record, whatever it served; it never appears when the state database is off. The thresholds may change. |
 | `session_age_seconds` | number | Open sessions only, not in the log line: seconds since the session opened. |
 | `last_read_offset`, `last_read_end` | number | Open sessions only, not in the log line: where the last served read started, and where it ended (start plus the bytes returned), in file bytes. Absent until a read has returned data. |
@@ -1733,6 +1734,53 @@ file opened last.
   `behind`, `ahead`). `flodni_readahead_evictions_near_player_total` counts the
   harmful drops (a chunk within the player's fair share of the budget) and
   should stay near 0; the first one per file in 30 s is also logged at INFO.
+
+## Fill pacing
+
+When several streams start together, each pump fills its whole lead as fast as the
+swarm allows. That is a burst of bulk traffic and work that no player needs yet, and it
+can crowd out the bytes a player is about to read. Fill pacing meters only that bulk.
+It is on by default and does nothing for one viewer.
+
+- **What is paced.** A pump's lead is how far it reads ahead of its player. Up to the
+  must-serve margin **M** the pump is never gated. Only the chunks beyond M draw tokens
+  from one global bucket, and a pump that is denied parks for 100 ms (the park of the
+  hard limit) and tries again, so its jump, re-anchor and watchdog logic keeps running.
+  `M = min(fill_pace_margin_mb, lead limit / 2)`, never below two chunks.
+- **Order.** The pump nearest its player is served first: a draw succeeds only
+  when the bucket holds a chunk and no other waiting pump (seen in the last
+  300 ms) has a smaller lead. A stream that starts late gets its tokens before
+  the older ones, and the leads of the streams converge to within one chunk.
+  The burst is two chunks.
+- **Where the lead is measured from.** The player's offset, or, when no primary handle
+  reports one (it reads 0 until a handle has read, and 0 also when the player is at the
+  start of the file), the offset the pump started at.
+- **When it is engaged.** Only with two or more playing pumps, for a pump with a live
+  playback, whose lead is above M, and while at least one playing pump is still
+  filling: below 70% of its lead limit (the soft limit) and younger than 300 s. Once
+  every playing pump is at its soft limit or older than 300 s, pacing disengages. A scan
+  or a probe is never gated and never draws. With fewer than two playing pumps the gate
+  is not entered at all, so a single viewer is served exactly as before.
+- **A seek** moves the pump to the player: its lead falls to M or less and needs no
+  tokens. Tokens are taken for a chunk and given back if it was already cached or the
+  read came up short, so only bytes actually read are charged.
+- **The default is a fairness setting.** At 500 Mbit/s the bucket seldom runs dry on a
+  fast link; it mostly enforces the order above. To take load off a host (a small
+  passively cooled box that must not run flat out while several streams fill), lower
+  `fill_pace_mbit`. Only the bulk beyond M is limited, so playback itself is not.
+
+| Key | Default | Meaning |
+| --- | --- | --- |
+| `fill_pace_enabled` | `true` | Switch for the whole feature. |
+| `fill_pace_mbit` | `500` | Bulk fill rate for all pumps together, in megabits per second (1 to 1000000; a value outside is logged and replaced by 500). |
+| `fill_pace_margin_mb` | `128` | The must-serve margin, in MB (0 to 1048576; outside is replaced by 128). |
+
+All three are read live: a config save applies to the next chunk. The log carries
+`[Pace] engaged streams=N filling=K` and, rate-limited,
+`[Pace] disengaged after Xs bulk=Y MiB peak=Z Mbit/s`. A session's `[Session]` line and
+`/api/sessions` record carry `paced_ms`, the time its pump was parked. The series are
+in the metrics table (`flodni_pump_fill_bytes_total` and the other `flodni_pump_*`
+pacing rows); `flodni_pump_paced_stalls_total` should stay near 0.
 
 ## Warmup cache eviction
 
@@ -2765,6 +2813,12 @@ scraper on the same host or Docker network.
 | `flodni_readahead_cache_budget_bytes` | gauge | none | The cache's size budget. |
 | `flodni_playing_pumps` | gauge | none | Read-ahead pumps of playing files, the streams `read_ahead_budget_mb` is shared among. Scan pumps and pumps of paused or unconfirmed files are not counted. 0 when none runs. |
 | `flodni_pump_lead_limit_bytes` | gauge | none | How far one pump may read ahead of its player: its share of `read_ahead_budget_mb` (the budget divided by `flodni_playing_pumps`, minus three chunks of slack), worked out for a chunk of `read_ahead_base`. With no pump running it is the single-stream limit. |
+| `flodni_pump_fill_bytes_total` | counter | `class` | Bytes the pumps filled: `must_serve` (within the margin M of the player, never paced) or `bulk` (beyond it, what fill pacing meters). Both present from 0. See Fill pacing. |
+| `flodni_pump_fill_rate_bytes` | gauge | none | Bulk fill rate in bytes per second, a 5 s moving average. |
+| `flodni_pump_pacing_engaged` | gauge | none | 1 while fill pacing is limiting bulk fills (two or more playing pumps and one still filling), else 0. |
+| `flodni_pump_paced_wait_seconds_total` | counter | none | Seconds pumps spent parked by fill pacing, summed over pumps. 0 from start. |
+| `flodni_pump_time_to_full_lead_seconds` | histogram | none | Time from a pump's start to its lead reaching the soft limit (70% of its lead limit), once per pump. Buckets 1, 2, 5, 10, 20, 30, 60, 120 and 300 s. |
+| `flodni_pump_paced_stalls_total` | counter | none | Reads that missed the read-ahead cache and went to FetchBlock while fill pacing had their path's pump parked. Expected to stay near 0; if it moves, the rate is too low or the margin too small. |
 | `flodni_readahead_evictions_total` | counter | `reason` | Chunks the cache dropped on a `Put` to stay under its budget: `idle` (path not read for 120 s), `behind` (already consumed by the player) or `ahead` (farthest ahead on the path holding the most bytes). Chunks the idle sweep removes are not counted. The split is breaking for an unlabelled query: wrap it in `sum()`. 0 from start. |
 | `flodni_readahead_evictions_near_player_total` | counter | none | Evictions of a chunk that starts within the player's fair share of the budget (the budget divided by the paths with a player, never under 32 MiB, the pump's lead floor), for a path whose player is known. The harmful kind, expected to stay near 0. 0 from start. |
 | `flodni_warmup_head_fill_duration_seconds` | histogram | none | Time from the first chunk to the last of a head fill, per file whose head completed. Buckets 2, 5, 10, 15, 30, 60 and 120 s. |
