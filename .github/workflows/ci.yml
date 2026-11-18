@@ -330,6 +330,8 @@ jobs:
     timeout-minutes: 45
     # Protected environment: deployments allowed only from v* tags.
     environment: release
+    outputs:
+      digest: ${{ steps.push.outputs.digest }}
     permissions:
       contents: read
       packages: write # push the image to GHCR
@@ -411,3 +413,49 @@ jobs:
           } >> "$GITHUB_STEP_SUMMARY"
         env:
           DIGEST: ${{ steps.push.outputs.digest }}
+
+  github-release:
+    name: GitHub Release (release tags only)
+    # The release page is built from the annotated tag's message, after the image is published
+    # and attested, so a page never points at an image that does not exist. The tag stays the
+    # source of truth; this job only presents it. Re-running it updates the page in place.
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    needs: [publish]
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write # create or edit the release for this tag
+    steps:
+      - name: Create or update the release from the tag message
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          TAG: ${{ github.ref_name }}
+          DIGEST: ${{ needs.publish.outputs.digest }}
+        run: |
+          set -eu
+          sha=$(gh api "repos/${REPO}/git/ref/tags/${TAG}" -q '.object.sha')
+          type=$(gh api "repos/${REPO}/git/ref/tags/${TAG}" -q '.object.type')
+          if [ "$type" != "tag" ]; then echo "::error::${TAG} is not an annotated tag"; exit 1; fi
+          msg=$(gh api "repos/${REPO}/git/tags/${sha}" -q '.message')
+          title=$(printf '%s\n' "$msg" | head -n1)
+          {
+            printf '%s\n' "$msg" | tail -n +2
+            echo
+            echo "## Image"
+            echo
+            echo '```'
+            echo "${IMAGE}@${DIGEST}"
+            echo '```'
+            echo
+            echo "Verify the build provenance:"
+            echo
+            echo '```'
+            echo "gh attestation verify oci://${IMAGE}@${DIGEST} -R ${REPO}"
+            echo '```'
+          } > notes.md
+          if gh release view "$TAG" -R "$REPO" >/dev/null 2>&1; then
+            gh release edit "$TAG" -R "$REPO" --title "$title" --notes-file notes.md
+          else
+            gh release create "$TAG" -R "$REPO" --verify-tag --title "$title" --notes-file notes.md --latest
+          fi
