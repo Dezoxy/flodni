@@ -27,6 +27,14 @@ type NativePumpState struct {
 	playerOff        int64        // last known player position, saved on handle release
 	pumpOff          atomic.Int64 // where the pump fetches next; read by /api/sessions
 	interruptPending atomic.Bool  // prevents cascade: only the first handle per seek fires Interrupt()
+
+	// Fill pacing (pump_pace.go). startedAt is the pump's start on the pacer's clock, in
+	// Unix nanoseconds (0 = not set); startOff is where it started, the anchor of its lead
+	// while no primary handle reports the player's position.
+	startedAt  atomic.Int64
+	startOff   atomic.Int64
+	fullSeen   atomic.Bool  // the time-to-full-lead sample has been taken
+	pacedUntil atomic.Int64 // the pacer parked this pump until about this time (pacer clock, ns)
 }
 
 // attachToExistingPump links the handle to a running pump exactly once. The caller holds
@@ -388,6 +396,9 @@ func (h *MkvHandle) nativePump(ctx context.Context, pumpReader streamReader, sta
 			}
 		}
 
+		// The pacer's records follow the pump state, whoever deleted its entry.
+		fillPace.Forget(sharedState)
+
 		h.mu.Lock()
 		// Only delete if our sharedState is still the registered one (prevents pump A's defer from deleting pump B).
 		if val, ok := app.activePumps.Load(h.path); ok && val == sharedState {
@@ -425,6 +436,8 @@ func (h *MkvHandle) nativePump(ctx context.Context, pumpReader streamReader, sta
 	pumpedBytes := int64(0)
 	// Align startOffset to chunk boundary
 	offset := (startOffset / chunkSize) * chunkSize
+	sharedState.startOff.Store(offset)
+	sharedState.startedAt.Store(fillPace.clock.Now().UnixNano())
 
 	for {
 		select {
@@ -809,8 +822,10 @@ func playingPumpCount() int64 {
 // does not enter the divisor, but gets a lead of its own: the share it would have as one more
 // stream, so it never holds more than a viewer's share (and with no viewer, the whole budget,
 // as a scan always had).
-func (h *MkvHandle) leadStreams() int64 {
-	n := playingPumpCount()
+func (h *MkvHandle) leadStreams() int64 { return h.leadStreamsFor(playingPumpCount()) }
+
+// leadStreamsFor is leadStreams for a playing-pump count the caller already has.
+func (h *MkvHandle) leadStreamsFor(n int64) int64 {
 	if h.playbackIsLive() {
 		return max(1, n)
 	}
@@ -852,7 +867,8 @@ func (h *MkvHandle) nativePumpChunk(r streamReader, offset, chunkSize, playerOff
 	// The cache budget is global: this stream may lead by its share of it, not by all of it
 	// (see leadBudget). The soft limit and the pressure threshold are relative to the share too:
 	// "worn thin" is measured against what the stream may hold. One stream: the whole budget.
-	share := leadShare(gc().ReadAheadBudget, h.leadStreams(), chunkSize)
+	playing := playingPumpCount()
+	share := leadShare(gc().ReadAheadBudget, h.leadStreamsFor(playing), chunkSize)
 	leadLimit := pumpLeadLimit(share, chunkSize)
 	diff := offset - playerOff
 
@@ -860,7 +876,9 @@ func (h *MkvHandle) nativePumpChunk(r streamReader, offset, chunkSize, playerOff
 		// Hard limit reached: Wait for player to advance.
 		time.Sleep(100 * time.Millisecond)
 		return false, offset
-	} else if diff > (leadLimit * 7 / 10) {
+	}
+
+	if diff > (leadLimit * 7 / 10) {
 		// Soft limit (70%): Slow down gradually.
 		sleepMs := (diff - (leadLimit * 7 / 10)) / (1024 * 1024)
 		if sleepMs > 50 {
@@ -910,6 +928,22 @@ func (h *MkvHandle) nativePumpChunk(r streamReader, offset, chunkSize, playerOff
 		}
 	}
 
+	// Fill pacing: with two or more playing pumps, the bulk beyond the must-serve margin
+	// draws from a shared token bucket, but only for a chunk that will be read (the skip
+	// checks above are free). A denied draw parks like the hard limit and returns, so the
+	// loop's jump, re-anchor and watchdog logic keeps running. Alone, nothing here runs.
+	ps := pumpStateFor(h.path)
+	denied, drawn := h.paceGate(ps, playing, offset, chunkSize, playerOff, leadLimit)
+	if denied {
+		return false, offset
+	}
+	// settle gives a draw back for the bytes of the chunk that were not read.
+	settle := func(read int64) {
+		if drawn {
+			fillPace.Refund(min(chunkSize-read, paceBurst(chunkSize)))
+		}
+	}
+
 	// Use buffer from pool to reduce allocations
 	bufPtr := readBufferPool.Get().(*[]byte)
 	defer readBufferPool.Put(bufPtr)
@@ -918,11 +952,13 @@ func (h *MkvHandle) nativePumpChunk(r streamReader, offset, chunkSize, playerOff
 	if n > 0 {
 		raCache.Put(h.path, offset, offset+int64(n)-1, (*bufPtr)[:n])
 		noteFillAttributed(h.path, offset, int64(n), h.size)
+		h.paceAfterRead(ps, playing, offset, int64(n), chunkSize, playerOff, leadLimit)
 		if h.usesWarmup && warmup.DiskWarmup != nil && h.hash != "" && offset <= warmup.FileSize {
 			warmup.DiskWarmup.WriteChunk(h.hash, h.fileID, (*bufPtr)[:n], offset)
 		}
 	}
 
+	settle(int64(n))
 	if err != nil {
 		return true, offset + int64(n)
 	}

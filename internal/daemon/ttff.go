@@ -144,9 +144,10 @@ type TTFFSession struct {
 	path            string
 	size            int64
 	hash            string
-	fileIndex       int    // the index the stub carries (0 = none), for the session log line
-	id              uint64 // process-unique, for the session log and resumed_from
-	resumedFrom     uint64 // id of the session this one continues; 0 = a fresh open
+	fileIndex       int          // the index the stub carries (0 = none), for the session log line
+	id              uint64       // process-unique, for the session log and resumed_from
+	resumedFrom     uint64       // id of the session this one continues; 0 = a fresh open
+	pacedNS         atomic.Int64 // time this session's pump was parked by fill pacing
 	warmupHeadReady atomic.Bool
 	warmupTailReady atomic.Bool
 	// coldEvicted: the session opened with no ready head on a file quota eviction had

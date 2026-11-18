@@ -71,6 +71,8 @@ type sessionRecord struct {
 	// per process (they restart at 1), resumed_from is 0 for a session opened fresh.
 	ID          uint64 `json:"id"`
 	ResumedFrom uint64 `json:"resumed_from"`
+	// Added with fill pacing: time the file's pump spent parked by the pacer.
+	PacedMS int64 `json:"paced_ms"`
 }
 
 // record snapshots the session. closedAt is the zero time for an open session.
@@ -99,6 +101,7 @@ func (s *TTFFSession) record(closedAt time.Time, dead bool) sessionRecord {
 		Confirmed:       s.confirmed.Load(),
 		ID:              s.id,
 		ResumedFrom:     s.resumedFrom,
+		PacedMS:         time.Duration(s.pacedNS.Load()).Milliseconds(),
 	}
 	end := time.Now()
 	if fd := s.firstDataAt.Load(); fd > 0 {
