@@ -71,6 +71,20 @@ func ListTorrent() []*TorrentDB {
 	return list
 }
 
+// TorrentHashes lists the keys of the stored records (lower-case hex) without reading
+// the records. Nil before the database is open.
+func TorrentHashes() []string {
+	dbMigrationLock.RLock()
+	defer dbMigrationLock.RUnlock()
+
+	mu.Lock()
+	defer mu.Unlock()
+	if tdb == nil {
+		return nil
+	}
+	return tdb.List("Torrents")
+}
+
 // V271: O(1) single torrent lookup by hash — reads one key from BoltDB.
 // Previously GetTorrentDB called ListTorrent() which loaded and unmarshalled ALL torrents.
 func GetTorrent(hash metainfo.Hash) *TorrentDB {

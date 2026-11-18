@@ -88,6 +88,9 @@ func scrapePassFor() *scrapePassHealth {
 	return &scrapePassHealth{RunID: p.RunID, FinishedAt: rfc3339(p.FinishedAt)}
 }
 
+// storedHashes is the set of stored torrents (a seam for tests).
+var storedHashes = torr.StoredHashes
+
 // scrapeHashes lists the torrents that have a scrape entry, as hex.
 func scrapeHashes() []string {
 	s := trackerScraper.Load()

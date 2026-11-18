@@ -87,6 +87,14 @@ func useScraper(t *testing.T, cfg config.Config, targets []trackscrape.Target) (
 	t.Helper()
 	logs := &syncBuf{}
 	stop := make(chan struct{})
+	// the targets are the stored torrents (the health listing checks the store)
+	storedHashes = func() map[string]bool {
+		m := map[string]bool{}
+		for _, t := range targets {
+			m[hexOf(t.Hash)] = true
+		}
+		return m
+	}
 	s := startTrackerScraper(&cfg, func(only *[20]byte) []trackscrape.Target {
 		var out []trackscrape.Target
 		for _, t := range targets {
@@ -96,7 +104,7 @@ func useScraper(t *testing.T, cfg config.Config, targets []trackscrape.Target) (
 		}
 		return out
 	}, func() bool { return !notReady.Load() }, torr.ScrapeNet{UserAgent: "test-ua", UDP: true}, stop, flog.NewText(logs))
-	t.Cleanup(func() { close(stop); s.Stop(); trackerScraper.Store(nil) })
+	t.Cleanup(func() { close(stop); s.Stop(); trackerScraper.Store(nil); storedHashes = torr.StoredHashes })
 	return s, logs
 }
 
@@ -391,5 +399,31 @@ func TestScrapePasskeyNeverLeaks(t *testing.T) {
 	}
 	if !strings.Contains(logs.String(), echo.srv.URL) {
 		t.Fatal("the log should name the host")
+	}
+}
+
+// A pass that started while a torrent was stored can finish after the torrent was refused
+// or dropped. Its entry is then an orphan: health must not list it. A stored torrent keeps
+// its scrape object (and the pinned fields) as before.
+func TestHealthListsNoScrapeEntryOfAnUnstoredTorrent(t *testing.T) {
+	stored, gone := hashOf(1), hashOf(2)
+	tr := newScrapeTracker(t, map[[20]byte][2]int{stored: {5, 2}, gone: {3, 1}})
+	useScraper(t, fastCfg(), []trackscrape.Target{
+		{Hash: stored, Trackers: []string{tr.srv.URL + "/announce"}},
+		{Hash: gone, Trackers: []string{tr.srv.URL + "/announce"}},
+	})
+	if rec := post("/api/torrents/scrape"); rec.Code != http.StatusAccepted {
+		t.Fatalf("POST = %d %s", rec.Code, rec.Body)
+	}
+	waitState(t, "done")
+	// the torrent is refused after the pass took its snapshot; the result still landed
+	storedHashes = func() map[string]bool { return map[string]bool{hexOf(stored): true} }
+
+	m, body := healthJSON(t, &fakeLister{})
+	if strings.Contains(body, hexOf(gone)) {
+		t.Fatalf("health lists a torrent that is not stored: %s", body)
+	}
+	if sc := torrentOf(t, m, hexOf(stored))["scrape"].(map[string]any); sc["seeders"] != float64(5) || sc["run_id"] != float64(1) {
+		t.Fatalf("stored torrent's scrape = %v", sc)
 	}
 }

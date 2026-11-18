@@ -74,7 +74,7 @@ func strOrNil(s string) *string {
 // as stored, per torrent, each with its experimental per-file records (files may be nil).
 // A torrent that has file records and no failure row is listed with a count of 0 and
 // nulls, unless a failure filter is set: ?failing and ?min_failures keep their
-// per-torrent meaning. A nil store (state database off or failed to open) answers
+// per-torrent meaning. A hash with only a scrape entry is listed only while stored. A nil store (state database off or failed to open) answers
 // 503, because nothing is recorded then.
 func newTorrentsHealthHandler(store readabilityLister, files func() map[string][]fileHealth, logger *slog.Logger) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
@@ -140,8 +140,11 @@ func newTorrentsHealthHandler(store readabilityLister, files func() map[string][
 					out = append(out, torrentHealth{Hash: hash, Files: filesOrEmpty(fs), Swarm: swarmFor(hash), Scrape: scrapeFor(hash)})
 				}
 			}
+			// A scrape entry alone does not make a torrent listed: a pass that began while a
+			// refused or dropped torrent was stored can finish after it left the store.
+			stored := storedHashes()
 			for _, hash := range scrapeHashes() {
-				if !listed[hash] {
+				if !listed[hash] && stored[hash] {
 					out = append(out, torrentHealth{Hash: hash, Files: []fileHealth{}, Swarm: swarmFor(hash), Scrape: scrapeFor(hash)})
 				}
 			}
