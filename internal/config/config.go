@@ -202,6 +202,13 @@ type Config struct {
 	// first byte past the windows; a negative or absurd value is replaced by the default.
 	UnconfirmedReadMarginMB int64 `json:"unconfirmed_read_margin_mb"`
 
+	// Fill pacing: with two or more playing pumps, the bulk read-ahead beyond a must-serve
+	// margin of each player shares one token bucket of FillPaceMbit megabits per second.
+	// Read live (a config save applies to the next chunk).
+	FillPaceEnabled  bool  `json:"fill_pace_enabled"`
+	FillPaceMbit     int   `json:"fill_pace_mbit"`
+	FillPaceMarginMB int64 `json:"fill_pace_margin_mb"`
+
 	// RefuseUnconfirmedReads is the opt-in switch for refusing reads: once a session of a
 	// file with no confirmed playback has taken the margin past the windows, further
 	// fetches are held for a webhook and then refused with EIO (reader_budget.go). Off
@@ -413,6 +420,10 @@ func LoadConfig() (Config, error) {
 
 		PlayedProtectionDays:    90,
 		UnconfirmedReadMarginMB: 64,
+
+		FillPaceEnabled:         true,
+		FillPaceMbit:            500,
+		FillPaceMarginMB:        128,
 		WarmCatchupPerHour:      20,
 		WarmCatchupScope:        "all",
 		WarmupEvictionOrder:     "written",
@@ -879,6 +890,16 @@ func (c *Config) finalize() {
 		c.UnconfirmedReadMarginMB = 64
 	}
 	c.UnconfirmedReadMargin = c.UnconfirmedReadMarginMB * 1024 * 1024
+
+	// 1 Mbit/s to 1 Tbit/s; a margin above 1 TiB is a typo, not a choice.
+	if c.FillPaceMbit < 1 || c.FillPaceMbit > 1_000_000 {
+		flog.Std.Warn(fmt.Sprintf("[Config] WARNING: fill_pace_mbit %d is out of range; using 500", c.FillPaceMbit), "fill_pace_mbit", c.FillPaceMbit)
+		c.FillPaceMbit = 500
+	}
+	if c.FillPaceMarginMB < 0 || c.FillPaceMarginMB > 1<<20 {
+		flog.Std.Warn(fmt.Sprintf("[Config] WARNING: fill_pace_margin_mb %d is out of range; using 128", c.FillPaceMarginMB), "fill_pace_margin_mb", c.FillPaceMarginMB)
+		c.FillPaceMarginMB = 128
+	}
 
 	// Above 100 years the window is a typo, not a choice. 0 stays 0: warning off.
 	if c.PlaybackWebhookWarnDays < 0 || c.PlaybackWebhookWarnDays > 36500 {

@@ -26,6 +26,10 @@ func useTestGlobals(t *testing.T) {
 		SequentialTolerance:  512 * 1024,
 		WarmStartIdleSeconds: 6,
 		PumpOnOpen:           true,
+		// Fill pacing as a default config has it, so the pump suites run with it on.
+		FillPaceEnabled:  true,
+		FillPaceMbit:     500,
+		FillPaceMarginMB: 128,
 	})
 	logger = flog.NewText(io.Discard)
 	t.Cleanup(func() {
