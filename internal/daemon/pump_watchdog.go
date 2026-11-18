@@ -53,7 +53,8 @@ func playingWithoutPump() map[string]*MkvHandle {
 			return true
 		})
 		// A player in the last lead has its pump ended for good (pumpAtEnd): nothing is missing.
-		if best != nil && pumpAtEnd(best.followOff(), best.size, pumpLeadLimit(gc().ReadAheadBudget, raCache.ChunkSize(path)), raCache.ChunkSize(path)) {
+		// This path has no pump now: +1 is the count the ended pump used, if nothing changed since.
+		if best != nil && pumpAtEnd(best.followOff(), best.size, streamLeadLimit(gc().ReadAheadBudget, playingPumpCount()+1, raCache.ChunkSize(path)), raCache.ChunkSize(path)) {
 			best = nil
 		}
 		if best != nil {
