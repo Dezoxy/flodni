@@ -20,7 +20,7 @@
 #   STRUCTURIZR_IMAGE  required: the pinned Structurizr image your viewer runs,
 #                      e.g. structurizr/structurizr:2026.10.26 (the PNG export
 #                      uses its -playwright tag)
-#   PANDOC_IMAGE       optional: default pandoc/extra:3.11.0.0-debian, the
+#   PANDOC_IMAGE       optional: default pandoc/extra:3.14.0.0-debian, the
 #                      version this was tested with (LaTeX, Eisvogel; ~2 GB)
 #   ARCH_DIR           optional: default docs/architecture
 #   MERMAID_IMAGE      optional: default minlag/mermaid-cli:12.0.1, the
@@ -29,7 +29,7 @@
 set -euo pipefail
 
 : "${STRUCTURIZR_IMAGE:?Set STRUCTURIZR_IMAGE to your pinned Structurizr image}"
-PANDOC_IMAGE="${PANDOC_IMAGE:-pandoc/extra:3.11.0.0-debian}"
+PANDOC_IMAGE="${PANDOC_IMAGE:-pandoc/extra:3.14.0.0-debian}"
 ARCH_DIR="${ARCH_DIR:-docs/architecture}"
 MERMAID_IMAGE="${MERMAID_IMAGE:-minlag/mermaid-cli:12.0.1}"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"

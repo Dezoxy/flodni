@@ -10,7 +10,7 @@
 # -playwright tag.
 STRUCTURIZR_IMAGE ?= structurizr/structurizr:2026.10.26
 # Pandoc with LaTeX and the Eisvogel template, for `make pdf` (~2 GB).
-PANDOC_IMAGE      ?= pandoc/extra:3.11.0.0-debian
+PANDOC_IMAGE      ?= pandoc/extra:3.14.0.0-debian
 # Mermaid CLI, for `make mermaid-render` and `make pdf`: draws Mermaid blocks
 # as PNG. The mature 11.x line; runs as your user (~630 MB).
 MERMAID_IMAGE     ?= minlag/mermaid-cli:12.0.1
