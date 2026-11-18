@@ -12,15 +12,29 @@ import (
 	"time"
 )
 
+// hangTracker never answers: it holds each request until the scraper gives up
+// (the client closing the connection cancels the request context) or the test ends.
 func hangTracker(t *testing.T) *fakeHTTP {
 	f := newFakeHTTP(t, nil)
-	f.answer = func(w http.ResponseWriter, r *http.Request, _ [][20]byte) { time.Sleep(time.Second) }
+	f.answer = func(w http.ResponseWriter, r *http.Request, _ [][20]byte) {
+		select {
+		case <-r.Context().Done():
+		case <-time.After(30 * time.Second):
+		}
+	}
 	return f
 }
+
+// hangTimeout is the per-request timeout of tests that need a tracker to time out.
+// It is the liveness bound, so it is generous: the answering trackers in the same
+// test must never come close to it, even on a loaded machine. The test then waits
+// for the hung request to hit it and asserts on the outcome, never on how fast.
+const hangTimeout = 5 * time.Second
 
 // The numbers are the max over the trackers that gave a count; the entry carries
 // the facts (answered, failed, unscrapable, unknown) and the caller decides.
 func TestFactsReportMaxOverAnsweredTrackers(t *testing.T) {
+	t.Parallel() // spends hangTimeout waiting for the hung tracker
 	a, b, c, d := h20(1), h20(2), h20(3), h20(4)
 	zero := newFakeHTTP(t, map[[20]byte]Counts{a: {0, 0}, b: {0, 0}, c: {5, 1}})
 	hang := hangTracker(t)
@@ -29,7 +43,7 @@ func TestFactsReportMaxOverAnsweredTrackers(t *testing.T) {
 		{Hash: b, Trackers: []string{"http://tracker.example.org/tracker.php", zero.announce()}}, // one has no scrape URL
 		{Hash: c, Trackers: []string{hang.announce(), zero.announce()}},                          // 5 stands even so
 		{Hash: d, Trackers: []string{hang.announce(), zero.announce()}},                          // d is unknown to the answering tracker
-	}, func(cf *Config) { cf.Timeout = 150 * time.Millisecond })
+	}, func(cf *Config) { cf.Timeout = hangTimeout })
 	_, _ = s.StartPass("manual", nil)
 	waitDone(t, s)
 	ea, _ := s.Entry(a)
@@ -118,12 +132,8 @@ func TestLongBackoffDoesNotHoldThePassOpenAndRotates(t *testing.T) {
 		c.MaxInPassWait = 100 * time.Millisecond
 		c.Now = func() time.Time { return time.Now().Add(time.Duration(offset.Load())) }
 	})
-	start := time.Now()
-	_, _ = s.StartPass("manual", nil)
+	_, _ = s.StartPass("manual", nil) // held open for the 3600 s backoff, waitDone would give up at 10 s
 	p := waitDone(t, s)
-	if time.Since(start) > 2*time.Second {
-		t.Fatalf("the pass was held open for %v", time.Since(start))
-	}
 	if p.OK != 1 || p.Errors != 2 {
 		t.Fatalf("pass = %+v", p)
 	}

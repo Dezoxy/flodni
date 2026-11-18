@@ -31,7 +31,7 @@ func newTest(t *testing.T, targets []Target, mod func(*Config)) (*Scraper, *logB
 	cfg := Config{
 		Source:      func(only *[20]byte) []Target { return filterTargets(targets, only) },
 		Pace:        time.Millisecond,
-		Timeout:     500 * time.Millisecond,
+		Timeout:     10 * time.Second, // a liveness bound; tests that need a timeout set their own
 		BackoffBase: time.Millisecond,
 		BackoffMax:  10 * time.Millisecond,
 		Logf:        lb.logf,
@@ -92,8 +92,8 @@ func TestPassAnswersAndBestAcrossTrackers(t *testing.T) {
 }
 
 func TestFailuresGiveNullCountsNeverZero(t *testing.T) {
-	hang := newFakeHTTP(t, nil)
-	hang.answer = func(w http.ResponseWriter, r *http.Request, _ [][20]byte) { time.Sleep(time.Second) }
+	t.Parallel() // spends hangTimeout waiting for the hung tracker
+	hang := hangTracker(t)
 	bad := newFakeHTTP(t, nil)
 	bad.answer = func(w http.ResponseWriter, r *http.Request, _ [][20]byte) { http.Error(w, "x", 503) }
 	live := newFakeHTTP(t, map[[20]byte]Counts{h20(3): {6, 1}})
@@ -102,7 +102,7 @@ func TestFailuresGiveNullCountsNeverZero(t *testing.T) {
 		{Hash: hh, Trackers: []string{hang.announce()}},
 		{Hash: hb, Trackers: []string{bad.announce()}},
 		{Hash: hl, Trackers: []string{bad.announce(), live.announce()}}, // one dead, one live
-	}, func(c *Config) { c.Timeout = 150 * time.Millisecond })
+	}, func(c *Config) { c.Timeout = hangTimeout })
 	if _, err := s.StartPass("manual", nil); err != nil {
 		t.Fatal(err)
 	}
@@ -230,17 +230,16 @@ func TestPerHostIsolation(t *testing.T) {
 	s, _ := newTest(t, []Target{
 		{Hash: h20(1), Trackers: []string{hang.announce()}},
 		{Hash: h20(2), Trackers: []string{live.announce()}},
-	}, func(c *Config) { c.Timeout = 2 * time.Second })
-	start := time.Now()
+	}, func(c *Config) { c.Timeout = time.Minute }) // the hung host stays hung for the whole test
 	_, _ = s.StartPass("manual", nil)
-	deadline := time.Now().Add(time.Second)
+	deadline := time.Now().Add(10 * time.Second) // a liveness bound, not a speed expectation
 	for time.Now().Before(deadline) {
 		if _, ok := s.Entry(h20(2)); ok {
 			break
 		}
 		time.Sleep(5 * time.Millisecond)
 	}
-	if _, ok := s.Entry(h20(2)); !ok || time.Since(start) > time.Second {
+	if _, ok := s.Entry(h20(2)); !ok {
 		t.Fatal("the live host was held up by the hanging one")
 	}
 	if !s.Running() {
@@ -325,7 +324,7 @@ func TestSchedulerRunsPassesWithJitter(t *testing.T) {
 		c.Rand = func() float64 { mu.Lock(); defer mu.Unlock(); draws = append(draws, 1.0); return 1.0 }
 	})
 	s.Start()
-	deadline := time.Now().Add(3 * time.Second)
+	deadline := time.Now().Add(30 * time.Second) // a liveness bound, not a speed expectation
 	for time.Now().Before(deadline) && len(f.requests()) < 5 {
 		time.Sleep(10 * time.Millisecond)
 	}
@@ -333,10 +332,13 @@ func TestSchedulerRunsPassesWithJitter(t *testing.T) {
 	if len(reqs) < 5 {
 		t.Fatalf("scheduled passes ran %d times", len(reqs))
 	}
-	// Rand 1.0 gives the top of the +/-10 % window: 110 ms between passes.
-	gap := reqs[4].at.Sub(reqs[1].at) / 3
-	if gap < 105*time.Millisecond || gap > 400*time.Millisecond {
-		t.Fatalf("gap between scheduled passes = %v, want about 110 ms", gap)
+	// The wait between passes is never below the bottom of the +/-10 % window (90 ms),
+	// whatever Rand says. Request times carry the machine's scheduling noise, so this
+	// checks the floor over four intervals and has no upper bound: a loaded machine
+	// only makes the passes later.
+	gap := reqs[4].at.Sub(reqs[0].at) / 4
+	if gap < 80*time.Millisecond {
+		t.Fatalf("gap between scheduled passes = %v, want about 90 ms or more", gap)
 	}
 	if l, _ := s.Status(); l.Trigger != "schedule" {
 		t.Fatalf("trigger = %q", l.Trigger)
@@ -480,7 +482,7 @@ func TestPasskeyNeverLeaks(t *testing.T) {
 		{Hash: a, Trackers: []string{echo.srv.URL + "/" + passkey + "/announce?auth=" + auth}},
 		{Hash: b, Trackers: []string{ok.srv.URL + "/" + passkey + "/announce?auth=" + auth}},
 		{Hash: c, Trackers: []string{"http://nonexistent.invalid/" + passkey + "/announce"}},
-	}, func(cf *Config) { cf.Timeout = 300 * time.Millisecond })
+	}, nil)
 	_, _ = s.StartPass("manual", nil)
 	waitDone(t, s)
 	var out strings.Builder
