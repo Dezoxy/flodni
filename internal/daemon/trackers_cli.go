@@ -312,7 +312,8 @@ type auditEndpoint struct {
 // parse, has another scheme, no valid host or no port. The path, query, fragment and
 // userinfo are dropped before anything is built, so no passkey can reach the output.
 func trackerEndpointOf(tr string) string {
-	u, err := url.Parse(strings.TrimSpace(tr))
+	tr = strings.TrimSpace(tr)
+	u, err := url.Parse(tr)
 	if err != nil {
 		return ""
 	}

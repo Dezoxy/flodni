@@ -176,7 +176,7 @@ func TestCountsAreCapped(t *testing.T) {
 	f.answer = func(w http.ResponseWriter, r *http.Request, hs [][20]byte) {
 		_, _ = w.Write([]byte("d5:filesd20:" + string(a[:]) + "d8:completei2147483648e10:incompletei1ee20:" + string(b[:]) + "d8:completei2147483647e10:incompletei1eeee"))
 	}
-	got, _, e := HTTPScrape(t.Context(), newHTTPClient(time.Second, nil), f.srv.URL+"/scrape", [][20]byte{a, b}, 4096, "x")
+	got, _, e := HTTPScrape(t.Context(), newHTTPClient(time.Second, nil, false), f.srv.URL+"/scrape", [][20]byte{a, b}, 4096, "x")
 	if e != nil {
 		t.Fatal(e)
 	}

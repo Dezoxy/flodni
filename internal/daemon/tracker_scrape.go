@@ -133,15 +133,16 @@ func storedScrapeTargets(only *[20]byte) []trackscrape.Target {
 func startTrackerScraper(cfg *config.Config, source func(*[20]byte) []trackscrape.Target, ready func() bool,
 	net torr.ScrapeNet, stop <-chan struct{}, logger *slog.Logger) *trackscrape.Scraper {
 	s := trackscrape.New(trackscrape.Config{
-		Source:    source,
-		Ready:     ready,
-		Proxy:     net.Proxy,
-		NoUDP:     !net.UDP,
-		UserAgent: net.UserAgent,
-		Interval:  time.Duration(cfg.TrackerScrapeHours) * time.Hour,
-		Batch:     cfg.TrackerScrapeBatch,
-		Pace:      time.Duration(cfg.TrackerScrapePaceMs) * time.Millisecond,
-		Logf:      flog.Logf(logger),
+		Source:      source,
+		Ready:       ready,
+		Proxy:       net.Proxy,
+		NoUDP:       !net.UDP,
+		InsecureTLS: cfg.TrackerTLSInsecure,
+		UserAgent:   net.UserAgent,
+		Interval:    time.Duration(cfg.TrackerScrapeHours) * time.Hour,
+		Batch:       cfg.TrackerScrapeBatch,
+		Pace:        time.Duration(cfg.TrackerScrapePaceMs) * time.Millisecond,
+		Logf:        flog.Logf(logger),
 	})
 	trackerScraper.Store(s)
 	s.Start()

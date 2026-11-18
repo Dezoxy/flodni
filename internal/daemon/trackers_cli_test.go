@@ -687,6 +687,8 @@ func TestTrackersAuditEndpointsNeverLeakSecrets(t *testing.T) {
 		trkRecord{2, true, [][]string{{"https://user:" + userKey + "@tracker.example:443/announce"}, {"udp://u.example:6969/announce", "https://tracker.example/announce/" + pathKey + "#frag"}}},
 		trkRecord{3, false, [][]string{{"udp://u.example:1337/announce"}, {"http://plain.example:8080/announce"}, {"https://[2001:db8::1]/announce"}}},
 		trkRecord{4, false, [][]string{{"http://%zz/announce/" + pathKey}, {"not a url " + queryKey}}},
+		// padded with spaces: trimmed once, so it parses
+		trkRecord{5, false, [][]string{{"  https://padded.example/announce/" + pathKey + "  "}}},
 	)
 	code, out, errOut := runTrk("audit", "--state", dir)
 	if code != 0 {
@@ -726,7 +728,7 @@ func TestTrackersAuditEndpointsNeverLeakSecrets(t *testing.T) {
 	}
 	// private: record 1 and 2 both list https://tracker.example (a record counts once per endpoint)
 	wantPriv := []string{"http://plain.example:80=1", "https://tracker.example:443=2", "udp://u.example:6969=1"}
-	wantPub := []string{"http://plain.example:8080=1", "https://[2001:db8::1]:443=1", "udp://u.example:1337=1"}
+	wantPub := []string{"http://plain.example:8080=1", "https://[2001:db8::1]:443=1", "https://padded.example:443=1", "udp://u.example:1337=1"}
 	flat := func(es []struct {
 		Endpoint string
 		Records  int

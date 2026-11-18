@@ -95,13 +95,13 @@ func TestReportWarnsOncePerHostPerHourAndCounts(t *testing.T) {
 	err := get(&http.Client{}, srv.URL+"/announce/SECRETKEY?passkey=SECRETKEY")
 	hp := strings.TrimPrefix(srv.URL, "https://")
 
-	Report(hp, err)
-	Report(hp, err)
-	Report(hp, err)
+	Report(hp, "announce", err)
+	Report(hp, "announce", err)
+	Report(hp, "announce", err)
 	if len(*lines) != 1 {
 		t.Fatalf("%d warnings within the hour, want 1: %q", len(*lines), *lines)
 	}
-	if want := "[Tracker] TLS verify failed for " + hp + ": unknown authority"; (*lines)[0] != want {
+	if want := "[Tracker] TLS verify failed for " + hp + " (announce): unknown authority"; (*lines)[0] != want {
 		t.Fatalf("warning %q, want %q", (*lines)[0], want)
 	}
 	if strings.Contains((*lines)[0], "SECRETKEY") || strings.Contains((*lines)[0], "http") || strings.Contains((*lines)[0], "/") {
@@ -112,19 +112,25 @@ func TestReportWarnsOncePerHostPerHourAndCounts(t *testing.T) {
 	}
 
 	// another host is its own limit; the first again after an hour
-	Report("other.example:443", err)
+	Report("other.example:443", "announce", err)
 	if len(*lines) != 2 {
 		t.Fatalf("second host not logged: %q", *lines)
 	}
 	clock = clock.Add(time.Hour + time.Second)
-	Report(hp, err)
+	Report(hp, "announce", err)
 	if len(*lines) != 3 {
 		t.Fatalf("not logged again after an hour: %q", *lines)
 	}
 
+	// the scrape path is its own limit and says so
+	Report(hp, "scrape", err)
+	if len(*lines) != 4 || (*lines)[3] != "[Tracker] TLS verify failed for "+hp+" (scrape): unknown authority" {
+		t.Fatalf("scrape warning: %q", *lines)
+	}
+
 	// a failure that is not a certificate one counts and logs nothing
-	Report(hp, net.UnknownNetworkError("x"))
-	if len(*lines) != 3 {
+	Report(hp, "announce", net.UnknownNetworkError("x"))
+	if len(*lines) != 4 {
 		t.Fatalf("non-TLS error logged: %q", *lines)
 	}
 }

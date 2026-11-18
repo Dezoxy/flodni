@@ -226,7 +226,9 @@ func (bt *BTServer) configure(ctx context.Context) {
 	bt.config = torrent.NewDefaultClientConfig()
 	bt.config.RefillV2 = EngineRefillV2
 	bt.config.TrackerInsecureSkipVerify = TrackerTLSInsecure
-	bt.config.OnTrackerAnnounceError = tlsverify.Report
+	bt.config.OnTrackerAnnounceError = func(hostport string, err error) {
+		tlsverify.Report(hostport, "announce", err)
+	}
 
 	bt.storage = torrstor.NewStorage(settings.BTsets.CacheSize)
 	bt.config.DefaultStorage = bt.storage

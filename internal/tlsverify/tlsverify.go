@@ -68,8 +68,9 @@ func Classify(err error) (label, text string, ok bool) {
 }
 
 // Report counts err when it is a certificate failure of the tracker at hostport and warns
-// at most once an hour per hostport. Any other error is ignored.
-func Report(hostport string, err error) {
+// at most once an hour per hostport and path. via names the path that failed, "announce"
+// or "scrape". Any other error is ignored.
+func Report(hostport, via string, err error) {
 	label, text, ok := Classify(err)
 	if !ok {
 		return
@@ -81,17 +82,18 @@ func Report(hostport string, err error) {
 	}
 	mu.Lock()
 	t := now()
-	if last, seen := lastWarn[hostport]; seen && t.Sub(last) < warnEvery {
+	key := hostport + "|" + via
+	if last, seen := lastWarn[key]; seen && t.Sub(last) < warnEvery {
 		mu.Unlock()
 		return
 	}
 	if len(lastWarn) >= maxHosts {
 		lastWarn = map[string]time.Time{}
 	}
-	lastWarn[hostport] = t
+	lastWarn[key] = t
 	mu.Unlock()
 	if w := Warn; w != nil {
-		w("[Tracker] TLS verify failed for " + hostport + ": " + text)
+		w("[Tracker] TLS verify failed for " + hostport + " (" + via + "): " + text)
 	}
 }
 

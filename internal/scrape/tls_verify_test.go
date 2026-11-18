@@ -21,7 +21,7 @@ func TestHTTPScrapeReportsCertificateFailures(t *testing.T) {
 	defer func() { tlsverify.Warn = prev }()
 	before := tlsverify.Counts()["unknown_authority"]
 
-	_, _, e := HTTPScrape(context.Background(), newHTTPClient(0, nil), srv.URL+"/PASSKEYX/scrape?k=PASSKEYX", [][20]byte{{1}}, DefaultMaxBody, "ua")
+	_, _, e := HTTPScrape(context.Background(), newHTTPClient(0, nil, false), srv.URL+"/PASSKEYX/scrape?k=PASSKEYX", [][20]byte{{1}}, DefaultMaxBody, "ua")
 	if e == nil {
 		t.Fatal("scrape of a self-signed certificate succeeded")
 	}
@@ -29,10 +29,24 @@ func TestHTTPScrapeReportsCertificateFailures(t *testing.T) {
 		t.Fatalf("error leaks the URL: %q", e.Msg)
 	}
 	hp := strings.TrimPrefix(srv.URL, "https://")
-	if len(lines) != 1 || lines[0] != "[Tracker] TLS verify failed for "+hp+": unknown authority" {
+	if len(lines) != 1 || lines[0] != "[Tracker] TLS verify failed for "+hp+" (scrape): unknown authority" {
 		t.Fatalf("warnings %q", lines)
 	}
 	if got := tlsverify.Counts()["unknown_authority"]; got != before+1 {
 		t.Fatalf("counter %d, want %d", got, before+1)
+	}
+}
+
+// With the switch on the scrape client skips verification: the same self-signed tracker answers.
+func TestHTTPScrapeSkipsVerificationOnlyWhenAsked(t *testing.T) {
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Write([]byte("d5:filesdee"))
+	}))
+	defer srv.Close()
+	if _, _, e := HTTPScrape(context.Background(), newHTTPClient(0, nil, false), srv.URL+"/scrape", [][20]byte{{1}}, DefaultMaxBody, "ua"); e == nil {
+		t.Fatal("scrape of a self-signed certificate succeeded with verification on")
+	}
+	if _, _, e := HTTPScrape(context.Background(), newHTTPClient(0, nil, true), srv.URL+"/scrape", [][20]byte{{1}}, DefaultMaxBody, "ua"); e != nil {
+		t.Fatalf("scrape with the switch on: %v", e)
 	}
 }

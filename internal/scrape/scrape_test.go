@@ -41,7 +41,7 @@ func TestDeriveBEP48(t *testing.T) {
 func TestHTTPScrapeMultiHashAndPartialAnswer(t *testing.T) {
 	a, b, c := h20(1), h20(2), h20(3)
 	f := newFakeHTTP(t, map[[20]byte]Counts{a: {5, 7}, c: {0, 1}}) // b unknown: omitted
-	got, retry, e := HTTPScrape(context.Background(), newHTTPClient(2*time.Second, nil), f.srv.URL+"/scrape", [][20]byte{a, b, c}, DefaultMaxBody, "flodni")
+	got, retry, e := HTTPScrape(context.Background(), newHTTPClient(2*time.Second, nil, false), f.srv.URL+"/scrape", [][20]byte{a, b, c}, DefaultMaxBody, "flodni")
 	if e != nil {
 		t.Fatal(e)
 	}
@@ -86,7 +86,7 @@ func TestHTTPScrapeFailures(t *testing.T) {
 	for _, c := range cases {
 		f := newFakeHTTP(t, nil)
 		f.answer = c.answer
-		_, retry, e := HTTPScrape(context.Background(), newHTTPClient(2*time.Second, nil), f.srv.URL+"/scrape", [][20]byte{a}, 1024, "flodni")
+		_, retry, e := HTTPScrape(context.Background(), newHTTPClient(2*time.Second, nil, false), f.srv.URL+"/scrape", [][20]byte{a}, 1024, "flodni")
 		if e == nil || e.Msg != c.want {
 			t.Errorf("%s: err = %v, want %q", c.name, e, c.want)
 			continue
@@ -101,7 +101,7 @@ func TestHTTPScrapeFailures(t *testing.T) {
 func TestHTTPScrapeHangTimesOutWithoutURLInError(t *testing.T) {
 	f := newFakeHTTP(t, nil)
 	f.answer = func(w http.ResponseWriter, r *http.Request, _ [][20]byte) { time.Sleep(time.Second) }
-	_, _, e := HTTPScrape(context.Background(), newHTTPClient(100*time.Millisecond, nil), f.srv.URL+"/scrape", [][20]byte{h20(1)}, 1024, "flodni")
+	_, _, e := HTTPScrape(context.Background(), newHTTPClient(100*time.Millisecond, nil, false), f.srv.URL+"/scrape", [][20]byte{h20(1)}, 1024, "flodni")
 	if e == nil || e.Msg != "timeout" {
 		t.Fatalf("err = %v, want timeout", e)
 	}

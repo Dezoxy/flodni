@@ -1098,17 +1098,21 @@ URL.
 
 | Key in `config.json` | Default | Read | Effect |
 |---|---|---|---|
-| `tracker_tls_insecure` | `false` | once at start (a change needs a restart) | `true` skips certificate verification for the engine's announces to every `https` tracker. The tracker scrape (`/api/torrents/scrape`) always verifies. A start with it on logs `[Tracker] TLS certificate verification is OFF (tracker_tls_insecure)` at WARN. |
+| `tracker_tls_insecure` | `false` | once at start (a change needs a restart) | `true` skips certificate verification for announces and scrapes (`/api/torrents/scrape`) to every `https` tracker. It does not apply to `wss` (WebTorrent) trackers, which are always verified. A start with it on logs `[Tracker] TLS certificate verification is OFF (tracker_tls_insecure)` at WARN. |
 
 The trade-off: a tracker with a self-signed, expired or mismatched certificate
 stops announcing until the key is set, and the torrents that depend on it find
 no peers from that tracker. `http://` and `udp://` trackers are not affected;
 neither has a certificate to check. The switch is global; there is no
-per-tracker setting.
+per-tracker setting. An `http(s)` tracker redirect is followed only when it keeps
+the scheme and `host:port`, up to 3 hops; an https-to-http downgrade or another
+host is not followed, so the announce URL's query (it can carry a passkey) is
+never sent there, and the announce fails with the redirect's status.
 
 While verification is on, an announce or scrape that fails it logs
-`[Tracker] TLS verify failed for <host>:<port>: <reason>` at WARN, at most once
-an hour per `host:port`. The reason is `unknown authority`, `hostname mismatch`,
+`[Tracker] TLS verify failed for <host>:<port> (announce|scrape): <reason>` at
+WARN, at most once an hour per `host:port` and path. The reason is
+`unknown authority`, `hostname mismatch`,
 `expired` or `not yet valid` (a certificate error of another kind reads
 `other`); the line never carries the URL, path, query or passkey. Every failure
 also counts in `flodni_tracker_tls_verify_failures_total{reason}` (reasons
@@ -1118,6 +1122,8 @@ all present from 0, no host label). Pinned in
 `internal/anacrolix-torrent/tracker_tls_test.go` (the engine's announce),
 `internal/gostorm/torr/tracker_tls_test.go` (the client configuration) and
 `internal/config/opt_in_switches_test.go` (the key) and
+`internal/anacrolix-torrent/tracker/http/redirect_test.go` (the redirects),
+`internal/scrape/tls_verify_test.go` (the scrape client),
 `internal/tlsverify/tlsverify_test.go` (the warning, its rate limit and the
 counter).
 
