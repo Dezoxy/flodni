@@ -66,11 +66,17 @@ var masterDataSemaphore chan struct{}
 var startTime = time.Now()
 var metaCache *cache.LRUCache
 var raCache = readahead.New(readahead.Config{
-	Base:   func() int64 { return gc().ReadAheadBase },
-	Budget: func() int64 { return gc().ReadAheadBudget },
-	Logf:   func(format string, args ...any) { flog.Printf(logger, format, args...) },
-	Go:     safeGo,
+	Base:      func() int64 { return gc().ReadAheadBase },
+	Budget:    func() int64 { return gc().ReadAheadBudget },
+	Logf:      func(format string, args ...any) { flog.Printf(logger, format, args...) },
+	Go:        safeGo,
+	PlayerOff: raPlayerOff,
 })
+
+// raPlayerOff tells the read-ahead cache where a path's player is: the offset the pump
+// follows for the path (the larger when two primaries exist), found whenever a primary handle
+// exists: a player at offset 0 is a player.
+func raPlayerOff(path string) (int64, bool) { return primaryFollowOffsetFound(path) }
 
 // engineReadyBound is how long start-up waits for the engine before it goes on.
 const engineReadyBound = 60 * time.Second

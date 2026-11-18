@@ -163,13 +163,17 @@ func TestStrandedPumpReanchorsWhenTheShareShrinks(t *testing.T) {
 // B's pump writes evict A's oldest chunks, the ones just ahead of A's player. The pumps'
 // leads fit the budget together now, but the eviction order across streams is the cache's.
 func TestSecondStreamDoesNotEvictTheFirstStreamsLead(t *testing.T) {
-	t.Skip("cross-stream eviction: fixed by the raCache multi-stream PR")
 	useEngineReadPath(t) // budget 64 MiB, 4 MiB chunks
 	const chunk, size = 4 * mb, 4 * gb
 	a, b := engineHandle("/test/trans-a.mkv", size), engineHandle("/test/trans-b.mkv", size)
 	registerPump(t, a.path, true)
 	rd := &fakeReader{}
 	playerA, playerB := 100*mb, 100*mb
+	for _, h := range []*MkvHandle{a, b} { // two viewers: the cache knows where each player is
+		h.isPrimaryHandle.Store(true)
+		h.lastOff = 100 * mb
+	}
+	registerHandle(t, a, b)
 	offA, offB := playerA, playerB
 	for { // A alone, up to the single-stream lead
 		_, next := a.nativePumpChunk(rd, offA, chunk, playerA)
@@ -269,5 +273,49 @@ func TestLeadShareGauges(t *testing.T) {
 	if body := gauge(); !strings.Contains(body, "flodni_playing_pumps 2\n") ||
 		!strings.Contains(body, fmt.Sprintf("flodni_pump_lead_limit_bytes %d\n", 32*mb-3*4*mb)) {
 		t.Fatalf("two pumps: half the budget minus slack expected:\n%s", body)
+	}
+}
+
+// A primary handle at offset 0 (the first read, or an MP4 reading back from its moov) is a
+// player: the cache must not treat the path as having none and evict its first chunk.
+func TestRaPlayerOffFindsAPrimaryAtZero(t *testing.T) {
+	useEngineReadPath(t)
+	const path = "/test/player-at-zero.mkv"
+	if _, ok := raPlayerOff(path); ok {
+		t.Fatal("a path with no handle has no player")
+	}
+	h := engineHandle(path, 4*gb)
+	h.lastOff = 0
+	registerHandle(t, h)
+	if _, ok := raPlayerOff(path); ok {
+		t.Fatal("a handle that is not primary is not a player")
+	}
+	h.isPrimaryHandle.Store(true)
+	if off, ok := raPlayerOff(path); !ok || off != 0 {
+		t.Fatalf("primary at 0: got (%d, %v), want (0, true)", off, ok)
+	}
+	h.lastOff = 12 * mb
+	if off, ok := raPlayerOff(path); !ok || off != 12*mb {
+		t.Fatalf("primary at 12 MiB: got (%d, %v)", off, ok)
+	}
+}
+
+// With a primary at 0 and the cache over budget, chunk 0 stays; the farthest chunk goes.
+func TestPrimaryAtZeroKeepsChunkZeroOverBudget(t *testing.T) {
+	useEngineReadPath(t) // budget 64 MiB, 4 MiB chunks
+	const chunk, path = 4 * mb, "/test/player-at-zero-keep.mkv"
+	h := engineHandle(path, 4*gb)
+	h.lastOff = 0
+	h.isPrimaryHandle.Store(true)
+	registerHandle(t, h)
+	for i := int64(0); i < 16; i++ { // fills the budget exactly
+		raCache.Put(path, i*chunk, (i+1)*chunk-1, wantPattern(int(chunk), i*chunk))
+	}
+	raCache.Put(path, 16*chunk, 17*chunk-1, wantPattern(int(chunk), 16*chunk))
+	if !raCache.Exists(path, 0) {
+		t.Fatal("chunk 0 of a path with a primary at 0 was evicted")
+	}
+	if raCache.Exists(path, 15*chunk) {
+		t.Fatal("the farthest chunk other than the new one should have gone")
 	}
 }

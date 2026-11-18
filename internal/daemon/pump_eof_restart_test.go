@@ -104,10 +104,10 @@ func TestAPumpThatEndedAtTheEndOfTheFileIsStartedAgainByTheNextRead(t *testing.T
 
 	next := eofAt + 40*probeStep
 	b.read(next, probeStep) // the player is back
-	if !pumpRegistered(path) {
-		t.Fatal("no pump after the player's read: it ran on demand fetches until another handle opened")
-	}
+	// Its first read may be a cache hit (the cache keeps the chunks near a player now, it no
+	// longer drops the oldest written), which starts nothing; the first miss past them does.
 	b.readRange(next+probeStep, 8*probeStep, probeStep)
+	waitUntil(t, "a pump after the player's reads", func() bool { return pumpRegistered(path) })
 	sim.settle()
 	if got := sim.pumpTarget(); got < next || got > next+int64(gc().ReadAheadBudget)+8*mb {
 		t.Errorf("pump target = %d MiB, want it ahead of the player at %d MiB", got/mb, next/mb)

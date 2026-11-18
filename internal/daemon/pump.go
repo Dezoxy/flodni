@@ -608,17 +608,26 @@ var pumpEOFHook func()
 // primaryFollowOffset is where the primary handles of path are playing: the offset the pump
 // follows (the largest of them, 0 when there is none).
 func primaryFollowOffset(path string) int64 {
+	off, _ := primaryFollowOffsetFound(path)
+	return off
+}
+
+// primaryFollowOffsetFound is primaryFollowOffset plus whether a primary handle exists at all,
+// which 0 alone cannot tell from a player at the start of the file. Read only.
+func primaryFollowOffsetFound(path string) (int64, bool) {
 	var playerOff int64
+	found := false
 	app.activeHandles.Range(func(key, _ interface{}) bool {
 		handle := key.(*MkvHandle)
 		if handle.path == path && handle.isPrimaryHandle.Load() {
+			found = true
 			if off := handle.followOff(); off > playerOff {
 				playerOff = off
 			}
 		}
 		return true
 	})
-	return playerOff
+	return playerOff, found
 }
 
 // followOff is the offset the pump follows for this handle: its last read, except while a
@@ -808,9 +817,9 @@ func (h *MkvHandle) leadStreams() int64 {
 	return n + 1
 }
 
-// leadBudget is one stream's share of the global read-ahead budget. The cache evicts oldest
-// written first, so streams that each lead by the whole budget evict each other's chunks just
-// ahead of the player. One stream (or none) keeps the whole budget, exactly as before.
+// leadBudget is one stream's share of the global read-ahead budget. The cache evicts the
+// chunk farthest ahead of the path holding the most bytes, so streams that each lead by the
+// whole budget still evict each other's far chunks. One stream (or none) keeps the whole budget, exactly as before.
 func leadBudget(budget, streams int64) int64 {
 	if streams <= 1 || budget <= 0 {
 		return budget
