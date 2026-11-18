@@ -392,6 +392,7 @@ func collectReadAheadProm(w *promtext.Writer) {
 	w.Gauge("flodni_pump_lead_limit_bytes",
 		"How far one pump may read ahead of its player: its share of read_ahead_budget_mb (the budget divided by the live pumps, minus a few chunks of slack), for a chunk of read_ahead_base.",
 		promSample(lead))
+	collectPaceProm(w)
 }
 
 // openSessionCount counts the sessions /api/sessions lists as open, without building
