@@ -56,6 +56,13 @@ func runProbeScenario(t *testing.T, path string, probeFrom, probeLen int64) *pro
 
 	run.a = sim.open("A")
 	sim.settle() // the pump fills its lead past A
+	// settle only sees that the pump made no read for a while; under load its first fill can
+	// still be pending, and A's first read would then miss the cache and fetch at probeAt.
+	// A's baseline starts once everything A reads (the baseline, the reads during B's probe
+	// and the last one) is in the read-ahead cache.
+	waitUntil(t, "the pump to cache the region A reads", func() bool {
+		return cachedAcross(path, probeAt, probeAt+48*probeStep-1)
+	})
 	run.a.readRange(probeAt, 40*probeStep, probeStep)
 	run.aLastBeforeB = probeAt + 39*probeStep
 	sim.idle()
