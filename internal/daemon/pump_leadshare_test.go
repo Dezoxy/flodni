@@ -1,10 +1,12 @@
 package daemon
 
 import (
+	"context"
 	"flodni/internal/promtext"
 	"fmt"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestLeadBudget(t *testing.T) {
@@ -57,20 +59,149 @@ func TestStreamLeadLimit(t *testing.T) {
 	}
 }
 
-func TestLivePumpCount(t *testing.T) {
+// registerPump registers a pump for path; playing marks the path as a confirmed playback.
+func registerPump(t *testing.T, path string, playing bool) {
+	t.Helper()
+	app.activePumps.Store(path, &NativePumpState{path: path})
+	t.Cleanup(func() { app.activePumps.Delete(path) })
+	if playing {
+		app.playbackRegistry.Store(path, &PlaybackState{Path: path, IsHealthy: true})
+		t.Cleanup(func() { app.playbackRegistry.Delete(path) })
+	}
+}
+
+func TestPlayingPumpCount(t *testing.T) {
 	newTestApp(t)
-	if n := livePumpCount(); n != 0 {
+	if n := playingPumpCount(); n != 0 {
 		t.Fatalf("empty registry: %d", n)
 	}
-	t.Cleanup(func() { app.activePumps.Delete("/a"); app.activePumps.Delete("/b") })
-	app.activePumps.Store("/a", &NativePumpState{})
-	app.activePumps.Store("/b", &NativePumpState{})
-	if n := livePumpCount(); n != 2 {
-		t.Fatalf("two pumps: %d", n)
+	registerPump(t, "/a", true)
+	registerPump(t, "/b", true)
+	for i := 0; i < 5; i++ {
+		registerPump(t, fmt.Sprintf("/scan%d", i), false) // scan, paused or grace pumps
+	}
+	if n := playingPumpCount(); n != 2 {
+		t.Fatalf("two playing pumps and five others: %d", n)
 	}
 	app.activePumps.Delete("/a")
-	if n := livePumpCount(); n != 1 {
-		t.Fatalf("one pump: %d", n)
+	if n := playingPumpCount(); n != 1 {
+		t.Fatalf("one playing pump: %d", n)
+	}
+}
+
+// One viewer plus scan pumps: the viewer's lead is the single-stream lead; two viewers halve it.
+func TestScanPumpsDoNotShrinkAViewersLead(t *testing.T) {
+	useEngineReadPath(t) // budget 64 MiB, 4 MiB chunks
+	const chunk = 4 * mb
+	viewer := engineHandle("/test/viewer-1.mkv", 4*gb)
+	registerPump(t, viewer.path, true)
+	scans := make([]*MkvHandle, 5)
+	for i := range scans {
+		scans[i] = engineHandle(fmt.Sprintf("/test/scan-%d.mkv", i), 4*gb)
+		registerPump(t, scans[i].path, false)
+	}
+	if n := viewer.leadStreams(); n != 1 {
+		t.Fatalf("viewer divisor with five scan pumps = %d, want 1", n)
+	}
+	if n := scans[0].leadStreams(); n != 2 {
+		t.Fatalf("a scan pump's own divisor = %d, want playing+1 = 2", n)
+	}
+	// The viewer may lead by the single-stream limit: a chunk that far ahead is read.
+	single := pumpLeadLimit(gc().ReadAheadBudget, chunk)
+	rd := &fakeReader{}
+	player := 100 * mb
+	if _, next := viewer.nativePumpChunk(rd, player+single/chunk*chunk, chunk, player); len(rd.readCalls()) != 1 || next == player+single/chunk*chunk {
+		t.Fatalf("the viewer's pump was held back at its single-stream lead (reads %d)", len(rd.readCalls()))
+	}
+	registerPump(t, "/test/viewer-2.mkv", true)
+	if n := viewer.leadStreams(); n != 2 {
+		t.Fatalf("two viewers: divisor %d, want 2", n)
+	}
+	if got, want := streamLeadLimit(gc().ReadAheadBudget, viewer.leadStreams(), chunk), gc().ReadAheadBudget/2-3*chunk; got != want {
+		t.Fatalf("two viewers: lead %d, want %d", got, want)
+	}
+	if n := viewer.leadStreams(); n != 2 {
+		t.Fatalf("divisor %d", n)
+	}
+}
+
+// A pump parked a budget ahead of its player while it ran alone must rejoin the player once a
+// second stream shrinks its share: stranded means more than twice the share ahead.
+func TestStrandedPumpReanchorsWhenTheShareShrinks(t *testing.T) {
+	useEngineReadPath(t) // budget 64 MiB, 4 MiB chunks
+	const chunk, size = 4 * mb, 4 * gb
+	const path = "/test/share-strand.mkv"
+	player := 100 * mb
+	h, ps := pumpHandle(path, size)
+	h.lastActivityTime = time.Now()
+	registerPump(t, path, true)
+	registerPump(t, "/test/share-strand-other.mkv", true)
+	primary := engineHandle(path, size)
+	primary.isPrimaryHandle.Store(true)
+	primary.lastOff = player
+	registerHandle(t, primary)
+	limit := gc().ReadAheadBudget/2 - 3*chunk // two playing streams
+	// The chunks the pump will walk over are cached already: it must not fetch them.
+	for o := player; o <= player+limit; o += chunk {
+		raCache.Put(path, o, o+chunk-1, wantPattern(int(chunk), o))
+	}
+	rd := &fakeReader{}
+	takeSlot(h)
+	ctx, cancel := context.WithTimeout(context.Background(), 700*time.Millisecond)
+	defer cancel()
+	// Parked just past the budget ahead: within 2x the budget, beyond 2x the two-stream share.
+	h.nativePump(ctx, rd, player+gc().ReadAheadBudget+chunk, ps)
+	if off := ps.pumpOff.Load(); off < player || off > player+limit+chunk {
+		t.Fatalf("pump offset %d MiB is not back at the player (%d MiB) within its share", off/mb, player/mb)
+	}
+	if n := len(rd.readCalls()); n != 0 {
+		t.Fatalf("the re-anchored pump fetched %d cached chunks: %+v", n, rd.readCalls())
+	}
+}
+
+// The transition: A ran alone and filled the cache to the single-stream lead; B starts.
+// B's pump writes evict A's oldest chunks, the ones just ahead of A's player. The pumps'
+// leads fit the budget together now, but the eviction order across streams is the cache's.
+func TestSecondStreamDoesNotEvictTheFirstStreamsLead(t *testing.T) {
+	t.Skip("cross-stream eviction: fixed by the raCache multi-stream PR")
+	useEngineReadPath(t) // budget 64 MiB, 4 MiB chunks
+	const chunk, size = 4 * mb, 4 * gb
+	a, b := engineHandle("/test/trans-a.mkv", size), engineHandle("/test/trans-b.mkv", size)
+	registerPump(t, a.path, true)
+	rd := &fakeReader{}
+	playerA, playerB := 100*mb, 100*mb
+	offA, offB := playerA, playerB
+	for { // A alone, up to the single-stream lead
+		_, next := a.nativePumpChunk(rd, offA, chunk, playerA)
+		if next == offA {
+			break
+		}
+		offA = next
+	}
+	registerPump(t, b.path, true)
+	for {
+		_, next := b.nativePumpChunk(rd, offB, chunk, playerB)
+		if next == offB {
+			break
+		}
+		offB = next
+	}
+	window := gc().ReadAheadBudget/2 - 4*chunk
+	if !cachedAcross(a.path, playerA, playerA+window-1) {
+		t.Fatalf("stream A lost chunks within %d bytes ahead of its player", window)
+	}
+}
+
+func TestNativePumpWithNoReaderLeavesNoZombieEntry(t *testing.T) {
+	useEngineReadPath(t)
+	const path = "/test/nil-reader-zombie.mkv"
+	h, ps := pumpHandle(path, 10*mb)
+	takeSlot(h)
+	app.activePumps.Store(path, ps)
+	t.Cleanup(func() { app.activePumps.Delete(path) })
+	h.nativePump(context.Background(), nil, 0, ps)
+	if _, ok := app.activePumps.Load(path); ok {
+		t.Error("a pump that never started must not stay registered")
 	}
 }
 
@@ -88,8 +219,7 @@ func TestConcurrentPumpsKeepTheirShareAhead(t *testing.T) {
 	rd := &fakeReader{}
 	for i, p := range paths {
 		handles[i] = engineHandle(p, size)
-		app.activePumps.Store(p, &NativePumpState{path: p})
-		t.Cleanup(func() { app.activePumps.Delete(p) })
+		registerPump(t, p, true)
 		player[i] = 100 * mb
 		pumpOff[i] = player[i]
 	}
@@ -124,19 +254,19 @@ func TestConcurrentPumpsKeepTheirShareAhead(t *testing.T) {
 
 func TestLeadShareGauges(t *testing.T) {
 	useEngineReadPath(t) // budget 64 MiB, base 4 MiB
-	t.Cleanup(func() { app.activePumps.Delete("/g1"); app.activePumps.Delete("/g2") })
 	gauge := func() string {
 		var w promtext.Writer
 		collectReadAheadProm(&w)
 		return string(w.Bytes())
 	}
-	if body := gauge(); !strings.Contains(body, "flodni_active_pumps 0\n") ||
+	if body := gauge(); !strings.Contains(body, "flodni_playing_pumps 0\n") ||
 		!strings.Contains(body, fmt.Sprintf("flodni_pump_lead_limit_bytes %d\n", 64*mb-3*4*mb)) {
 		t.Fatalf("no pump: single-stream limit expected:\n%s", body)
 	}
-	app.activePumps.Store("/g1", &NativePumpState{})
-	app.activePumps.Store("/g2", &NativePumpState{})
-	if body := gauge(); !strings.Contains(body, "flodni_active_pumps 2\n") ||
+	registerPump(t, "/g1", true)
+	registerPump(t, "/g2", true)
+	registerPump(t, "/g3", false) // not playing: not counted
+	if body := gauge(); !strings.Contains(body, "flodni_playing_pumps 2\n") ||
 		!strings.Contains(body, fmt.Sprintf("flodni_pump_lead_limit_bytes %d\n", 32*mb-3*4*mb)) {
 		t.Fatalf("two pumps: half the budget minus slack expected:\n%s", body)
 	}
