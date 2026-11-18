@@ -17,7 +17,7 @@ const (
 	probeSize  = 1000 * mb
 	probeAt    = 400 * mb // 40%
 	probeStep  = 256 * 1024
-	probeFetch = 100 * time.Millisecond // engine fetch latency; a cache hit is far below half of it
+	probeFetch = 100 * time.Millisecond // engine fetch latency
 )
 
 type probeRun struct {
@@ -25,7 +25,7 @@ type probeRun struct {
 	a   *simHandle
 	b   *simHandle
 
-	aBaseline        time.Duration // slowest A read before B opened
+	aBaselineFetches int // engine fetches A's reads made before B opened
 	aLastBeforeB     int64
 	pumpReadsBeforeB int
 	fetchesBeforeB   int
@@ -57,7 +57,7 @@ func runProbeScenario(t *testing.T, path string, probeFrom, probeLen int64) *pro
 	sim.settle() // the pump fills its lead past A
 	run.a.readRange(probeAt, 40*probeStep, probeStep)
 	for _, r := range run.a.served() {
-		run.aBaseline = max(run.aBaseline, r.took)
+		run.aBaselineFetches += r.fetched
 	}
 	run.aLastBeforeB = probeAt + 39*probeStep
 	run.fetchesBeforeB = len(sim.demandFetches())
@@ -106,8 +106,8 @@ func checkProbeProperties(t *testing.T, run *probeRun) {
 	budget := int64(gc().ReadAheadBudget)
 	chunk := int64(4 * mb)
 
-	if run.aBaseline >= probeFetch/2 {
-		t.Fatalf("the baseline is not a cache hit (%v): the scenario is not set up", run.aBaseline)
+	if run.aBaselineFetches != 0 {
+		t.Fatalf("A's baseline reads made %d engine fetches: the scenario is not set up", run.aBaselineFetches)
 	}
 	if run.aLastBeforeB != probeAt+39*probeStep || sim.primaryOwner() == "" {
 		t.Fatal("the scenario is not set up")
@@ -143,10 +143,10 @@ func checkProbeProperties(t *testing.T, run *probeRun) {
 			}
 		}
 	})
-	sub("A's next read is as fast as before", func(t *testing.T) {
+	sub("A's reads cause no engine fetch after B started", func(t *testing.T) {
 		for _, r := range run.aAfterProbe {
-			if r.took >= probeFetch/2 {
-				t.Errorf("A's read at %d MiB took %v after B started, baseline %v", r.off/mb, r.took, run.aBaseline)
+			if r.fetched != 0 {
+				t.Errorf("A's read at %d MiB made %d engine fetches after B started, baseline %d", r.off/mb, r.fetched, run.aBaselineFetches)
 			}
 		}
 	})

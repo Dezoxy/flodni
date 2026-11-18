@@ -27,9 +27,9 @@ type pumpSim struct {
 }
 
 type simRead struct {
-	off  int64
-	n    int
-	took time.Duration
+	off     int64
+	n       int
+	fetched int // engine fetches this read caused; the pump's reads are not counted
 }
 
 type simHandle struct {
@@ -151,9 +151,9 @@ func (s *pumpSim) open(name string) *simHandle {
 // read serves one FUSE read through MkvHandle.Read, checks the bytes and records the call.
 func (sh *simHandle) read(off int64, n int) simRead {
 	sh.sim.t.Helper()
-	start := time.Now()
+	before := len(sh.sim.demandFetches())
 	res, errno := sh.h.Read(context.Background(), make([]byte, n), off)
-	took := time.Since(start)
+	fetched := len(sh.sim.demandFetches()) - before
 	if errno != 0 || res == nil {
 		sh.sim.t.Fatalf("%s: Read(%d, %d) = (%v, %v)", sh.name, n, off, res, errno)
 	}
@@ -161,7 +161,7 @@ func (sh *simHandle) read(off int64, n int) simRead {
 	if !bytes.Equal(got, wantPattern(n, off)) {
 		sh.sim.t.Fatalf("%s: Read(%d, %d) returned the wrong bytes", sh.name, n, off)
 	}
-	r := simRead{off: off, n: n, took: took}
+	r := simRead{off: off, n: n, fetched: fetched}
 	sh.mu.Lock()
 	sh.reads = append(sh.reads, r)
 	sh.mu.Unlock()

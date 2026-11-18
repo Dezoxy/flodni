@@ -56,7 +56,7 @@ func (s *Storage) OpenTorrent(info *metainfo.Info, infoHash metainfo.Hash) (ts.T
 
 	return ts.TorrentImpl{
 		Piece:    ch.Piece,
-		Close:    ch.Close,
+		Close:    ch.closeNoWait, // see Cache.Close
 		Capacity: &capFunc,
 	}, nil
 }

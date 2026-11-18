@@ -106,14 +106,22 @@ type Cache struct {
 	wakePending bool
 
 	// bg counts the goroutines this cache starts (the cleaner loop and the cleanups that follow
-	// a reader closing) so a test can wait for them. Close does not wait: it holds muReaders,
-	// which they take.
-	bg sync.WaitGroup
+	// a reader closing). Close joins them after it unlocks muReaders, which they take.
+	// bgMu orders every Add before that Wait: once Close has set bgClosed, goBG starts nothing.
+	bg       sync.WaitGroup
+	bgMu     sync.Mutex
+	bgClosed bool
 }
 
-// goBG is safeGo for a goroutine bg tracks.
+// goBG is safeGo for a goroutine bg tracks. It starts nothing on a closed cache.
 func (c *Cache) goBG(fn func()) {
+	c.bgMu.Lock()
+	if c.bgClosed {
+		c.bgMu.Unlock()
+		return
+	}
 	c.bg.Add(1)
+	c.bgMu.Unlock()
 	safeGo(func() {
 		defer c.bg.Done()
 		fn()
@@ -253,7 +261,24 @@ func (c *Cache) Piece(m metainfo.Piece) storage.PieceImpl {
 	return &PieceFake{}
 }
 
+// Close releases the cache and returns once its background goroutines (cleaner, post-reader
+// cleanups) have finished. A repeated Close joins them too.
+//
+// Those goroutines take the engine's client lock, so Close must not run under anything the
+// client lock's holders can wait for. The engine's own storage-close hook, which runs under the
+// torrent's storage write lock (a piece hash start holds the client lock while it waits for
+// that lock), is closeNoWait for that reason.
 func (c *Cache) Close() error {
+	_ = c.closeNoWait()
+	c.bg.Wait()
+	return nil
+}
+
+// closeNoWait is Close without the join.
+func (c *Cache) closeNoWait() error {
+	c.bgMu.Lock()
+	c.bgClosed = true
+	c.bgMu.Unlock()
 	c.muReaders.Lock()
 	if c.isClosed.Load() {
 		c.muReaders.Unlock()
