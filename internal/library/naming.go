@@ -144,9 +144,12 @@ func SanitizeShowName(name string) string {
 	return clean
 }
 
+// ShowFolderName is the show's directory. The year is the first air date's, and only four
+// ASCII digits are a year: anything else is dropped, as in BuildMovieFilename, so the date
+// cannot put a separator or ".." into the path.
 func ShowFolderName(showName, firstAirDate string) string {
 	clean := SanitizeShowName(showName)
-	if len(firstAirDate) >= 4 {
+	if len(firstAirDate) >= 4 && isASCIIDigits(firstAirDate[:4]) {
 		return fmt.Sprintf("%s (%s)", clean, firstAirDate[:4])
 	}
 	return clean

@@ -50,6 +50,22 @@ docker build -f docker/Dockerfile -t flodni:dev .
 `FLODNI_TEST_SESSION_IDLE_CLOSE` and `FLODNI_TEST_SESSION_TICK` exist for that
 test only; they are not configuration.
 
+## Releases
+
+A release is a git tag `vYYYY.M.N`: the year, the month with no leading zero,
+and the count of releases in that month from 0 (`v2026.11.0`, `v2026.11.1`,
+`v2026.12.0`). A tag publishes the image `ghcr.io/dezoxy/flodni` with the same
+tag. Tags are never moved or deleted.
+
+The number says when a build was made, not whether an upgrade breaks. Every
+release's notes carry a `Breaking:` line (`Breaking: none` when nothing
+does), and this README gains an upgrade section when an upgrade needs steps. Do
+not automerge Flodni updates on the strength of a patch or minor bump.
+
+Versions up to `v0.3.12` were semver; `v2026.11.0` is the first calendar
+version and sorts above them. The reasons are in
+[ADR 0006](docs/architecture/decisions/0006-calendar-versioning.md).
+
 ## Running
 
 The image mounts the FUSE view at `/mnt/flodni-virtual`, reads library
@@ -310,6 +326,12 @@ mode) and only the control port reads the cookie, never the engine's.
   same-origin`. `Strict-Transport-Security: max-age=31536000` is added only when the
   request is known to be https: it came over TLS, the first `X-Forwarded-Proto` is
   `https`, or `auth_panel_https` is true. The engine port is unchanged.
+- File bytes the engine streams (`/stream`, `/play`) come from the swarm, so a browser
+  never renders them. Only video and audio, chosen by file extension from a fixed table
+  (playlists such as `.m3u` are not in it), keep their real type. Everything else,
+  images and SVG included, is `application/octet-stream` with
+  `Content-Disposition: attachment`, and every streamed response carries
+  `X-Content-Type-Options: nosniff` and `Content-Security-Policy: sandbox`.
 
 #### Upgrading from v0.2.x to v0.3.0
 
@@ -1887,6 +1909,10 @@ renamed and its registry row is never re-keyed, and stubs are found by the
   `Dune (2021)`) is part of the title and is not read as a second year. A title
   with no ASCII letter or digit is named with the first eight hash characters
   instead of an empty base with a leading underscore.
+- **Dates.** `release_date` and `first_air_date` are empty or `YYYY` or
+  `YYYY-MM-DD` in ASCII digits; anything else is a 400 that names the field. The
+  year in a name (a movie stub, a show folder such as `Name (2013)`) is those four
+  digits and nothing else, so a date can never put a separator or `..` into a path.
 - **Episode key.** The registry key folds Latin letters with diacritics to
   their base letters (`Élite` gives `elite_s01e01`; before, the accented letter
   vanished and `Lite` shared the key). A show whose rows were registered under

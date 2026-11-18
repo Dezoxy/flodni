@@ -46,6 +46,10 @@ var replacementReadTimeout = 60 * time.Second
 
 var reInfoHash = regexp.MustCompile(`^[a-f0-9]{40}$|^[a-z2-7]{32}$`)
 
+// reDate is the one date shape a request may carry: a year or a full date, ASCII digits
+// only. Its year ends up in a folder or file name.
+var reDate = regexp.MustCompile(`^\d{4}(-\d{2}-\d{2})?$`)
+
 // EpisodeRegistry is the subset of the state DB the manager writes to. A TV stub that
 // is not registered is deleted by the next TV sync as orphaned, so this is required for
 // TV adds.
@@ -645,6 +649,13 @@ func (m *Manager) validate(req *AddRequest) (string, string, error) {
 	req.Title = strings.TrimSpace(req.Title)
 	if req.Title == "" {
 		return "", "", errf(http.StatusBadRequest, "title is required")
+	}
+	for _, d := range [...]struct{ field, value string }{
+		{"release_date", req.ReleaseDate}, {"first_air_date", req.FirstAirDate},
+	} {
+		if d.value != "" && !reDate.MatchString(d.value) {
+			return "", "", errf(http.StatusBadRequest, "%s %q is not a date: use YYYY or YYYY-MM-DD", d.field, d.value)
+		}
 	}
 	if req.ReleaseTitle == "" {
 		req.ReleaseTitle = req.Title

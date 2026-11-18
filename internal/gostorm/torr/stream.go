@@ -6,13 +6,18 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"io"
 	"log"
+	"mime"
 	"net"
 	"net/http"
+	"path"
 	"strconv"
 	"strings"
 	"sync/atomic"
 	"time"
+	"unicode"
+	"unicode/utf8"
 
 	"github.com/anacrolix/missinggo/v2/httptoo"
 	"github.com/anacrolix/torrent"
@@ -51,6 +56,46 @@ type ctxReader struct {
 
 func (r *ctxReader) Read(p []byte) (int, error) {
 	return r.Reader.ReadContext(r.ctx, p)
+}
+
+// serveFileContent serves torrent file bytes. The file name and the bytes come from the
+// swarm, so nothing here may be rendered by a browser on the engine's origin: only video and
+// audio keep their real type, everything else (images and SVG included) is an opaque
+// download, and nosniff plus a sandbox CSP stop a mislabelled file from running anyway.
+func serveFileContent(resp http.ResponseWriter, req *http.Request, filePath string, modTime time.Time, content io.ReadSeeker) {
+	h := resp.Header()
+	h.Set("X-Content-Type-Options", "nosniff")
+	h.Set("Content-Security-Policy", "sandbox")
+	if m, ok := mt.StreamType(filePath); ok {
+		h.Set("Content-Type", m)
+	} else {
+		h.Set("Content-Type", "application/octet-stream")
+		h.Set("Content-Disposition", attachmentDisposition(filePath))
+	}
+	http.ServeContent(resp, req, filePath, modTime, content)
+}
+
+// attachmentDisposition builds a Content-Disposition from the last path element: control
+// characters are dropped, the length is capped, and mime.FormatMediaType quotes or encodes
+// the rest. It never fails; an unusable name gives a bare "attachment".
+func attachmentDisposition(filePath string) string {
+	name := path.Base(strings.ReplaceAll(filePath, "\\", "/"))
+	name = strings.Map(func(r rune) rune {
+		if unicode.IsControl(r) || r == utf8.RuneError {
+			return -1
+		}
+		return r
+	}, name)
+	if len(name) > 200 {
+		name = strings.ToValidUTF8(name[:200], "")
+	}
+	if name == "" || name == "." || name == ".." || name == "/" {
+		return "attachment"
+	}
+	if d := mime.FormatMediaType("attachment", map[string]string{"filename": name}); d != "" {
+		return d
+	}
+	return "attachment"
 }
 
 func (t *Torrent) Stream(fileID int, req *http.Request, resp http.ResponseWriter) error {
@@ -149,11 +194,6 @@ func (t *Torrent) Stream(fileID int, req *http.Request, resp http.ResponseWriter
 	resp.Header().Set("ETag", httptoo.EncodeQuotedString(etag))
 	// DLNA headers
 	resp.Header().Set("transferMode.dlna.org", "Streaming")
-	// add MimeType
-	mime, err := mt.MimeTypeByPath(file.Path())
-	if err == nil && mime.IsMedia() {
-		resp.Header().Set("content-type", mime.String())
-	}
 	// DLNA Seek (hardcoded to drop anacrolix/dms dependency)
 	if req.Header.Get("getContentFeatures.dlna.org") != "" {
 		resp.Header().Set("contentFeatures.dlna.org",
@@ -177,7 +217,7 @@ func (t *Torrent) Stream(fileID int, req *http.Request, resp http.ResponseWriter
 		ResponseWriter: resp,
 		ctx:            ctx,
 	}
-	http.ServeContent(wrappedResp, req, file.Path(), time.Unix(t.Timestamp, 0),
+	serveFileContent(wrappedResp, req, file.Path(), time.Unix(t.Timestamp, 0),
 		streamContent(&ctxReader{Reader: reader, ctx: ctx}, req.Header.Get("Range")))
 
 	if sets.BTsets.EnableDebug {

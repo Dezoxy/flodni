@@ -108,8 +108,10 @@ A change that violates one is wrong even if it works.
   push that never reached the pull request cannot be merged by mistake.
   `gh pr merge` is not on the `ask` list for that reason; the ruleset
   still blocks any merge with a failing or missing check.
-- **Releases** are `v*` tags. A tag publishes `ghcr.io/dezoxy/flodni` by
-  digest with provenance; tags are never moved or deleted.
+- **Releases** are `vYYYY.M.N` tags (ADR 0006; `v0.3.12` was the last
+  semver tag, and each release's notes carry a `Breaking:` line). A tag
+  publishes `ghcr.io/dezoxy/flodni` by digest with provenance; tags are never
+  moved or deleted.
 - **Version pins:** Renovate (`.github/renovate.json5`, run by the Mend
   Renovate app) updates Go modules, GitHub Actions, the Docker base images,
   the CI job container, the image and errcheck pins in the `Makefile` and
