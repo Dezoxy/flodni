@@ -81,6 +81,9 @@ type Config struct {
 	// NoUDP skips UDP trackers even without Proxy (the engine's proxy mode may leave
 	// its HTTP requests direct while a proxy is still configured).
 	NoUDP bool
+	// InsecureTLS skips verification of an https tracker's certificate (tracker_tls_insecure).
+	// Off by default.
+	InsecureTLS bool
 	// UserAgent is sent with HTTP scrapes (default "flodni"; the daemon passes the
 	// engine's).
 	UserAgent string
@@ -197,7 +200,7 @@ func New(cfg Config) *Scraper {
 		hosts:   map[string]*hostState{},
 		ctx:     ctx,
 		cancel:  cancel,
-		client:  newHTTPClient(cfg.Timeout, cfg.Proxy),
+		client:  newHTTPClient(cfg.Timeout, cfg.Proxy, cfg.InsecureTLS),
 	}
 }
 

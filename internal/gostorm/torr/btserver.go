@@ -23,6 +23,7 @@ import (
 	"flodni/internal/gostorm/torr/utils"
 	"flodni/internal/gostorm/version"
 	"flodni/internal/redact"
+	"flodni/internal/tlsverify"
 )
 
 type BTServer struct {
@@ -46,6 +47,12 @@ type BTServer struct {
 // daemon sets it once at start from engine_refill_v2, before the engine builds its client; it is
 // not read again. False is the engine's behaviour without the changes.
 var EngineRefillV2 bool
+
+// TrackerTLSInsecure turns off certificate verification for https trackers
+// (ClientConfig.TrackerInsecureSkipVerify). The daemon sets it once at start from
+// tracker_tls_insecure, before the engine builds its client; it is not read again.
+// False, the default, verifies.
+var TrackerTLSInsecure bool
 
 var privateIPBlocks []*net.IPNet
 
@@ -218,6 +225,10 @@ const trackerUserAgent = "qBittorrent/5.0.3"
 func (bt *BTServer) configure(ctx context.Context) {
 	bt.config = torrent.NewDefaultClientConfig()
 	bt.config.RefillV2 = EngineRefillV2
+	bt.config.TrackerInsecureSkipVerify = TrackerTLSInsecure
+	bt.config.OnTrackerAnnounceError = func(hostport string, err error) {
+		tlsverify.Report(hostport, "announce", err)
+	}
 
 	bt.storage = torrstor.NewStorage(settings.BTsets.CacheSize)
 	bt.config.DefaultStorage = bt.storage

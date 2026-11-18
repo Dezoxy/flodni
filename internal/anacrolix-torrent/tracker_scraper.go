@@ -371,6 +371,7 @@ func (me *trackerScraper) announce(ctx context.Context, event tracker.AnnounceEv
 		Request:             req,
 		HostHeader:          me.u.Host,
 		ServerName:          me.u.Hostname(),
+		InsecureSkipVerify:  me.t.cl.config.TrackerInsecureSkipVerify,
 		UdpNetwork:          me.u.Scheme,
 		ClientIp4:           krpc.NodeAddr{IP: me.t.cl.config.PublicIp4},
 		ClientIp6:           krpc.NodeAddr{IP: me.t.cl.config.PublicIp6},
@@ -378,6 +379,9 @@ func (me *trackerScraper) announce(ctx context.Context, event tracker.AnnounceEv
 	}.Do()
 	me.t.logger.WithDefaultLevel(log.Debug).Printf("announce to %q returned %#v: %v", me.u.String(), res, err)
 	if err != nil {
+		if cb := me.t.cl.config.OnTrackerAnnounceError; cb != nil {
+			cb(trackerHostPort(me.u), err)
+		}
 		ret.Err = fmt.Errorf("announcing: %w", err)
 		return
 	}
@@ -509,4 +513,19 @@ func (me *trackerScraper) announceStopped() {
 	ctx, cancel := context.WithTimeout(context.Background(), tracker.DefaultTrackerAnnounceTimeout)
 	defer cancel()
 	me.announce(ctx, tracker.Stopped)
+}
+
+// trackerHostPort is host:port of a tracker URL with the scheme's default port filled in, and
+// nothing else of the URL.
+func trackerHostPort(u url.URL) string {
+	port := u.Port()
+	if port == "" {
+		switch u.Scheme {
+		case "https", "wss":
+			port = "443"
+		default:
+			port = "80"
+		}
+	}
+	return net.JoinHostPort(u.Hostname(), port)
 }

@@ -16,6 +16,7 @@ import (
 	"flodni/internal/gostorm/torr/storage/torrstor"
 	"flodni/internal/promtext"
 	"flodni/internal/readahead"
+	"flodni/internal/tlsverify"
 	"flodni/internal/warmup"
 )
 
@@ -415,6 +416,13 @@ func collectEngineReadsProm(w *promtext.Writer) {
 	w.Counter("flodni_engine_peer_redials_total",
 		"Peers the opt-in redial (redial_dropped_peer) added back to a private torrent after its only connected peer dropped. 0 with the switch off.",
 		promSample(torr.RedialCount()))
+	tlsFails := tlsverify.Counts()
+	w.Counter("flodni_tracker_tls_verify_failures_total",
+		"Announces and scrapes to an https tracker that failed certificate verification, by reason: unknown_authority, hostname (the certificate's names do not cover the host), expired (also not yet valid) or other. No host label. 0 from start; see Tracker TLS.",
+		promSample(tlsFails["unknown_authority"], lbl("reason", "unknown_authority")),
+		promSample(tlsFails["hostname"], lbl("reason", "hostname")),
+		promSample(tlsFails["expired"], lbl("reason", "expired")),
+		promSample(tlsFails["other"], lbl("reason", "other")))
 	setErrs, remErrs, clearErrs := settings.DBWriteErrors()
 	w.Counter("flodni_engine_db_write_errors_total",
 		"Engine database commits that failed, by operation: set (a record save), rem (a record removal) or clear. The record is then not saved; alert on any increase. 0 from start.",
