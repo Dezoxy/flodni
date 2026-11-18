@@ -135,7 +135,7 @@ func TestHandlePrometheus(t *testing.T) {
 		"flodni_keepalive_releases_total", "flodni_keepalive_evicted_total", "flodni_keepalive_held_torrents", "flodni_reannounce_total",
 		"flodni_wake_refused_total",
 		"flodni_warm_fill_bytes_total", "flodni_warm_cache_failures_total", "flodni_warm_queue_files", "flodni_warm_paused",
-		"flodni_stub_index_mismatch_total",
+		"flodni_stub_index_mismatch_total", "flodni_playing_sessions_without_pump", "flodni_pump_watchdog_restarts_total",
 		"flodni_engine_short_reads_total", "flodni_engine_short_read_repairs_total", "flodni_engine_peer_redials_total", "flodni_engine_db_write_errors_total", "flodni_sessions_open",
 		"flodni_engine_hedge_triggers_total", "flodni_engine_peer_ejects_total", "flodni_engine_peer_churn_drops_total",
 		"flodni_engine_gradient2_backoff_samples_total", "flodni_readahead_evictions_total", "flodni_warmup_head_fill_duration_seconds",

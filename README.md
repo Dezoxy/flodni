@@ -1343,6 +1343,10 @@ and `[DeadSwarm]` lines are unchanged, and their wording is not a contract.
 | `last_read_offset`, `last_read_end` | number | Open sessions only, not in the log line: where the last served read started, and where it ended (start plus the bytes returned), in file bytes. Absent until a read has returned data. |
 | `ahead_bytes` | number | Open sessions only, not in the log line: how many bytes from `last_read_end` on the player can read without waiting. It walks forward over the read-ahead cache and the verified pieces together and stops at the first byte neither holds, at the end of the file, or after 1 GiB. Absent when `last_read_end` is, when the stub carries no `file_index`, or when the engine does not hold the torrent. Worked out when you ask, never on the read path. |
 | `frontier_offset` | number | Open sessions only, not in the log line: the end (exclusive, in file bytes) of the run of verified pieces that starts at `last_read_end`, the engine alone, without the cache. It equals `last_read_end` when the piece under it is not complete, and stops at the end of the file or 1 GiB past `last_read_end`. Present when `ahead_bytes` is. |
+| `pump_offset` | number | Open sessions only, not in the log line: the file offset the pump of this file fetches next. Present while a pump runs for the file. Read it with `player_off` and `ahead_bytes` to see whether a shallow `ahead_bytes` is a pump that lags or one that is not following the player. |
+| `player_off` | number | Open sessions only: the player position the pump last saved (written when a primary handle is released), so it can trail the live position. Present with `pump_offset`. |
+| `primary` | bool | Open sessions only: whether a primary handle is open on the file, the handle the pump follows. Present with `pump_offset`. |
+| `refs` | number | Open sessions only: how many handles share the file's pump. Present with `pump_offset`. |
 
 - The four byte fields name the path that answered each read, not where
   the bytes came from. Bytes fetched from the swarm in a session reappear
@@ -1767,6 +1771,49 @@ renamed and its registry row is never re-keyed, and stubs are found by the
   vanished and `Lite` shared the key). A show whose rows were registered under
   the old form keeps them: an add finds the row by the old key when the new one
   has none, and replaces it in place.
+
+## Engine settings: what applies live
+
+`POST /settings` (`action: set`, or `def` for the defaults; the panel's Apply uses
+`set`) stores the settings, then applies what changed. How it applies depends on how
+the engine reads the field:
+
+| Applied | Fields |
+| --- | --- |
+| **In place**: stored, no torrent is dropped, the torrent client stays | `CacheSize`, `ReaderReadAHead`, `PreloadCache`, `UseDisk`, `TorrentsSavePath`, `RemoveCacheOnDrop`, `RetrackersMode`, `TorrentDisconnectTimeout`, `ResponsiveMode`, `AdaptiveShield`, and the fields the engine does not read after start (`BlockListURL`, `SslPort`, `SslCert`, `SslKey`, `ShowFSActiveTorr`, `StoreSettingsInJson`) |
+| **Restarts the engine**: drops every active torrent, then builds a new client | `ForceEncrypt`, `EnableDebug`, `EnableIPv6`, `DisableTCP`, `DisableUTP`, `DisableUPNP`, `DisableDHT`, `DisablePEX`, `DisableUpload`, `DownloadRateLimit`, `UploadRateLimit`, `ConnectionsLimit`, `AggressivePeerManagement`, `PeersListenPort` |
+
+A request that changes only in-place fields never touches the client. One that changes
+any restart field rebuilds, as every settings save used to.
+
+**Torrents that are already loaded.** A `CacheSize` change does **not** resize the cache
+of a torrent that is already loaded. It applies to torrents loaded after the change: a
+torrent keeps the cache it was opened with until it is closed (idle expiry or a drop)
+and loaded again. Its read-ahead is derived from that size, so it cannot outgrow it. A
+`ReaderReadAHead` change applies to loaded torrents too, on their next read-ahead
+update (about a second): it is a percentage of the cache they have, and no cache is
+resized. `RetrackersMode` applies to torrents added afterwards. `ResponsiveMode` is latched
+when a stream opens, so it applies to readers opened after the change.
+A preload is a share of the cache the torrent has. `UseDisk` and
+`TorrentsSavePath` do not move the warmup directory, which is fixed at start.
+
+**Download speed.** The engine's torrent status reports `download_speed` as
+the rate of useful data (what the torrent kept) and `download_speed_raw` as the
+wire rate, which also counts protocol overhead, duplicates and waste. Both
+are sampled once a second.
+
+**Refusal under playback.** A change that would restart the engine while the daemon
+counts a confirmed playing session (a media-server webhook confirmed it, no stop, and
+a handle on the file is open) answers `409` and stores nothing:
+
+```json
+{"error": "settings change needs an engine restart (DisableDHT, PeersListenPort) and 1 playing session(s) would be interrupted; resend with force to restart anyway",
+ "fields": ["DisableDHT", "PeersListenPort"], "sessions": 1}
+```
+
+Add `"force": true` to the request to restart anyway. A change to in-place fields is
+never refused. The panel asks for confirmation before it applies a change to a restart
+field, and sends `force` only after you confirm. A plain Apply sends none.
 
 ## Engine add semantics
 
@@ -2558,6 +2605,8 @@ scraper on the same host or Docker network.
 | `flodni_library_torrents_unstored` | gauge | none | Library torrents with no stored engine record holding metainfo, counted once at startup after the library walk and not refreshed. Not exported until counted. See "A stub the engine does not store". |
 | `flodni_library_unlinked_stubs` | gauge | none | Stubs no library symlink points at (`linked` is `false` in `GET /api/library/list`), as of the last list of movies and of tv (a client list, the audit and a catch-up pass refresh it). Not exported, rather than 0, while there is no linked set or a kind has not been listed yet. See "Listing stubs". |
 | `flodni_stub_index_mismatch_total` | counter | none | Library paths whose stub file index differs from the file an open resolved by size and name, once per path per process. Non-zero means a stale stub. See "A stub whose file index is stale". |
+| `flodni_playing_sessions_without_pump` | gauge | none | Confirmed playbacks with an open primary handle and no read-ahead pump right now, computed at scrape; a player in the last read-ahead lead of the file is not counted (its pump ended for good). The pump watchdog restarts a missing pump after 10 s, so a value above 0 for a few minutes means it could not. |
+| `flodni_pump_watchdog_restarts_total` | counter | none | Pumps the watchdog started for a confirmed playback that had none for 10 s. 0 from start. |
 | `flodni_tracker_scrapes_total` | counter | `result` | Experimental. Tracker scrapes per torrent and tracker: `ok` (answered), `error` (the request failed or the answer left the torrent out), `skipped` (no BEP 48 scrape URL or an unsupported scheme). All values present from 0 once the scraper runs. See Tracker scrape. |
 | `flodni_torrents_by_seeders` | gauge | `bucket` | Experimental. Torrents by the seeders of their latest scrape answer: `0`, `1-2`, `3+`. A torrent with an error entry is in none. |
 | `flodni_tracker_scrape_pass_running` | gauge | none | Experimental. 1 while a scrape pass runs. |

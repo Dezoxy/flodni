@@ -48,6 +48,10 @@ type Cache struct {
 	storage *Storage
 
 	capacity int64
+	// openSize is the size the cache was opened with, before Init settled capacity.
+	// Its read-ahead derives from it, so a later CacheSize change cannot push the
+	// read-ahead of a loaded torrent past the cache it has.
+	openSize int64
 	filled   int64
 	hash     metainfo.Hash
 
@@ -146,6 +150,7 @@ func (c *Cache) putBuffer(b []byte) {
 func NewCache(capacity int64, storage *Storage) *Cache {
 	ret := &Cache{
 		capacity:      capacity,
+		openSize:      capacity,
 		filled:        0,
 		pieces:        make(map[int]*Piece),
 		storage:       storage,

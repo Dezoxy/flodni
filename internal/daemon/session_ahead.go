@@ -4,6 +4,7 @@ import (
 	"flodni/internal/gostorm/native"
 	"flodni/internal/promtext"
 	"sort"
+	"sync/atomic"
 	"time"
 )
 
@@ -34,6 +35,36 @@ type sessionView struct {
 	FrontierOffset    *int64 `json:"frontier_offset,omitempty"`
 	// stuckFor is how long the oldest read in flight has run; for the starved re-announce only.
 	stuckFor time.Duration
+	// The pump of the session's file, absent while none runs. They say why ahead_bytes is
+	// shallow: where the pump fetches against where the player is, whether a primary
+	// handle is open (the pump follows it) and how many handles share the pump.
+	PumpOffset *int64 `json:"pump_offset,omitempty"`
+	PlayerOff  *int64 `json:"player_off,omitempty"`
+	Primary    *bool  `json:"primary,omitempty"`
+	Refs       *int32 `json:"refs,omitempty"`
+}
+
+// fillPump adds the pump fields of the session's file. Read-only: atomics and the two
+// sync.Map reads, no lock of the pump or of a handle.
+func (s *TTFFSession) fillPump(v *sessionView) {
+	val, ok := app.activePumps.Load(s.path)
+	if !ok {
+		return
+	}
+	ps, ok := val.(*NativePumpState)
+	if !ok {
+		return
+	}
+	pumpOff, playerOff, refs := ps.pumpOff.Load(), atomic.LoadInt64(&ps.playerOff), atomic.LoadInt32(&ps.refCount)
+	primary := false
+	app.activeHandles.Range(func(key, _ any) bool {
+		if h := key.(*MkvHandle); h.path == s.path && h.isPrimaryHandle.Load() {
+			primary = true
+			return false
+		}
+		return true
+	})
+	v.PumpOffset, v.PlayerOff, v.Primary, v.Refs = &pumpOff, &playerOff, &primary, &refs
 }
 
 var (
@@ -131,6 +162,7 @@ func openSessionViewsWhere(now time.Time, keep func(*TTFFSession) bool) []sessio
 		v.SessionAgeSeconds = &age
 		v.stuckFor = s.stuckFor(now)
 		s.fillAhead(&v)
+		s.fillPump(&v)
 		out = append(out, v)
 		return true
 	})

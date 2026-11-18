@@ -40,11 +40,13 @@ type Torrent struct {
 	bt    *BTServer
 	cache *torrstor.Cache
 
-	lastTimeSpeed       time.Time
-	DownloadSpeed       float64
-	UploadSpeed         float64
-	BytesReadUsefulData int64
-	BytesWrittenData    int64
+	lastTimeSpeed    time.Time
+	DownloadSpeed    float64 // useful data per second
+	DownloadSpeedRaw float64 // wire bytes per second, with overhead and waste
+	UploadSpeed      float64
+	bytesReadSeen    int64 // engine BytesRead (wire) at the last sample
+	usefulSeen       int64 // engine BytesReadUsefulData at the last sample
+	BytesWrittenData int64
 
 	PreloadSize    int64
 	PreloadedBytes int64
@@ -369,21 +371,14 @@ func (t *Torrent) UpdateStats() {
 	if t.Torrent != nil && t.Torrent.Info() != nil {
 		st := t.Torrent.Stats()
 		usefulBytes = st.BytesReadUsefulData.Int64()
-		deltaDlBytes := st.BytesRead.Int64() - t.BytesReadUsefulData
-		deltaUpBytes := st.BytesWritten.Int64() - t.BytesWrittenData
-		deltaTime := time.Since(t.lastTimeSpeed).Seconds()
-
-		t.DownloadSpeed = float64(deltaDlBytes) / deltaTime
-		t.UploadSpeed = float64(deltaUpBytes) / deltaTime
-
-		t.BytesReadUsefulData = st.BytesRead.Int64()
-		t.BytesWrittenData = st.BytesWritten.Int64()
+		t.sampleCounters(st.BytesRead.Int64(), usefulBytes, st.BytesWritten.Int64(), time.Now())
 
 		if t.cache != nil {
 			t.PreloadedBytes = t.cache.GetState().Filled
 		}
 	} else {
 		t.DownloadSpeed = 0
+		t.DownloadSpeedRaw = 0
 		t.UploadSpeed = 0
 	}
 	t.lastTimeSpeed = time.Now()
@@ -395,11 +390,36 @@ func (t *Torrent) UpdateStats() {
 	t.updateRA()
 }
 
+// sampleCounters turns the engine's cumulative counters into this window's rates and
+// remembers them for the next. wire is BytesRead, useful BytesReadUsefulData, wrote
+// BytesWritten. download_speed follows the useful counter, download_speed_raw the wire
+// one. The caller holds muTorrent.
+func (t *Torrent) sampleCounters(wire, useful, wrote int64, now time.Time) {
+	deltaTime := now.Sub(t.lastTimeSpeed).Seconds()
+	t.DownloadSpeed, t.DownloadSpeedRaw = speedSample(wire-t.bytesReadSeen, useful-t.usefulSeen, deltaTime)
+	t.UploadSpeed = 0
+	if deltaTime > 0 {
+		t.UploadSpeed = float64(wrote-t.BytesWrittenData) / deltaTime
+	}
+	t.bytesReadSeen, t.usefulSeen, t.BytesWrittenData = wire, useful, wrote
+}
+
+// speedSample turns one window's counter growth into rates. useful is the rate of data
+// the torrent kept (the engine's useful-data counter), raw the wire rate (BytesRead),
+// which also carries protocol overhead, duplicates and waste. Neither is negative: a
+// counter that went back (a peer dropped) reads 0. A window that did not advance is 0.
+func speedSample(rawDelta, usefulDelta int64, seconds float64) (useful, raw float64) {
+	if seconds <= 0 {
+		return 0, 0
+	}
+	return float64(max(usefulDelta, 0)) / seconds, float64(max(rawDelta, 0)) / seconds
+}
+
 func (t *Torrent) updateRA() {
 	if t.cache == nil {
 		return
 	}
-	adj := torrstor.CacheReadahead()
+	adj := t.cache.Readahead()
 	go t.cache.AdjustRA(adj)
 }
 
@@ -616,6 +636,7 @@ func (t *Torrent) Status() *state.TorrentStatus {
 	st.PreloadedBytes = t.PreloadedBytes
 	st.PreloadSize = t.PreloadSize
 	st.DownloadSpeed = t.DownloadSpeed
+	st.DownloadSpeedRaw = t.DownloadSpeedRaw
 	st.UploadSpeed = t.UploadSpeed
 
 	if t.TorrentSpec != nil {

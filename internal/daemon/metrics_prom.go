@@ -138,6 +138,7 @@ func collectProm(w *promtext.Writer) {
 
 	collectWarmupProm(w)
 	collectPlaybackProm(w)
+	collectPumpWatchdogProm(w)
 	collectReaderBudgetProm(w)
 	collectWebhookHealthProm(w)
 	collectReadabilityProm(w)

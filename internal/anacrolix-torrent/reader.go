@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"sync"
+	"sync/atomic"
 
 	"github.com/anacrolix/log"
 	"github.com/anacrolix/missinggo/v2"
@@ -320,15 +321,18 @@ func (r *reader) log(m log.Msg) {
 // Without this cap, a 10GB file streamed from offset 0 would set readahead=10GB,
 // causing massive piece priority update cascades under the client lock.
 // V1.4.0: Dynamic — set from CacheSize via SetMaxReadahead() at startup.
-var maxDefaultReadahead int64 = 128 << 20 // 128 MiB default, overridden by CacheSize
+var maxDefaultReadahead atomic.Int64 // 128 MiB default (see init), overridden by CacheSize; atomic: a settings change moves it while readers run
+
+func init() { maxDefaultReadahead.Store(128 << 20) }
 
 const minDefaultReadahead = 48 << 20 // 48 MiB
 
 // SetMaxReadahead allows TorrServer to align the reader's max readahead with CacheSize.
-// Must be called before any readers are created (typically at BTServer.Connect).
+// Called at BTServer.Connect and again when a settings change moves the cache size; the
+// value is atomic, and readers pick it up the next time they compute their read-ahead.
 func SetMaxReadahead(cacheSize int64) {
 	if cacheSize > 0 {
-		maxDefaultReadahead = cacheSize
+		maxDefaultReadahead.Store(cacheSize)
 	}
 }
 
@@ -340,8 +344,8 @@ func defaultReadaheadFunc(r ReadaheadContext) int64 {
 	if ra < minDefaultReadahead {
 		ra = minDefaultReadahead
 	}
-	if ra > maxDefaultReadahead {
-		return maxDefaultReadahead
+	if max := maxDefaultReadahead.Load(); ra > max {
+		return max
 	}
 	return ra
 }

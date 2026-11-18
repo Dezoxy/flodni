@@ -62,7 +62,7 @@ func (r *Reader) attach(cache *Cache) {
 	r.cache = cache
 	r.isUse = true
 	n := cache.activeReaders.Add(1)
-	r.SetReadahead(perReaderReadahead(CacheReadahead(), int(n)))
+	r.SetReadahead(perReaderReadahead(cache.Readahead(), int(n)))
 
 	cache.muReaders.Lock()
 	if cache.readers != nil {
