@@ -300,8 +300,15 @@ func collectPlaybackProm(w *promtext.Writer) {
 		promSample(keepaliveCounters.stalls[1].Load(), lbl("confirmed", "true")),
 		promSample(keepaliveCounters.stalls[0].Load(), lbl("confirmed", "false")))
 	w.Counter("flodni_reannounce_total",
-		"Tracker re-announces forced for a public torrent with a confirmed playback whose swarm starved (fewer than 3 connected peers for 60 s with a read stall, a hung read or a short, shrinking buffer), by reason (starved). Private torrents are never announced by this. Present from 0.",
-		promSample(reannounces.Load(), lbl("reason", "starved")))
+		"Tracker re-announces actually sent for a torrent with a confirmed playback whose swarm starved (fewer than 3 connected peers for 60 s with a read stall, a hung read or a short, shrinking buffer), by reason (starved) and private (true for a private torrent, sent only when its tracker's min interval allowed it). Present from 0.",
+		promSample(reannounces[1].Load(), lbl("reason", "starved"), lbl("private", "true")),
+		promSample(reannounces[0].Load(), lbl("reason", "starved"), lbl("private", "false")))
+	early := countEarlyAnnounce(loadedEarlyAnnounce())
+	w.Gauge("flodni_private_torrents_early_announce",
+		"Loaded private torrents by whether any of their trackers allows an early (starved) re-announce: eligible when a tracker's last successful announce sent a min interval below its interval, ineligible when none did, unknown before a successful announce. Passive: read from regular announces, no extra tracker request.",
+		promSample(int64(early[0]), lbl("state", "eligible")),
+		promSample(int64(early[1]), lbl("state", "ineligible")),
+		promSample(int64(early[2]), lbl("state", "unknown")))
 	w.Counter("flodni_keepalive_releases_total",
 		"Holds that ended, by reason: stop is a stop webhook (or the playback state dropped), ceiling is playback_keepalive_minutes after the last read or play webhook. The torrent then closes at its next idle check.",
 		promSample(keepaliveCounters.releases[0].Load(), lbl("reason", "stop")),

@@ -947,13 +947,18 @@ starves.
   when no `min interval` is known or a tracker is UDP). A torrent whose
   metadata is not known yet is never announced. An announce that sends nothing
   is a deferral: it is not counted, consumes no backoff, and is tried again on
-  the next sample.
+  the next sample. `flodni_private_torrents_early_announce{state}` shows
+  without any extra tracker request whether this path can fire: how many
+  loaded private torrents have an eligible tracker, none, or no successful
+  announce yet.
 - **Priority after a rebuild.** A torrent the engine re-adds while a confirmed
   playback of it is open gets its priority flag back (the flag lived on the
   replaced object). Aggressive mode is not restored by this.
 - **Observability.** One `[Starved] re-announce` log line per forced announce
-  (reason, connected peers, stalls, ahead; never a tracker URL) and
-  `flodni_reannounce_total{reason="starved"}`, present from 0.
+  (reason, private, connected peers, stalls, ahead; never a tracker URL) and
+  `flodni_reannounce_total{reason="starved",private="true"|"false"}`, both
+  series present from 0. The `private="true"` series is how to confirm the
+  private path fires.
 - **Not changed.** The weak-swarm discovery boost for a public torrent keeps
   its own rule and cooldown; both can announce the same public torrent.
   Measured on a real swarm: not yet.
@@ -2605,7 +2610,8 @@ scraper on the same host or Docker network.
 | `flodni_torrent_reopens_total` | counter | `confirmed` | Closed torrents a read on an open handle woke again; the wake at open is not counted. `confirmed` as above. |
 | `flodni_wake_refused_total` | counter | none | Wakes the engine refused because it keeps no record of the torrent: one per handle at a read, one per open. Not a failed read and not a dead swarm. 0 from start. See "A stub the engine does not store". |
 | `flodni_read_stalls_total` | counter | `confirmed` | Served reads that took over one second; failed reads are not counted. `confirmed` as above. Independent of sessions. |
-| `flodni_reannounce_total` | counter | `reason` | Tracker re-announces actually sent for a torrent with a confirmed playback whose swarm starved; `reason` is `starved`. A private torrent counts only when its tracker's min interval allowed the announce. Present from 0. See "Starved-torrent re-announce". |
+| `flodni_reannounce_total` | counter | `reason`, `private` | Tracker re-announces actually sent for a torrent with a confirmed playback whose swarm starved; `reason` is `starved`, `private` is `true` for a private torrent (counted only when its tracker's min interval allowed the announce) and `false` for a public one. Both series present from 0. See "Starved-torrent re-announce". |
+| `flodni_private_torrents_early_announce` | gauge | `state` | Loaded private torrents by whether any of their trackers allows an early (starved) re-announce: `eligible` when a tracker's last successful announce sent a min interval below its interval, `ineligible` when none did, `unknown` before a successful announce. Passive: read from regular announces, no extra tracker request. All three present from 0. See "Starved-torrent re-announce". |
 | `flodni_keepalive_releases_total` | counter | `reason` | Holds that ended: `stop` (a stop webhook, or the playback state dropped) or `ceiling` (`playback_keepalive_minutes` after the last activity). The torrent then closes at its next idle check. Both values present from 0. See Keep-alive. |
 | `flodni_keepalive_evicted_total` | counter | none | Confirmed torrents that lost their hold to `playback_keepalive_max_torrents`, once per episode. Present from 0. |
 | `flodni_keepalive_held_torrents` | gauge | none | Idle torrents the keep-alive is keeping open now (a torrent with a reader is not counted). |

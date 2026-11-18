@@ -42,8 +42,16 @@ const (
 	starvedTick     = 5 * time.Second
 )
 
-// reannounces counts forced announces: flodni_reannounce_total{reason="starved"}.
-var reannounces atomic.Int64
+// reannounces counts sent forced announces by privacy, [0] public and [1] private:
+// flodni_reannounce_total{reason="starved",private="false"|"true"}.
+var reannounces [2]atomic.Int64
+
+func privIdx(private bool) int {
+	if private {
+		return 1
+	}
+	return 0
+}
 
 // starveObs is what is known of one playing torrent at one sample.
 type starveObs struct {
@@ -127,8 +135,9 @@ func (s *starveState) step(now time.Time, o starveObs) bool {
 
 // starveTarget is the torrent a forced announce goes to.
 type starveTarget interface {
-	// Announce returns how many announces were actually sent; 0 means deferred or none.
-	Announce(o starveObs) int
+	// Announce returns how many announces were actually sent (0 means deferred or none) and
+	// whether the torrent is private.
+	Announce(o starveObs) (int, bool)
 }
 
 type starveSample struct {
@@ -175,11 +184,12 @@ func (c *starveController) tick(now time.Time, samples []starveSample) {
 		if !st.step(now, sm.obs) {
 			continue
 		}
-		if tg.Announce(sm.obs) == 0 {
+		n, private := tg.Announce(sm.obs)
+		if n == 0 {
 			*st = prev // deferred: no backoff consumed, nothing counted
 			continue
 		}
-		reannounces.Add(1)
+		reannounces[privIdx(private)].Add(1)
 	}
 	for h, st := range c.states {
 		if seen[h] {
@@ -226,8 +236,8 @@ func starveSamples(views []sessionView, confirmed func(string) bool, peers func(
 	return out
 }
 
-func starveLogLine(o starveObs) string {
-	line := fmt.Sprintf("[Starved] re-announce reason=starved peers=%d stalls=%d", o.peers, o.stalls)
+func starveLogLine(o starveObs, private bool) string {
+	line := fmt.Sprintf("[Starved] re-announce reason=starved private=%t peers=%d stalls=%d", private, o.peers, o.stalls)
 	if o.aheadOK {
 		line += fmt.Sprintf(" ahead_mb=%d", o.ahead>>20)
 	}
@@ -238,30 +248,73 @@ func starveLogLine(o starveObs) string {
 // rebuild nils (drop) at any time: it is read once per call and the copy is used.
 type engineStarveTarget struct{ under func() *torrent.Torrent }
 
-func (e engineStarveTarget) Announce(o starveObs) int {
+func (e engineStarveTarget) Announce(o starveObs) (int, bool) {
 	t := e.under()
 	if t == nil {
-		return 0
+		return 0, false
 	}
-	n := routeStarveAnnounce(t.Info(), t.AnnounceWhenDue, func() { t.AnnounceTracked(nil) })
+	n, private := routeStarveAnnounce(t.Info(), t.AnnounceWhenDue, func() { t.AnnounceTracked(nil) })
 	if n > 0 {
-		flog.Std.Info(starveLogLine(o), "reason", "starved", "peers", o.peers)
+		flog.Std.Info(starveLogLine(o, private), "reason", "starved", "private", private, "peers", o.peers)
+	}
+	return n, private
+}
+
+// routeStarveAnnounce picks the announce for a torrent and returns how many were sent and
+// whether the torrent is private. Unknown metadata sends nothing; a private torrent only goes
+// through due (the min-interval gated announce); a public one through tracked.
+func routeStarveAnnounce(info *metainfo.Info, due func() int, tracked func()) (int, bool) {
+	if info == nil {
+		return 0, false
+	}
+	if info.Private != nil && *info.Private {
+		return due(), true
+	}
+	tracked()
+	return 1, false
+}
+
+// earlyAnnounceTorrent is one loaded torrent for the early-announce gauge; state is nil when
+// the engine handle or its metadata is not there.
+type earlyAnnounceTorrent struct {
+	private bool
+	state   func() (known, eligible bool)
+}
+
+// countEarlyAnnounce counts private torrents as [eligible, ineligible, unknown].
+func countEarlyAnnounce(ts []earlyAnnounceTorrent) (n [3]int) {
+	for _, t := range ts {
+		if !t.private || t.state == nil {
+			continue
+		}
+		switch known, eligible := t.state(); {
+		case !known:
+			n[2]++
+		case eligible:
+			n[0]++
+		default:
+			n[1]++
+		}
 	}
 	return n
 }
 
-// routeStarveAnnounce picks the announce for a torrent and returns how many were sent. Unknown
-// metadata sends nothing; a private torrent only goes through due (the min-interval gated
-// announce); a public one through tracked.
-func routeStarveAnnounce(info *metainfo.Info, due func() int, tracked func()) int {
-	if info == nil {
-		return 0
+// loadedEarlyAnnounce lists the loaded torrents with what the gauge needs. It reads engine
+// state only and sends no announce.
+func loadedEarlyAnnounce() []earlyAnnounceTorrent {
+	var out []earlyAnnounceTorrent
+	for _, tr := range torr.ListActiveTorrent() {
+		u := tr.UnderlyingTorrent()
+		if u == nil {
+			continue
+		}
+		info := u.Info()
+		if info == nil || info.Private == nil || !*info.Private {
+			continue
+		}
+		out = append(out, earlyAnnounceTorrent{private: true, state: u.EarlyAnnounceState})
 	}
-	if info.Private != nil && *info.Private {
-		return due()
-	}
-	tracked()
-	return 1
+	return out
 }
 
 func engineStarveTargetFor(hash string) starveTarget {
