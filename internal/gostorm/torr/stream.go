@@ -66,8 +66,8 @@ func serveFileContent(resp http.ResponseWriter, req *http.Request, filePath stri
 	h := resp.Header()
 	h.Set("X-Content-Type-Options", "nosniff")
 	h.Set("Content-Security-Policy", "sandbox")
-	if m, err := mt.MimeTypeByPath(filePath); err == nil && (m.IsVideo() || m.IsAudio()) {
-		h.Set("Content-Type", m.String())
+	if m, ok := mt.StreamType(filePath); ok {
+		h.Set("Content-Type", m)
 	} else {
 		h.Set("Content-Type", "application/octet-stream")
 		h.Set("Content-Disposition", attachmentDisposition(filePath))
@@ -89,7 +89,7 @@ func attachmentDisposition(filePath string) string {
 	if len(name) > 200 {
 		name = strings.ToValidUTF8(name[:200], "")
 	}
-	if name == "" || name == "." || name == "/" {
+	if name == "" || name == "." || name == ".." || name == "/" {
 		return "attachment"
 	}
 	if d := mime.FormatMediaType("attachment", map[string]string{"filename": name}); d != "" {

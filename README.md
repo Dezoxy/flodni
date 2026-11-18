@@ -311,7 +311,8 @@ mode) and only the control port reads the cookie, never the engine's.
   request is known to be https: it came over TLS, the first `X-Forwarded-Proto` is
   `https`, or `auth_panel_https` is true. The engine port is unchanged.
 - File bytes the engine streams (`/stream`, `/play`) come from the swarm, so a browser
-  never renders them. Only video and audio keep their real type. Everything else,
+  never renders them. Only video and audio, chosen by file extension from a fixed table
+  (playlists such as `.m3u` are not in it), keep their real type. Everything else,
   images and SVG included, is `application/octet-stream` with
   `Content-Disposition: attachment`, and every streamed response carries
   `X-Content-Type-Options: nosniff` and `Content-Security-Policy: sandbox`.

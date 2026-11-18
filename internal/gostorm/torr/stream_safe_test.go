@@ -6,6 +6,8 @@ import (
 	"mime"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -123,6 +125,117 @@ func TestServeFileContentDispositionFromHostileName(t *testing.T) {
 		}
 		if strings.ContainsAny(params["filename"], "/\\\r\n") {
 			t.Errorf("%q: filename %q keeps a path or control byte", name, params["filename"])
+		}
+	}
+}
+
+// The type comes from a compiled-in table, not the host's mime table, and a playlist is
+// never media: a player or browser would follow what it lists.
+func TestServeFileContentTypeIsCompiledIn(t *testing.T) {
+	// A host whose mime table calls playlists audio, as some distributions do.
+	for ext, typ := range map[string]string{
+		".m3u": "audio/x-mpegurl", ".m3u8": "application/vnd.apple.mpegurl", ".pls": "audio/x-scpls",
+		".cue": "audio/x-cue", ".xyz": "video/x-host-only",
+	} {
+		if err := mime.AddExtensionType(ext, typ); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, name := range []string{"a.m3u", "a.m3u8", "a.M3U", "a.pls", "a.cue", "a.xyz"} {
+		resp := serveForTest(t, name, []byte("#EXTM3U\nhttp://x/\n"), "")
+		if resp.Header.Get("Content-Type") != "application/octet-stream" {
+			t.Errorf("%s: Content-Type = %q, want application/octet-stream", name, resp.Header.Get("Content-Type"))
+		}
+		if disp, _, _ := mime.ParseMediaType(resp.Header.Get("Content-Disposition")); disp != "attachment" {
+			t.Errorf("%s: Content-Disposition = %q, want attachment", name, resp.Header.Get("Content-Disposition"))
+		}
+	}
+	inline := map[string]string{
+		"a.m4v": "video/mp4", "a.flv": "video/x-flv", "a.wmv": "video/x-ms-wmv", "a.3gp": "video/3gpp",
+		"a.asf": "video/x-ms-asf", "a.M4V": "video/mp4", "a.mkv.part": "video/x-matroska",
+		"a.m4b": "audio/mp4", "a.mka": "audio/x-matroska", "a.ac3": "audio/ac3",
+		"a.dts": "audio/vnd.dts", "a.wma": "audio/x-ms-wma", "a.ts": "video/mpeg", "a.avi": "video/avi",
+	}
+	for name, want := range inline {
+		resp := serveForTest(t, name, []byte("0123456789"), "")
+		if got := resp.Header.Get("Content-Type"); got != want {
+			t.Errorf("%s: Content-Type = %q, want %q", name, got, want)
+		}
+		if resp.Header.Get("Content-Disposition") != "" {
+			t.Errorf("%s: media must not be an attachment", name)
+		}
+	}
+}
+
+// A file name chosen by the swarm must never make the daemon open a file of its own: an
+// unknown extension is not sniffed from local disk. The local file below holds MP4 magic,
+// so a content sniff would serve it inline as video.
+func TestServeFileContentNeverReadsALocalFile(t *testing.T) {
+	local := filepath.Join(t.TempDir(), "probe")
+	if err := os.WriteFile(local, []byte("\x00\x00\x00\x18ftypmp42\x00\x00\x00\x00mp42isom"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{local, "../" + filepath.Base(local), "probe"} {
+		t.Chdir(filepath.Dir(local))
+		resp := serveForTest(t, name, []byte("body"), "")
+		if got := resp.Header.Get("Content-Type"); got != "application/octet-stream" {
+			t.Errorf("%q: Content-Type = %q, want application/octet-stream", name, got)
+		}
+		if resp.Header.Get("Content-Disposition") == "" {
+			t.Errorf("%q: not an attachment", name)
+		}
+	}
+}
+
+func TestAttachmentDispositionOfDotNames(t *testing.T) {
+	for _, name := range []string{"..", ".", "a/..", "a/.", "", "/"} {
+		if got := attachmentDisposition(name); got != "attachment" {
+			t.Errorf("attachmentDisposition(%q) = %q, want a bare attachment", name, got)
+		}
+	}
+}
+
+// The safe headers must survive every ServeContent exit, not only the plain 200.
+func TestServeFileContentHeadersOnEveryStatus(t *testing.T) {
+	body := []byte("0123456789abcdef")
+	for _, name := range []string{"a.html", "a.mkv"} {
+		media := name == "a.mkv"
+		for _, c := range []struct {
+			label  string
+			method string
+			hdr    map[string]string
+			etag   bool
+			status int
+		}{
+			{"304", http.MethodGet, map[string]string{"If-None-Match": `"v1"`}, true, http.StatusNotModified},
+			{"416", http.MethodGet, map[string]string{"Range": "bytes=100-200"}, false, http.StatusRequestedRangeNotSatisfiable},
+			{"HEAD", http.MethodHead, nil, false, http.StatusOK},
+			{"multipart 206", http.MethodGet, map[string]string{"Range": "bytes=0-1,4-5"}, false, http.StatusPartialContent},
+		} {
+			t.Run(name+"/"+c.label, func(t *testing.T) {
+				req := httptest.NewRequest(c.method, "/stream/x", nil)
+				for k, v := range c.hdr {
+					req.Header.Set(k, v)
+				}
+				rec := httptest.NewRecorder()
+				if c.etag {
+					rec.Header().Set("ETag", `"v1"`)
+				}
+				serveFileContent(rec, req, name, time.Unix(0, 0), bytes.NewReader(body))
+				resp := rec.Result()
+				if resp.StatusCode != c.status {
+					t.Fatalf("status = %d, want %d", resp.StatusCode, c.status)
+				}
+				if resp.Header.Get("X-Content-Type-Options") != "nosniff" || resp.Header.Get("Content-Security-Policy") != "sandbox" {
+					t.Errorf("safe headers lost: %v", resp.Header)
+				}
+				if got := resp.Header.Get("Content-Disposition") != ""; got == media {
+					t.Errorf("Content-Disposition present = %v, want %v", got, !media)
+				}
+				if c.label == "multipart 206" && !strings.HasPrefix(resp.Header.Get("Content-Type"), "multipart/byteranges") {
+					t.Errorf("Content-Type = %q, want multipart/byteranges", resp.Header.Get("Content-Type"))
+				}
+			})
 		}
 	}
 }
