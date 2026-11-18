@@ -15,6 +15,7 @@ import (
 	"flodni/internal/gostorm/torr"
 	"flodni/internal/gostorm/torr/storage/torrstor"
 	"flodni/internal/promtext"
+	"flodni/internal/readahead"
 	"flodni/internal/warmup"
 )
 
@@ -367,9 +368,17 @@ func collectReadAheadProm(w *promtext.Writer) {
 	w.Gauge("flodni_readahead_cache_bytes", "Bytes held in the read-ahead cache.", promSample(total))
 	w.Gauge("flodni_readahead_cache_active_bytes", "Bytes in the read-ahead cache that are not stale.", promSample(active))
 	w.Gauge("flodni_readahead_cache_entries", "Entries in the read-ahead cache.", promSample(int64(entries)))
+	byReason := raCache.EvictionsByReason()
+	evictions := make([]promtext.Sample, 0, len(byReason))
+	for i, n := range byReason {
+		evictions = append(evictions, promSample(n, lbl("reason", readahead.ReasonNames[i])))
+	}
 	w.Counter("flodni_readahead_evictions_total",
-		"Chunks the read-ahead cache dropped on a Put to stay under its budget. The stale sweep is not counted.",
-		promSample(raCache.Evictions()))
+		"Chunks the read-ahead cache dropped on a Put to stay under its budget, by reason: idle (path not read for 120 s), behind (already consumed by the player) or ahead (farthest ahead on the path holding the most bytes). The idle sweep is not counted.",
+		evictions...)
+	w.Counter("flodni_readahead_evictions_near_player_total",
+		"Evictions of a chunk starting within the player's fair share of the budget, for a path whose player is known. The harmful kind: it stays near 0.",
+		promSample(raCache.NearPlayerEvictions()))
 	if b := gc(); b != nil {
 		w.Gauge("flodni_readahead_cache_budget_bytes", "Size budget of the read-ahead cache.", promSample(b.ReadAheadBudget))
 	}
