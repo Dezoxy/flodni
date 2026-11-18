@@ -7,6 +7,8 @@ import (
 	"fmt"
 	"net"
 	"net/url"
+	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/anacrolix/dht/v2/krpc"
@@ -24,6 +26,205 @@ type trackerScraper struct {
 	lookupTrackerIp func(*url.URL) ([]net.IP, error)
 	// Announces that failed in a row; only the Run goroutine touches it.
 	consecutiveFailures int
+	// What Run and a forced announce (announceWhenDue) share, so that neither starts while the
+	// other is in flight and each waits out the other's result.
+	ann announceState
+}
+
+// announceState is the one per-tracker record Run and announceWhenDue share. mu is a leaf lock:
+// nothing is acquired while holding it, and it is never held across an announce.
+type announceState struct {
+	mu       sync.Mutex
+	inFlight bool
+	done     chan struct{} // closed when the announce in flight finishes
+	// The completion of the last announce of either kind, and how long after it the next regular
+	// announce may start.
+	lastDone time.Time
+	wait     time.Duration
+	// Whether the last announce succeeded; only a success lets the wait be shortened or a
+	// forced announce through.
+	ok bool
+	// The tracker's interval and min interval from its last successful response; 0 for a min
+	// interval it did not send (a UDP tracker never does).
+	interval, minInterval time.Duration
+	// Whether a forced announce has gone out since Run's last one: at most one per regular
+	// announce, or forced announces every min interval would keep pushing Run's out.
+	forcedSinceRun bool
+}
+
+// reserveLocked marks an announce in flight; the caller holds mu and has seen none in flight.
+func (a *announceState) reserveLocked() {
+	a.inFlight = true
+	a.done = make(chan struct{})
+}
+
+// releaseLocked ends the announce in flight and wakes whoever waits on it; the caller holds mu.
+func (a *announceState) releaseLocked() {
+	a.inFlight = false
+	close(a.done)
+}
+
+// tryBegin reserves the tracker for Run's next announce when none is in flight and interval has
+// passed since the last announce of either kind. Otherwise it returns false, with a channel that
+// fires when the announce in flight ends, or nil when Run should recalculate at once: a forced
+// announce moved the last announce, and the new wait must see wantPeers like any other.
+func (me *trackerScraper) tryBegin(interval time.Duration) (retry <-chan struct{}, ok bool) {
+	a := &me.ann
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.inFlight {
+		return a.done, false
+	}
+	if time.Until(a.lastDone.Add(interval)) > 0 {
+		return nil, false
+	}
+	a.reserveLocked()
+	return nil, true
+}
+
+// finishRun records Run's announce. raw is the response as the tracker sent it; wait and
+// failures come from afterAnnounce.
+func (me *trackerScraper) finishRun(raw trackerAnnounceResult, wait time.Duration) {
+	a := &me.ann
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.record(raw, wait)
+	a.forcedSinceRun = false
+	a.releaseLocked()
+}
+
+// record stores an outcome; the caller holds mu.
+func (a *announceState) record(raw trackerAnnounceResult, wait time.Duration) {
+	a.lastDone = raw.Completed
+	a.wait = wait
+	a.ok = raw.Err == nil
+	if a.ok {
+		a.interval = raw.Interval
+		a.minInterval = raw.MinInterval
+	}
+}
+
+// nextWait returns what Run needs to schedule its next announce.
+func (a *announceState) nextWait() (lastDone time.Time, wait time.Duration, shortenable bool) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.lastDone, a.wait, a.ok
+}
+
+// earlyEligibleLocked is whether the tracker's last successful announce sent a min interval
+// below its interval, the condition an early announce needs besides timing; the caller holds mu.
+func (a *announceState) earlyEligibleLocked() bool {
+	return a.ok && a.minInterval > 0 && a.minInterval < a.interval
+}
+
+// announceWhenDue sends one announce outside Run's schedule, when the tracker allows it and
+// Run is not about to announce anyway: none in flight, the last announce of either kind
+// succeeded, no forced one has gone out since Run's last, the tracker sent a min interval
+// smaller than its interval, that min interval (never less than the client's announce floor)
+// has passed since the last announce, and Run's own next announce is still ahead. It reports
+// whether an announce went out. After a success Run waits the tracker's interval from this
+// announce's completion. After a failure Run's next announce is due at the later of its previous
+// due time and one min interval after the failure, so the tracker is neither hit sooner than
+// its min interval nor left a full interval from the failure.
+func (me *trackerScraper) announceWhenDue(ctx context.Context) bool {
+	a := &me.ann
+	floor := me.t.cl.config.announceFloor()
+	a.mu.Lock()
+	gap := a.minInterval
+	if gap < floor {
+		gap = floor
+	}
+	now := time.Now()
+	if a.inFlight || a.forcedSinceRun || !a.earlyEligibleLocked() ||
+		now.Before(a.lastDone.Add(gap)) || !now.Before(a.lastDone.Add(a.wait)) {
+		a.mu.Unlock()
+		return false
+	}
+	prevDue := a.lastDone.Add(a.wait)
+	a.reserveLocked()
+	a.forcedSinceRun = true
+	a.mu.Unlock()
+
+	ar := me.announce(ctx, tracker.None)
+
+	a.mu.Lock()
+	wait := a.wait
+	if ar.Err == nil {
+		wait = ar.Interval
+		if wait < floor {
+			wait = floor
+		}
+	} else {
+		wait = prevDue.Sub(ar.Completed)
+		if wait < gap {
+			wait = gap
+		}
+	}
+	a.record(ar, wait)
+	a.releaseLocked()
+	a.mu.Unlock()
+
+	ar.Interval = wait
+	me.t.cl.lock()
+	me.lastAnnounce = ar
+	me.t.cl.unlock()
+	return true
+}
+
+// AnnounceWhenDue announces to each tracker of this torrent, and only those, that has sent a
+// min interval shorter than its interval, whose min interval has passed since its last
+// announce, and that Run is not already announcing to or about to. It adds no tracker, touches
+// no DHT and no PEX, so it is safe for a private torrent. It returns the number of announces
+// sent; 0 when none was due, so a caller can tell a deferral from an announce.
+func (t *Torrent) AnnounceWhenDue() int {
+	t.cl.rLock()
+	scrapers := make([]*trackerScraper, 0, len(t.trackerAnnouncers))
+	for _, ta := range t.trackerAnnouncers {
+		if ts, ok := ta.(*trackerScraper); ok {
+			scrapers = append(scrapers, ts)
+		}
+	}
+	t.cl.rUnlock()
+
+	var sent atomic.Int32
+	var wg sync.WaitGroup
+	for _, ts := range scrapers {
+		wg.Add(1)
+		go func(ts *trackerScraper) {
+			defer wg.Done()
+			if ts.announceWhenDue(t.closedCtx) {
+				sent.Add(1)
+			}
+		}(ts)
+	}
+	wg.Wait()
+	return int(sent.Load())
+}
+
+// EarlyAnnounceState reports, without announcing or changing anything, whether any tracker of
+// this torrent has answered an announce (known) and whether any has sent a min interval below
+// its interval, so that AnnounceWhenDue can ever send (eligible). It reads each tracker's
+// record under that record's own lock only.
+func (t *Torrent) EarlyAnnounceState() (known, eligible bool) {
+	t.cl.rLock()
+	scrapers := make([]*trackerScraper, 0, len(t.trackerAnnouncers))
+	for _, ta := range t.trackerAnnouncers {
+		if ts, ok := ta.(*trackerScraper); ok {
+			scrapers = append(scrapers, ts)
+		}
+	}
+	t.cl.rUnlock()
+	for _, ts := range scrapers {
+		ts.ann.mu.Lock()
+		if ts.ann.ok {
+			known = true
+		}
+		if ts.ann.earlyEligibleLocked() {
+			eligible = true
+		}
+		ts.ann.mu.Unlock()
+	}
+	return known, eligible
 }
 
 type torrentTrackerAnnouncer interface {
@@ -31,7 +232,7 @@ type torrentTrackerAnnouncer interface {
 	URL() *url.URL
 }
 
-func (me trackerScraper) URL() *url.URL {
+func (me *trackerScraper) URL() *url.URL {
 	return &me.u
 }
 
@@ -62,10 +263,12 @@ func (ts *trackerScraper) statusLine() string {
 }
 
 type trackerAnnounceResult struct {
-	Err       error
-	NumPeers  int
-	Interval  time.Duration
-	Completed time.Time
+	Err      error
+	NumPeers int
+	Interval time.Duration
+	// The tracker's min interval; 0 when it sent none.
+	MinInterval time.Duration
+	Completed   time.Time
 }
 
 func (me *trackerScraper) getIp() (ip net.IP, err error) {
@@ -181,6 +384,7 @@ func (me *trackerScraper) announce(ctx context.Context, event tracker.AnnounceEv
 	me.t.AddPeers(peerInfos(nil).AppendFromTracker(res.Peers))
 	ret.NumPeers = len(res.Peers)
 	ret.Interval = time.Duration(res.Interval) * time.Second
+	ret.MinInterval = time.Duration(res.MinInterval) * time.Second
 	return
 }
 
@@ -211,8 +415,8 @@ func (me *trackerScraper) afterAnnounce(ar trackerAnnounceResult) (interval time
 	me.consecutiveFailures = 0
 	// Make sure we don't announce for at least a minute since the last one.
 	interval = ar.Interval
-	if interval < time.Minute {
-		interval = time.Minute
+	if floor := me.t.cl.config.announceFloor(); interval < floor {
+		interval = floor
 	}
 	return interval, true
 }
@@ -236,18 +440,27 @@ func (me *trackerScraper) Run() {
 	// make sure first announce is a "started"
 	e := tracker.Started
 
+	// The first announce takes the reservation outright: a forced announce needs a successful
+	// one before it may start.
+	me.ann.mu.Lock()
+	me.ann.reserveLocked()
+	me.ann.mu.Unlock()
+
 	for {
 		ar := me.announce(ctx, e)
 		// after first announce, get back to regular "none"
 		e = tracker.None
-		baseInterval, shortenable := me.afterAnnounce(ar)
+		baseInterval, _ := me.afterAnnounce(ar)
+		me.finishRun(ar, baseInterval)
 		ar.Interval = baseInterval // statusLine reports the real next announce
 		me.t.cl.lock()
 		me.lastAnnounce = ar
 		me.t.cl.unlock()
 
 	recalculate:
-		interval := baseInterval
+		// The wait counts from the last announce of either kind: a forced one may have completed
+		// since Run's own.
+		lastDone, interval, shortenable := me.ann.nextWait()
 
 		me.t.cl.lock()
 		wantPeers := me.t.wantPeersEvent.C()
@@ -260,8 +473,8 @@ func (me *trackerScraper) Run() {
 		var reconsider <-chan struct{}
 		select {
 		case <-wantPeers:
-			if shortenable && interval > time.Minute && me.canIgnoreInterval(&reconsider) {
-				interval = time.Minute
+			if shortenable && interval > me.t.cl.config.announceFloor() && me.canIgnoreInterval(&reconsider) {
+				interval = me.t.cl.config.announceFloor()
 			}
 		default:
 			reconsider = wantPeers
@@ -273,7 +486,21 @@ func (me *trackerScraper) Run() {
 		case <-reconsider:
 			// Recalculate the interval.
 			goto recalculate
-		case <-time.After(time.Until(ar.Completed.Add(interval))):
+		case <-time.After(time.Until(lastDone.Add(interval))):
+		}
+
+		// Due. Start only when no forced announce is in flight and none has completed since
+		// the wait was computed; otherwise wait again.
+		retry, ok := me.tryBegin(interval)
+		if !ok {
+			if retry != nil {
+				select {
+				case <-me.t.closed.Done():
+					return
+				case <-retry:
+				}
+			}
+			goto recalculate
 		}
 	}
 }

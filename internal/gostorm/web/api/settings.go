@@ -1,6 +1,7 @@
 package api
 
 import (
+	stderrors "errors"
 	"net/http"
 
 	"github.com/gin-gonic/gin"
@@ -14,6 +15,8 @@ import (
 type setsReqJS struct {
 	requestI
 	Sets *sets.BTSets `json:"sets,omitempty"`
+	// Force lets a change that restarts the engine go ahead while a session is playing.
+	Force bool `json:"force,omitempty"`
 }
 
 // settings godoc
@@ -44,13 +47,36 @@ func settings(c *gin.Context) {
 		c.JSON(200, sets.BTsets)
 		return
 	} else if req.Action == "set" {
-		torr.SetSettings(req.Sets)
+		if req.Sets == nil {
+			c.AbortWithError(http.StatusBadRequest, errors.New("sets is empty"))
+			return
+		}
+		if refuseRestart(c, torr.SetSettings(req.Sets, req.Force)) {
+			return
+		}
 		c.Status(200)
 		return
 	} else if req.Action == "def" {
-		torr.SetDefSettings()
+		if refuseRestart(c, torr.SetDefSettings(req.Force)) {
+			return
+		}
 		c.Status(200)
 		return
 	}
 	c.AbortWithError(http.StatusBadRequest, errors.New("action is empty"))
+}
+
+// refuseRestart answers 409 when the engine refused a restart under playback, and reports
+// whether it did. The body names the CLIENT fields and the playing session count.
+func refuseRestart(c *gin.Context, err error) bool {
+	var refused *torr.RestartRefused
+	if !stderrors.As(err, &refused) {
+		return false
+	}
+	c.JSON(http.StatusConflict, gin.H{
+		"error":    refused.Error(),
+		"fields":   refused.Fields,
+		"sessions": refused.Sessions,
+	})
+	return true
 }

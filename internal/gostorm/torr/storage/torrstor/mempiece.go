@@ -12,6 +12,7 @@ type MemPiece struct {
 
 	buffer []byte
 	mu     sync.RWMutex
+	writes uint64 // WriteAt calls, under mu: tells releaseIfUnwritten whether a chunk landed
 }
 
 func NewMemPiece(p *Piece) *MemPiece {
@@ -35,6 +36,11 @@ func (p *MemPiece) WriteAt(b []byte, off int64) (n int, err error) {
 		}
 	}
 	n = copy(p.buffer[off:], b[:])
+	p.writes++
+	// A piece that completed once and is not complete now was evicted: these bytes came twice.
+	if p.piece.everComplete.Load() && !p.piece.Complete.Load() {
+		refetchedBytes.Add(int64(n))
+	}
 	// Size is read by cleanPieces/GetState under the cache lock, written here under the piece
 	// lock: two different mutexes, so the accesses have to be atomic.
 	if sz := atomic.AddInt64(&p.piece.Size, int64(n)); sz > p.piece.cache.pieceLength {
@@ -73,9 +79,32 @@ func (p *MemPiece) ReadAt(b []byte, off int64) (n int, err error) {
 	return n, nil
 }
 
+// writeCount is the number of WriteAt calls so far, for releaseIfUnwritten.
+func (p *MemPiece) writeCount() uint64 {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	return p.writes
+}
+
+// releaseIfUnwritten is Release unless a chunk was written since writeCount returned since. That
+// chunk is dirty again in the torrent, so its bytes have to stay. Reports whether it released.
+func (p *MemPiece) releaseIfUnwritten(since uint64) bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.writes != since {
+		return false
+	}
+	p.releaseLocked()
+	return true
+}
+
 func (p *MemPiece) Release() {
 	p.mu.Lock()
 	defer p.mu.Unlock()
+	p.releaseLocked()
+}
+
+func (p *MemPiece) releaseLocked() {
 	if p.buffer != nil {
 		p.piece.cache.putBuffer(p.buffer)
 		p.buffer = nil

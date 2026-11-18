@@ -48,6 +48,10 @@ type Cache struct {
 	storage *Storage
 
 	capacity int64
+	// openSize is the size the cache was opened with, before Init settled capacity.
+	// Its read-ahead derives from it, so a later CacheSize change cannot push the
+	// read-ahead of a loaded torrent past the cache it has.
+	openSize int64
 	filled   int64
 	hash     metainfo.Hash
 
@@ -72,6 +76,12 @@ type Cache struct {
 	cleanTrigger chan struct{} // V227: Rate-limited cleanup trigger (never closed — use cleanStop)
 	cleanStop    chan struct{} // V280: Closed on Cache.Close() to stop the goroutine
 
+	// lastStrandedNS is the last dropStrandedPartials scan.
+	lastStrandedNS atomic.Int64
+	// forgetPartial makes the torrent forget a piece's chunks; nil means c.torrent's
+	// ForgetPartialPiece. A seam for tests: the engine's dirty bits are not reachable from here.
+	forgetPartial func(id int) bool
+
 	// V279: Track which pieces have non-None priority set by us.
 	// clearPriority() iterates this (~25 entries) instead of all c.pieces (~512).
 	// Eliminates O(N_cached) PieceState(rLock) calls per cleanup cycle.
@@ -94,6 +104,28 @@ type Cache struct {
 	// wakePending is set while a coalesced wake is scheduled (scheduleWake).
 	wakeMu      sync.Mutex
 	wakePending bool
+
+	// bg counts the goroutines this cache starts (the cleaner loop and the cleanups that follow
+	// a reader closing). Close joins them after it unlocks muReaders, which they take.
+	// bgMu orders every Add before that Wait: once Close has set bgClosed, goBG starts nothing.
+	bg       sync.WaitGroup
+	bgMu     sync.Mutex
+	bgClosed bool
+}
+
+// goBG is safeGo for a goroutine bg tracks. It starts nothing on a closed cache.
+func (c *Cache) goBG(fn func()) {
+	c.bgMu.Lock()
+	if c.bgClosed {
+		c.bgMu.Unlock()
+		return
+	}
+	c.bg.Add(1)
+	c.bgMu.Unlock()
+	safeGo(func() {
+		defer c.bg.Done()
+		fn()
+	})
 }
 
 // getBuffer returns a spare buffer of exactly pieceLength, or nil when none is held.
@@ -126,6 +158,7 @@ func (c *Cache) putBuffer(b []byte) {
 func NewCache(capacity int64, storage *Storage) *Cache {
 	ret := &Cache{
 		capacity:      capacity,
+		openSize:      capacity,
 		filled:        0,
 		pieces:        make(map[int]*Piece),
 		storage:       storage,
@@ -135,13 +168,18 @@ func NewCache(capacity int64, storage *Storage) *Cache {
 		localPriority: make(map[int]torrenttypes.PiecePriority),
 	}
 	// V227: Background cleaning goroutine
-	safeGo(func() {
+	ret.goBG(func() {
+		// A seek followed by silence wakes nothing, so the stranded-partial sweep has its own tick.
+		tick := time.NewTicker(strandedTickEvery)
+		defer tick.Stop()
 		for {
 			select {
 			case <-ret.cleanStop:
 				return
 			case <-ret.cleanTrigger:
 				runRecovered("cleanPieces", ret.cleanPieces)
+			case <-tick.C:
+				runRecovered("sweepStranded", ret.sweepIfStranded)
 			}
 		}
 	})
@@ -171,6 +209,7 @@ func (c *Cache) Init(info *metainfo.Info, hash metainfo.Hash) {
 	for i := 0; i < c.pieceCount; i++ {
 		c.pieces[i] = NewPiece(i, c)
 	}
+	openCaches.Store(c, struct{}{})
 }
 
 // LastDelivery returns the latest completion time (Unix seconds) among pieces
@@ -222,7 +261,26 @@ func (c *Cache) Piece(m metainfo.Piece) storage.PieceImpl {
 	return &PieceFake{}
 }
 
+// Close releases the cache and returns once its background goroutines (cleaner, post-reader
+// cleanups) have finished. A repeated Close joins them too.
+//
+// Those goroutines take the engine's client lock, so Close must not run under anything the
+// client lock's holders can wait for: not Storage.mu (OpenTorrent takes it under the client
+// lock; Storage.CloseHash and Close release it before calling this), not the engine's storage
+// lock. The engine's own storage-close hook, which runs under the
+// torrent's storage write lock (a piece hash start holds the client lock while it waits for
+// that lock), is closeNoWait for that reason.
 func (c *Cache) Close() error {
+	_ = c.closeNoWait()
+	c.bg.Wait()
+	return nil
+}
+
+// closeNoWait is Close without the join.
+func (c *Cache) closeNoWait() error {
+	c.bgMu.Lock()
+	c.bgClosed = true
+	c.bgMu.Unlock()
 	c.muReaders.Lock()
 	if c.isClosed.Load() {
 		c.muReaders.Unlock()
@@ -237,6 +295,7 @@ func (c *Cache) Close() error {
 	}
 
 	close(c.cleanStop)
+	openCaches.Delete(c)
 
 	// Note: c.storage.caches cleanup is handled by Storage.CloseHash() and Storage.Close()
 	// to avoid concurrent map modification during range iteration in Storage.Close().
@@ -381,9 +440,16 @@ func (c *Cache) cleanPieces() {
 	// would block up to 1s on waitAvailable() before priorities were updated.
 	c.refreshPriorities()
 
+	now := time.Now()
+	c.evictIfDue(now)
+	// After eviction: each candidate waits on the engine's client lock, and eviction must not.
+	c.dropStrandedPartials(now)
+}
+
+// evictIfDue is the eviction half of cleanPieces.
+func (c *Cache) evictIfDue(now time.Time) {
 	// V138: Throttle the cleaner's eviction to at most once per second, unless we are near
 	// capacity (>90%). MarkComplete evicts through evictNow and skips this throttle.
-	now := time.Now()
 	if now.UnixNano()-c.lastCleanNS.Load() < int64(time.Second) && atomic.LoadInt64(&c.filled) < (c.capacity*9)/10 {
 		return
 	}
@@ -732,7 +798,7 @@ func (c *Cache) CloseReader(r *Reader) {
 	r.Close()
 	delete(c.readers, r)
 	c.muReaders.Unlock()
-	safeGo(func() {
+	c.goBG(func() {
 		c.clearPriority()
 	})
 }

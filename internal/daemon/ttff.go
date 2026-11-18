@@ -170,8 +170,11 @@ type TTFFSession struct {
 	bytesWarmupTail atomic.Int64
 	failedReads     atomic.Int64 // reads that gave up with EAGAIN/EIO, for /api/sessions
 	lastOff         atomic.Int64 // start offset of previous read; -1 = none
+	lastEnd         atomic.Int64 // end of that read (offset + bytes returned); meaningful once lastOff >= 0
 	seekCount       atomic.Int64
 	stallCount      atomic.Int64
+	inflight        atomic.Int32 // reads in progress
+	inflightSince   atomic.Int64 // unixNano the first of them started; 0 when none
 	maxStallMS      atomic.Int64
 	tailOrDeep      atomic.Bool // read at off>=8MB or inside last 16MB (tail region)
 
@@ -222,6 +225,43 @@ type TTFFSession struct {
 
 	closeOnce sync.Once
 	closed    atomic.Bool
+}
+
+// readBegin and readEnd bracket a read, so one that hangs shows (a stall is counted only when
+// a read ends). The clock is that of the oldest read in flight.
+func (s *TTFFSession) readBegin() {
+	if s.inflight.Add(1) == 1 {
+		s.inflightSince.Store(time.Now().UnixNano())
+	}
+}
+
+func (s *TTFFSession) readEnd() {
+	if s.inflight.Add(-1) <= 0 {
+		s.inflight.Store(0)
+		s.inflightSince.Store(0)
+	}
+}
+
+// stuckFor is how long the oldest read in flight has been running; 0 when none is.
+func (s *TTFFSession) stuckFor(now time.Time) time.Duration {
+	if s.inflight.Load() <= 0 {
+		return 0
+	}
+	since := s.inflightSince.Load()
+	if since == 0 {
+		return 0
+	}
+	return max(now.Sub(time.Unix(0, since)), 0)
+}
+
+// noteReadInFlight marks a read of path as running and returns the call that ends it.
+func noteReadInFlight(path string) func() {
+	if val, ok := sessions.Load(path); ok {
+		s := val.(*TTFFSession)
+		s.readBegin()
+		return s.readEnd
+	}
+	return func() {}
 }
 
 // recordRead updates session state for one served FUSE read. lastReadAt is
@@ -275,6 +315,7 @@ func (s *TTFFSession) recordRead(src ttffSource, d time.Duration, n int, off int
 				ttffStats.seekLatency.Add(d)
 			}
 		}
+		s.lastEnd.Store(off + int64(n))
 		s.lastOff.Store(off)
 	}
 	if d > ttffStallDuration {

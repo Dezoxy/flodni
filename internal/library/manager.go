@@ -147,6 +147,23 @@ func (e *Error) Error() string { return e.Message }
 // can route on errors.Is while a client still gets a status.
 func (e *Error) Unwrap() error { return e.Err }
 
+// metadataWait is the caller's metadata_wait in seconds, defaulted and capped.
+func metadataWait(requested int) int {
+	if requested <= 0 {
+		return defaultMetadataWait
+	}
+	return min(requested, maxMetadataWait)
+}
+
+// addFailure is the answer to an engine add that failed: no metadata in time is the same
+// 504 a metadata poll gives, anything else a rejection.
+func addFailure(wait int, err error) *Error {
+	if errors.Is(err, errNoMetadata) {
+		return errf(http.StatusGatewayTimeout, "no metadata after %ds: %v", wait, err)
+	}
+	return errf(http.StatusBadGateway, "gostorm rejected the torrent: %v", err)
+}
+
 func errf(status int, format string, args ...interface{}) *Error {
 	return &Error{Status: status, Message: fmt.Sprintf(format, args...)}
 }
@@ -500,12 +517,13 @@ func (m *Manager) add(ctx context.Context, req AddRequest) (*AddResponse, error)
 	if err := m.uploadReleaseFile(ctx, file, req.Title); err != nil {
 		return nil, err
 	}
-	addedHash, err := m.cfg.GoStorm.AddTorrent(ctx, magnet, req.Title)
+	wait := metadataWait(req.MetadataWait)
+	addedHash, err := m.cfg.GoStorm.AddTorrent(withAddWait(ctx, wait), magnet, req.Title)
 	if err != nil || addedHash == "" {
 		// An interrupted request may still have been taken, and the engine saves it;
 		// dropTorrentIfUnused spares a torrent another stub already uses.
 		dropped[requestedHash] = true
-		return nil, errf(http.StatusBadGateway, "gostorm rejected the torrent: %v", err)
+		return nil, addFailure(wait, err)
 	}
 	// The filename builders slice the hash, so a malformed answer must stop here.
 	hash = strings.ToLower(strings.TrimSpace(addedHash))
@@ -520,13 +538,6 @@ func (m *Manager) add(ctx context.Context, req AddRequest) (*AddResponse, error)
 	// elsewhere sees the hash free and removes the torrent from under this add.
 	if hash != requestedHash {
 		defer m.lockHash(hash)()
-	}
-
-	wait := req.MetadataWait
-	if wait <= 0 {
-		wait = defaultMetadataWait
-	} else if wait > maxMetadataWait {
-		wait = maxMetadataWait
 	}
 
 	info, err := m.cfg.GoStorm.GetTorrentInfo(ctx, hash, wait)

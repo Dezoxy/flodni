@@ -45,7 +45,7 @@ func TestNewReaderSetsEngineReadaheadImmediately(t *testing.T) {
 			settings.BTsets = &settings.BTSets{CacheSize: 128 * mib, ReaderReadAHead: tc.pct}
 			BoundedReadahead = bounded
 			fake := &raRecorder{}
-			cache := &Cache{readers: map[*Reader]struct{}{}}
+			cache := &Cache{readers: map[*Reader]struct{}{}, openSize: 128 * mib}
 			cache.activeReaders.Store(tc.existing)
 			r := &Reader{Reader: fake}
 			r.attach(cache)

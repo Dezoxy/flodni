@@ -227,6 +227,10 @@ func handlePlexWebhook(w http.ResponseWriter, r *http.Request) {
 			}
 			exactState.mu.Lock()
 			exactState.IsStopped = false
+			if payload.Event == "media.play" {
+				// Only a play starts a session: ConfirmedAt moves on every resume and stop too.
+				exactState.SessionStart = time.Now()
+			}
 			// Cache webhookImdbID into state for fast IMDB matching in future sessions.
 			// A pass-1 match is precise (filename, path map or IMDB ID) and cannot
 			// cross-pollinate episodes of a season pack. The pass-1c bootstrap counts as

@@ -47,6 +47,12 @@ type Config struct {
 	AttrTimeoutSeconds     float64 `json:"attr_timeout_seconds"`
 	EntryTimeoutSeconds    float64 `json:"entry_timeout_seconds"`
 	NegativeTimeoutSeconds float64 `json:"negative_timeout_seconds"`
+	// The three timeouts are startup-only mount options, each 0 to MaxFuseTimeoutSeconds;
+	// a value outside refuses the start. A TTL above the default is a start-up warning
+	// (ADR 5: no kernel dentry invalidation yet).
+	// FuseDisableSplice turns off splicing from files to /dev/fuse (go-fuse DisableSplice).
+	// Startup-only; off, as before it was an option.
+	FuseDisableSplice bool `json:"fuse_disable_splice"`
 
 	// FuseMaxInflightMB caps the RAM go-fuse checks out for in-flight requests.
 	// Each request reserves ~MaxWrite (4MB), so a scan storm is unbounded at 0.
@@ -226,6 +232,20 @@ type Config struct {
 	// the next announce (internal/gostorm/torr/redial.go). No DHT, PEX or public tracker
 	// is involved. Off unless the owner turns it on; read when a peer drops.
 	RedialDroppedPeer bool `json:"redial_dropped_peer"`
+
+	// EngineRefillV2 is an opt-in switch for the engine's request-refill changes adapted from
+	// upstream (internal/anacrolix-torrent, ClientConfig.RefillV2): a cap on the candidates a
+	// refill sorts, a steal of requests from a holder that delivers nothing, a refill at half a
+	// queue instead of an empty one, and released timers. Off unless the owner turns it on, and
+	// read once at start: a change needs a restart. With it off the engine runs the code it
+	// always ran.
+	EngineRefillV2 bool `json:"engine_refill_v2"`
+
+	// EngineColdBoost is an opt-in switch adapted from upstream: a torrent that wakes with a
+	// per-torrent connection limit below 35 gets 35 until 1 MiB of useful data has arrived or
+	// 30 s have passed, then the configured limit comes back (internal/gostorm/torr/coldboost.go).
+	// Off unless the owner turns it on, and read once at start: a change needs a restart.
+	EngineColdBoost bool `json:"engine_cold_boost"`
 
 	// PlaybackWebhookWarnDays is the window of the "no play webhook" warning
 	// (internal/daemon/webhook_status.go): it is raised when a reader session closed unconfirmed in the
@@ -485,7 +505,30 @@ func LoadConfig() (Config, error) {
 	// 5. Finalize and map derived fields
 	cfg.finalize()
 
+	if loadErr == nil {
+		loadErr = cfg.validateFuse()
+	}
 	return cfg, loadErr
+}
+
+// MaxFuseTimeoutSeconds is the largest FUSE attribute, entry or negative timeout.
+const MaxFuseTimeoutSeconds = 60
+
+// validateFuse refuses a timeout outside 0..MaxFuseTimeoutSeconds (NaN included).
+func (c *Config) validateFuse() error {
+	for _, t := range []struct {
+		key string
+		v   float64
+	}{
+		{"attr_timeout_seconds", c.AttrTimeoutSeconds},
+		{"entry_timeout_seconds", c.EntryTimeoutSeconds},
+		{"negative_timeout_seconds", c.NegativeTimeoutSeconds},
+	} {
+		if !(t.v >= 0 && t.v <= MaxFuseTimeoutSeconds) {
+			return fmt.Errorf("%s is %v: it must be from 0 to %d seconds", t.key, t.v, MaxFuseTimeoutSeconds)
+		}
+	}
+	return nil
 }
 
 // authKeys are the exact names of the auth settings.
@@ -1059,6 +1102,9 @@ func (c *Config) LogConfig(logger *slog.Logger) {
 	logger.Info(fmt.Sprintf("LogFormat: %s", c.LogFormat), "log_format", c.LogFormat)
 	logger.Info(fmt.Sprintf("GoStormBaseURL: %s", c.GoStormBaseURL), "go_storm_base_u_r_l", c.GoStormBaseURL)
 	logger.Info(fmt.Sprintf("FUSE Timeouts (Attr/Entry/Neg): %.1f/%.1f/%.1f", c.AttrTimeoutSeconds, c.EntryTimeoutSeconds, c.NegativeTimeoutSeconds))
+	if c.FuseDisableSplice {
+		logger.Info("FUSE splice: disabled")
+	}
 	if c.FuseMaxInflightMB > 0 {
 		logger.Info(fmt.Sprintf("FUSE MaxInflightRequestBytes: %d MB", c.FuseMaxInflightMB), "fuse_max_inflight_m_b", c.FuseMaxInflightMB)
 	} else {

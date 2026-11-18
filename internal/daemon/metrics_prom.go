@@ -13,7 +13,9 @@ import (
 	"flodni/internal/gostorm/native"
 	"flodni/internal/gostorm/settings"
 	"flodni/internal/gostorm/torr"
+	"flodni/internal/gostorm/torr/storage/torrstor"
 	"flodni/internal/promtext"
+	"flodni/internal/readahead"
 	"flodni/internal/warmup"
 )
 
@@ -133,9 +135,11 @@ func collectProm(w *promtext.Writer) {
 	collectProcessProm(w)
 	w.Gauge("flodni_sessions_open", "Sessions open now: the open list of /api/sessions.",
 		promSample(int64(openSessionCount())))
+	collectSessionAheadProm(w)
 
 	collectWarmupProm(w)
 	collectPlaybackProm(w)
+	collectPumpWatchdogProm(w)
 	collectReaderBudgetProm(w)
 	collectWebhookHealthProm(w)
 	collectReadabilityProm(w)
@@ -154,9 +158,28 @@ func collectProm(w *promtext.Writer) {
 		"Outcome of the refill after a short read.",
 		promSample(fuseShortReadRepaired.Load(), lbl("result", "repaired")),
 		promSample(fuseShortReadFailed.Load(), lbl("result", "failed")))
+	collectFuseReadAheadProm(w)
 	w.Counter("flodni_fetch_dedup_total",
 		"Concurrent fetches of the same chunk that shared one fetch.",
 		promSample(fetchFlightDedupCount.Load()))
+}
+
+// collectFuseReadAheadProm writes the mount's kernel read-ahead in bytes, read from sysfs at
+// each scrape (one small file). No series before the mount's BDI is known, on a
+// platform without sysfs, or when the file cannot be read: a zero would read as
+// "read-ahead off".
+func collectFuseReadAheadProm(w *promtext.Writer) {
+	bdi := mountBDI.Load()
+	if bdi == nil {
+		return
+	}
+	kb, err := readAheadKB(sysBDIRoot, *bdi)
+	if err != nil {
+		return
+	}
+	w.Gauge("flodni_fuse_read_ahead_bytes",
+		"Kernel read-ahead of the FUSE mount in bytes (sysfs read_ahead_kb times 1024), read at each scrape. Flodni never writes it; the host may tune it. Absent when the file cannot be read.",
+		promSample(kb*1024))
 }
 
 func collectWarmupProm(w *promtext.Writer) {
@@ -277,6 +300,16 @@ func collectPlaybackProm(w *promtext.Writer) {
 		"Served reads that took longer than one second. Failed reads are not counted. confirmed as in flodni_torrent_idle_closes_total.",
 		promSample(keepaliveCounters.stalls[1].Load(), lbl("confirmed", "true")),
 		promSample(keepaliveCounters.stalls[0].Load(), lbl("confirmed", "false")))
+	w.Counter("flodni_reannounce_total",
+		"Tracker re-announces actually sent for a torrent with a confirmed playback whose swarm starved (fewer than 3 connected peers for 60 s with a read stall, a hung read or a short, shrinking buffer), by reason (starved) and private (true for a private torrent, sent only when its tracker's min interval allowed it). Present from 0.",
+		promSample(reannounces[1].Load(), lbl("reason", "starved"), lbl("private", "true")),
+		promSample(reannounces[0].Load(), lbl("reason", "starved"), lbl("private", "false")))
+	early := countEarlyAnnounce(loadedEarlyAnnounce())
+	w.Gauge("flodni_private_torrents_early_announce",
+		"Loaded private torrents by whether any of their trackers allows an early (starved) re-announce: eligible when a tracker's last successful announce sent a min interval below its interval, ineligible when none did, unknown before a successful announce. Passive: read from regular announces, no extra tracker request.",
+		promSample(int64(early[0]), lbl("state", "eligible")),
+		promSample(int64(early[1]), lbl("state", "ineligible")),
+		promSample(int64(early[2]), lbl("state", "unknown")))
 	w.Counter("flodni_keepalive_releases_total",
 		"Holds that ended, by reason: stop is a stop webhook (or the playback state dropped), ceiling is playback_keepalive_minutes after the last read or play webhook. The torrent then closes at its next idle check.",
 		promSample(keepaliveCounters.releases[0].Load(), lbl("reason", "stop")),
@@ -335,12 +368,29 @@ func collectReadAheadProm(w *promtext.Writer) {
 	w.Gauge("flodni_readahead_cache_bytes", "Bytes held in the read-ahead cache.", promSample(total))
 	w.Gauge("flodni_readahead_cache_active_bytes", "Bytes in the read-ahead cache that are not stale.", promSample(active))
 	w.Gauge("flodni_readahead_cache_entries", "Entries in the read-ahead cache.", promSample(int64(entries)))
+	byReason := raCache.EvictionsByReason()
+	evictions := make([]promtext.Sample, 0, len(byReason))
+	for i, n := range byReason {
+		evictions = append(evictions, promSample(n, lbl("reason", readahead.ReasonNames[i])))
+	}
 	w.Counter("flodni_readahead_evictions_total",
-		"Chunks the read-ahead cache dropped on a Put to stay under its budget. The stale sweep is not counted.",
-		promSample(raCache.Evictions()))
+		"Chunks the read-ahead cache dropped on a Put to stay under its budget, by reason: idle (path not read for 120 s), behind (already consumed by the player) or ahead (farthest ahead on the path holding the most bytes). The idle sweep is not counted.",
+		evictions...)
+	w.Counter("flodni_readahead_evictions_near_player_total",
+		"Evictions of a chunk starting within the player's fair share of the budget, for a path whose player is known. The harmful kind: it stays near 0.",
+		promSample(raCache.NearPlayerEvictions()))
 	if b := gc(); b != nil {
 		w.Gauge("flodni_readahead_cache_budget_bytes", "Size budget of the read-ahead cache.", promSample(b.ReadAheadBudget))
 	}
+	pumps := playingPumpCount()
+	w.Gauge("flodni_playing_pumps", "Read-ahead pumps of playing files, the streams that read_ahead_budget_mb is shared among. Scan pumps and pumps of paused or unconfirmed files are not counted.", promSample(pumps))
+	var lead int64
+	if b := gc(); b != nil {
+		lead = streamLeadLimit(b.ReadAheadBudget, pumps, b.ReadAheadBase)
+	}
+	w.Gauge("flodni_pump_lead_limit_bytes",
+		"How far one pump may read ahead of its player: its share of read_ahead_budget_mb (the budget divided by the live pumps, minus a few chunks of slack), for a chunk of read_ahead_base.",
+		promSample(lead))
 }
 
 // openSessionCount counts the sessions /api/sessions lists as open, without building
@@ -386,6 +436,12 @@ func collectEngineReadsProm(w *promtext.Writer) {
 	w.Counter("flodni_engine_gradient2_backoff_samples_total",
 		"Gradient2 limiter samples that found the peer's latency gradient below 1 and shrank its growth. Stays 0 with the limiter off (the default).",
 		promSample(pc.Gradient2Backoffs))
+	w.Counter("flodni_readahead_refetched_bytes_total",
+		"Bytes the engine fetched again for a piece that had completed and been evicted from the in-memory piece cache. Baseline for deciding whether eviction is costing downloads; nothing acts on it.",
+		promSample(torrstor.RefetchedBytes()))
+	w.Gauge("flodni_readahead_stranded_partial_bytes",
+		"Bytes held by partially written pieces outside every reader's protected window, summed over open torrents. Such a piece is never evicted, so after a seek these stay until that piece is fetched to the end. Sampled at scrape under each cache's reader read lock only, never the engine's client lock.",
+		promSample(torrstor.StrandedPartialBytes()))
 	repaired, unfilled := native.ShortReadRepairCounts()
 	w.Counter("flodni_engine_short_read_repairs_total",
 		"Outcome of the stream reader's refill loop, per read that needed it: repaired after a reconnect, or unfilled and left a gap.",

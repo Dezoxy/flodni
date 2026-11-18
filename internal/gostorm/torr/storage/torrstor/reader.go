@@ -62,7 +62,7 @@ func (r *Reader) attach(cache *Cache) {
 	r.cache = cache
 	r.isUse = true
 	n := cache.activeReaders.Add(1)
-	r.SetReadahead(perReaderReadahead(CacheReadahead(), int(n)))
+	r.SetReadahead(perReaderReadahead(cache.Readahead(), int(n)))
 
 	cache.muReaders.Lock()
 	if cache.readers != nil {
@@ -234,7 +234,7 @@ func (r *Reader) Close() {
 	if len(r.file.Torrent().Files()) > 0 {
 		_ = r.Reader.Close() // read-only reader
 	}
-	safeGo(func() {
+	r.cache.goBG(func() {
 		// Serialised with cleanPieces: both rebuild the shared pieceInRange bitmap.
 		r.cache.muRemove.Lock()
 		defer r.cache.muRemove.Unlock()
@@ -279,8 +279,8 @@ func (r *Reader) getOffsetRange() (int64, int64) {
 	// when cache is full, leading to deadlock/OOM.
 	safetyFactor := float64(protectedSafetyPct) / 100
 
-	beginOffset := currentOffset - int64(float64(r.cache.capacity/readers)*safetyFactor*float64(100-prc)/100.0)
-	endOffset := currentOffset + int64(float64(r.cache.capacity/readers)*safetyFactor*float64(prc)/100.0)
+	protected := int64(float64(r.cache.capacity/readers) * safetyFactor)
+	beginOffset, endOffset := protectedWindow(currentOffset, protected, prc, atomic.LoadInt64(&r.readahead))
 
 	if beginOffset < 0 {
 		beginOffset = 0

@@ -38,6 +38,9 @@ type ClientTrackerConfig struct {
 	// The cap on the doubling described above. Set it to FailedAnnounceMinInterval to retry at a
 	// constant interval.
 	FailedAnnounceMaxInterval time.Duration
+	// The least wait between two announces to one tracker, 0 for the default of a minute. Tests
+	// lower it to run in seconds.
+	MinAnnounceInterval time.Duration
 }
 
 // Backported from anacrolix/torrent upstream (4aea1d64b, #1116).
@@ -45,6 +48,14 @@ const (
 	defaultFailedAnnounceMinInterval = time.Minute
 	defaultFailedAnnounceMaxInterval = 30 * time.Minute
 )
+
+// announceFloor is the least wait between two announces to one tracker.
+func (cfg *ClientTrackerConfig) announceFloor() time.Duration {
+	if cfg.MinAnnounceInterval > 0 {
+		return cfg.MinAnnounceInterval
+	}
+	return time.Minute
+}
 
 // failedAnnounceInterval is how long to wait after an announce that failed, given how many
 // consecutive failures there have been (1 for the first).
@@ -127,6 +138,11 @@ type ClientConfig struct {
 	// reaches the holder after it served the block does nothing: the block arrives twice and one
 	// copy is counted as ConnStats.ChunksReadWasted. Backported from upstream 23d8abf90 (#1095).
 	StealRequestGrace time.Duration
+	// RefillV2 turns on the request-refill changes adapted from upstream Tiramisu fd976eb:
+	// a cap on the candidates a refill sorts, a steal from a holder that delivers nothing,
+	// a refill at half a queue instead of an empty one, and released timers. Off by default:
+	// with it off none of that code runs. Set once at start (daemon option engine_refill_v2).
+	RefillV2 bool
 	// AdaptivePipeline sizes each peer's request queue on its minimum request latency instead of
 	// a fixed 2s of data. On by default; TORRENT_ADAPTIVE_PIPELINE=0 disables it for a
 	// comparison run.

@@ -132,13 +132,15 @@ func TestHandlePrometheus(t *testing.T) {
 		"flodni_playback_webhooks_received_total", "flodni_playback_webhook_match_rule_total", "flodni_warm_fills_total",
 		"flodni_playback_webhook_last_timestamp_seconds", "flodni_unconfirmed_read_last_session_timestamp_seconds", "flodni_warning",
 		"flodni_torrent_idle_closes_total", "flodni_torrent_reopens_total", "flodni_read_stalls_total",
-		"flodni_keepalive_releases_total", "flodni_keepalive_evicted_total", "flodni_keepalive_held_torrents",
+		"flodni_keepalive_releases_total", "flodni_keepalive_evicted_total", "flodni_keepalive_held_torrents", "flodni_reannounce_total", "flodni_private_torrents_early_announce",
 		"flodni_wake_refused_total",
 		"flodni_warm_fill_bytes_total", "flodni_warm_cache_failures_total", "flodni_warm_queue_files", "flodni_warm_paused",
-		"flodni_stub_index_mismatch_total",
+		"flodni_stub_index_mismatch_total", "flodni_playing_sessions_without_pump", "flodni_pump_watchdog_restarts_total",
 		"flodni_engine_short_reads_total", "flodni_engine_short_read_repairs_total", "flodni_engine_peer_redials_total", "flodni_engine_db_write_errors_total", "flodni_sessions_open",
 		"flodni_engine_hedge_triggers_total", "flodni_engine_peer_ejects_total", "flodni_engine_peer_churn_drops_total",
-		"flodni_engine_gradient2_backoff_samples_total", "flodni_readahead_evictions_total", "flodni_warmup_head_fill_duration_seconds",
+		"flodni_engine_gradient2_backoff_samples_total", "flodni_readahead_evictions_total", "flodni_readahead_evictions_near_player_total", "flodni_warmup_head_fill_duration_seconds",
+		"flodni_readahead_refetched_bytes_total", "flodni_readahead_stranded_partial_bytes",
+		"flodni_playing_pumps", "flodni_pump_lead_limit_bytes",
 		"go_goroutines", "go_memstats_heap_inuse_bytes", "go_memstats_sys_bytes", "go_gc_cycles_total",
 	} {
 		if !strings.Contains(body, "# TYPE "+fam+" ") {
@@ -165,6 +167,11 @@ func TestHandlePrometheus(t *testing.T) {
 		`flodni_keepalive_releases_total{reason="stop"}`,
 		`flodni_keepalive_releases_total{reason="ceiling"}`,
 		`flodni_keepalive_evicted_total`,
+		`flodni_reannounce_total{reason="starved",private="true"}`,
+		`flodni_reannounce_total{reason="starved",private="false"}`,
+		`flodni_private_torrents_early_announce{state="eligible"}`,
+		`flodni_private_torrents_early_announce{state="ineligible"}`,
+		`flodni_private_torrents_early_announce{state="unknown"}`,
 		`flodni_engine_db_write_errors_total{op="set"}`,
 		`flodni_engine_db_write_errors_total{op="rem"}`,
 		`flodni_engine_db_write_errors_total{op="clear"}`,
@@ -203,7 +210,14 @@ func TestHandlePrometheus(t *testing.T) {
 		`flodni_engine_peer_churn_drops_total{transport="tcp"}`,
 		`flodni_engine_peer_churn_drops_total{transport="utp"}`,
 		`flodni_engine_gradient2_backoff_samples_total`,
-		`flodni_readahead_evictions_total`,
+		`flodni_readahead_evictions_total{reason="idle"}`,
+		`flodni_readahead_evictions_total{reason="behind"}`,
+		`flodni_readahead_evictions_total{reason="ahead"}`,
+		`flodni_readahead_evictions_near_player_total`,
+		`flodni_readahead_refetched_bytes_total`,
+		`flodni_readahead_stranded_partial_bytes`,
+		`flodni_playing_pumps`,
+		`flodni_pump_lead_limit_bytes`,
 		`flodni_warmup_head_fill_duration_seconds_sum`,
 		`flodni_warmup_head_fill_duration_seconds_count`,
 		`flodni_warmup_head_fill_duration_seconds_bucket{le="120"}`,
@@ -311,20 +325,22 @@ func TestWarmupFilesGaugeNeedsTheCache(t *testing.T) {
 func TestRuntimeAndProcessFamilyTypes(t *testing.T) {
 	body := scrape(t).Body.String()
 	for fam, typ := range map[string]string{
-		"flodni_engine_short_reads_total":        "counter",
-		"flodni_engine_short_read_repairs_total": "counter",
-		"flodni_sessions_open":                   "gauge",
-		"go_goroutines":                          "gauge",
-		"go_memstats_heap_inuse_bytes":           "gauge",
-		"go_memstats_sys_bytes":                  "gauge",
-		"go_gc_cycles_total":                     "counter",
+		"flodni_engine_short_reads_total":         "counter",
+		"flodni_engine_short_read_repairs_total":  "counter",
+		"flodni_sessions_open":                    "gauge",
+		"flodni_readahead_refetched_bytes_total":  "counter",
+		"flodni_readahead_stranded_partial_bytes": "gauge",
+		"go_goroutines":                           "gauge",
+		"go_memstats_heap_inuse_bytes":            "gauge",
+		"go_memstats_sys_bytes":                   "gauge",
+		"go_gc_cycles_total":                      "counter",
 	} {
 		if !strings.Contains(body, "# TYPE "+fam+" "+typ+"\n") {
 			t.Errorf("%s is not declared as a %s", fam, typ)
 		}
 	}
 	want := openSessionCount()
-	if got := len(openSessionRecords()); got != want {
+	if got := len(openSessionViews(time.Now())); got != want {
 		t.Fatalf("open sessions: gauge counts %d, /api/sessions lists %d", want, got)
 	}
 	if _, err := os.Stat("/proc/self/fd"); err == nil {

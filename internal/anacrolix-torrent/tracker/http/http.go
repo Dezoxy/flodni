@@ -23,6 +23,9 @@ import (
 
 var vars = expvar.NewMap("tracker/http")
 
+// maxTrackerResponseBytes bounds an HTTP tracker response body.
+const maxTrackerResponseBytes = 4 << 20
+
 func setAnnounceParams(_url *url.URL, ar *AnnounceRequest, opts AnnounceOpt) {
 	q := url.Values{}
 
@@ -112,7 +115,11 @@ func (cl Client) Announce(ctx context.Context, ar AnnounceRequest, opt AnnounceO
 	}
 	defer resp.Body.Close()
 	var buf bytes.Buffer
-	io.Copy(&buf, resp.Body)
+	// A tracker response is a few KB: a broken or hostile tracker must not fill the RAM.
+	if n, _ := io.Copy(&buf, io.LimitReader(resp.Body, maxTrackerResponseBytes+1)); n > maxTrackerResponseBytes {
+		err = fmt.Errorf("tracker response exceeds %d bytes", maxTrackerResponseBytes)
+		return
+	}
 	if resp.StatusCode != 200 {
 		err = fmt.Errorf("response from tracker: %s: %q", resp.Status, buf.Bytes())
 		return
@@ -131,6 +138,7 @@ func (cl Client) Announce(ctx context.Context, ar AnnounceRequest, opt AnnounceO
 	}
 	vars.Add("successful http announces", 1)
 	ret.Interval = trackerResponse.Interval
+	ret.MinInterval = trackerResponse.MinInterval
 	ret.Leechers = trackerResponse.Incomplete
 	ret.Seeders = trackerResponse.Complete
 	if len(trackerResponse.Peers.List) != 0 {
@@ -151,7 +159,9 @@ func (cl Client) Announce(ctx context.Context, ar AnnounceRequest, opt AnnounceO
 
 type AnnounceResponse struct {
 	Interval int32 // Minimum seconds the local peer should wait before next announce.
-	Leechers int32
-	Seeders  int32
-	Peers    []Peer
+	// The tracker's "min interval" (seconds), 0 when it sent none; a UDP tracker has none.
+	MinInterval int32
+	Leechers    int32
+	Seeders     int32
+	Peers       []Peer
 }

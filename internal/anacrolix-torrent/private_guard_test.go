@@ -125,3 +125,30 @@ func TestPrivateAddSpecNeverAnnouncesToDht(t *testing.T) {
 		t.Errorf("%d private torrents announced to the DHT of %d", n, rounds)
 	}
 }
+
+// BEP 27 / hard rule 3: a private torrent's peer must not make us talk to the DHT. A Port
+// message would otherwise ping the DHT node at an address the peer names.
+func TestPrivatePeerPortMessageNeverPingsDht(t *testing.T) {
+	yes := true
+	for _, tc := range []struct {
+		name    string
+		info    *metainfo.Info
+		private bool
+	}{
+		{"private", &metainfo.Info{Private: &yes}, true},
+		{"public control", &metainfo.Info{}, false},
+	} {
+		dht := &pingCounter{}
+		cl := &Client{dhtServers: []DhtServer{dht}}
+		c := &PeerConn{Peer: Peer{t: &Torrent{cl: cl, info: tc.info}, RemoteAddr: &net.TCPAddr{IP: net.IPv4(192, 0, 2, 1), Port: 6881}}}
+		c.onPeerSentPort(6881)
+		time.Sleep(100 * time.Millisecond) // pings are sent from goroutines
+		want := int32(1)
+		if tc.private {
+			want = 0
+		}
+		if n := dht.pings.Load(); n != want {
+			t.Errorf("%s: %d DHT pings for a Port message, want %d", tc.name, n, want)
+		}
+	}
+}

@@ -642,7 +642,7 @@ Requests from running v0.2.0 on a real host.
 ## Durable records (after v0.2.2)
 
 From a review after v0.2.2 and from running it. Steps 1 to 3 were must-fix:
-data loss and an open-port gap. Steps 1 to 17 are built; 18 to 20 are
+data loss and an open-port gap. Steps 1 to 20 are built; 21 and 22 are
 designed, not built.
 
 1. **Make the engine database durable.** [FINISHED] The engine's `config.db` is
@@ -747,19 +747,28 @@ designed, not built.
 17. **Make the `App` test isolation enforced.** [FINISHED] The last four
     counters moved onto `App`, and a test that leaves pumps, prefetches or
     timers registered on its `App` fails. Built (#212).
-18. **Harden the fetches an add makes.** `POST /torrents` still fetches an
-    `http(s)` link with the default client (redirects followed, unbounded body)
-    and reads a `file:` path; the poster check has no timeout. Bound the body,
-    refuse cross-host redirects, drop `file:` from the API, and give the poster
-    check a timeout. Designed, not built.
-19. **Answer an add once its record exists.** The engine add answers 200 before
-    the record is saved, and a failed save or a metadata timeout never reaches
-    the caller. Needs an API decision: an accepted status, or a saved-state
-    field. Designed, not built.
-20. **A string-aware comment stripper for `config.json`.** The `//` stripper is
-    line-based, so a hand-edited line holding two URLs is cut at the second;
-    panel saves write one value per line and are unaffected. Designed, not
-    built.
+18. **Harden the fetches an add makes.** [FINISHED] `POST /torrents` refuses
+    `file:` links, caps an `http(s)` body at 10 MiB, follows at most 3
+    redirects and only on the host it started at, and the poster check has one
+    10 s deadline for its HEAD and GET. Built (#235).
+19. **Answer an add once its record exists.** [FINISHED] With `save_to_db`,
+    `POST /torrents` answers only after the record is committed: 504 when no
+    metadata arrived, 500 when the save failed. This covers `POST /torrents`
+    only: `POST /torrent/upload` with `save` still saves in the background and
+    answers 200 first. The library add maps the engine's 504 to its own 504 and
+    its `metadata_wait` bounds the engine add. Built (#235).
+20. **A string-aware comment stripper for `config.json`.** [FINISHED] The `//`
+    stripper was line-based, so a hand-edited line holding two URLs was cut at
+    the second; panel saves write one value per line and were unaffected.
+    Built (#225).
+21. **An opt-in private-address block for add fetches.** A config option,
+    default off, that refuses a first URL resolving to a loopback, private or
+    link-local address, and checks the dialled IP so DNS rebinding does not get
+    around it. It is opt-in because a link to a LAN indexer is a legitimate
+    use. Designed, not built.
+22. **A body cap on `/torrent/upload`.** A `MaxBytesReader` on the upload route,
+    with a handler test that drives the real upload and add handlers together.
+    Designed, not built.
 
 ## Authentication (v0.3.0)
 
@@ -818,53 +827,117 @@ built in v0.3.0; ADR 0004 is Accepted and implemented.
 From a review of upstream Tiramisu v1.11.9 to v1.11.11 (eleven commits) against
 Flodni's diverged tree. Each step says whether Flodni still has the code path
 upstream fixed; that is a read of the code, not a reproduction. Port with
-upstream's tests where they exist, test first. Designed, not built.
+upstream's tests where they exist, test first. Steps 1 to 7 are built.
 
-1. **Refuse malformed input from peers and trackers.** A peer can send a
-   negative metadata piece index, which panics on the request table; a chunk is
-   not checked against the request it answers, so a misaligned one is written
-   past the piece; `validateInfo` has no bounds on piece or file lengths; a
-   tracker response is read without a size cap (cap it at 4 MiB); a bad webseed
-   URL panics instead of failing the request; every `Port` message sends a DHT
-   ping to a port the peer picks (ping on the first only); and the client fails
-   to start where IPv6 is unavailable instead of skipping it. One PR, with the
-   `-std=gnu17` cgo flag in CI so the build survives the runner's move to a
-   C23-default compiler. Flodni has every one of these paths.
-2. **Real directory times.** `fillAttrFromStat` gives every directory
+Order. The step numbers stay stable because other changes refer to them; the
+order of work follows what a deployment gains. Step 1 first (a peer port
+reachable from the internet), then step 6 (a media server's analysis during
+playback). Steps 5 and 3 next, but measured first (see their counters). Then
+step 4, then step 2 (low priority where libraries reach the mount through
+symlinks from a real filesystem; kept for correctness), and step 7 last.
+
+1. **Refuse malformed input from peers and trackers.** [FINISHED] A peer can
+   send a negative metadata piece index, which panics on the request table; a
+   chunk is not checked against the request it answers, so a misaligned one is
+   written past the piece; `validateInfo` has no bounds on piece or file
+   lengths; a tracker response is read without a size cap (cap it at 4 MiB); a
+   bad webseed URL panics instead of failing the request; every `Port` message
+   sends a DHT ping to a port the peer picks (ping on the first only); and the
+   client fails to start where IPv6 is unavailable instead of skipping it. One
+   PR, with the `-std=gnu17` cgo flag in CI so the build survives the runner's
+   move to a C23-default compiler. Flodni has every one of these paths. Built
+   (#234).
+2. **Real directory times.** [FINISHED] `fillAttrFromStat` gives every directory
    `time.Now()`, so a library scanner sees every folder modified on each stat
    and re-walks everything. Take the time from the physical directory. A test
-   shows a stub add changes the directory time and nothing else does.
-3. **Keep the whole readahead safe from eviction.** The protected window still
-   uses the old percentage split, so pieces between the two bands are fetched
-   with deadlines and then evicted (about 11% re-download with 4 to 8 MB
-   pieces). Port upstream's `protectedWindow` and its test.
+   shows a stub add changes the directory time and nothing else does. Built
+   (#232).
+3. **Keep the whole readahead safe from eviction.** [FINISHED] The protected
+   window still uses the old percentage split, so pieces between the two bands
+   are fetched with deadlines and then evicted (about 11% re-download with 4 to
+   8 MB pieces). Port upstream's `protectedWindow` and its test. Add a counter
+   of bytes fetched twice for the same piece, to measure before and after. Built
+   (#240).
 4. **Write a stub only when it changes; save on wake only without metadata.**
-   An identical stub rewrite still bumps its time and makes the media server
-   re-analyse it: compare before the atomic write. A wake still snapshots the
-   torrent to the database under the client lock during playback: save only
-   while its metadata is missing.
-5. **Free partial pieces a seek abandons.** Seek-heavy playback strands
-   partially written in-memory pieces until eviction of complete ones reaches
-   them (upstream measured 40 seeks holding 480 MB in a 128 MB cache). Port
-   `ForgetPartialPiece` with its guards (wanted, hashing, queued, pending
+   [FINISHED] An identical stub rewrite still bumps its time and makes the media
+   server re-analyse it: compare before the atomic write. A wake still snapshots
+   the torrent to the database under the client lock during playback: save only
+   while its metadata is missing. Built (#232).
+5. **Free partial pieces a seek abandons.** [FINISHED] Seek-heavy playback
+   strands partially written in-memory pieces until eviction of complete ones
+   reaches them (upstream measured 40 seeks holding 480 MB in a 128 MB cache).
+   Port `ForgetPartialPiece` with its guards (wanted, hashing, queued, pending
    writes, outstanding requests) and a sweep at most every 5 s, after step 3,
-   once the diverged `piece` fields it needs are confirmed.
-6. **Keep probe reads from moving the pump.** A media server's probe and
-   analysis reads on a file someone is watching move the pump and take the
+   once the diverged `piece` fields it needs are confirmed. Add a metric of
+   partial-piece bytes held after a seek, alertable; measure before porting.
+   Built (#241).
+6. **Keep probe reads from moving the pump.** [FINISHED] A media server's probe
+   and analysis reads on a file someone is watching move the pump and take the
    primary stream. First the two small safety parts: an idempotent handle
-   release and interrupting the pump reader when the request context ends.
-   The header-read and takeover logic only behind a simulator seam that drives
-   the handle and pump code without the engine; Flodni's pump has diverged and
-   resume positions depend on it.
-7. **Measure first, then decide.** Request refill (a candidate cap, stealing
-   from stalled holders, half-queue refill) touches the same functions as
-   Flodni's adaptive pipeline, so it is a performance project with a benchmark
-   on a real swarm. Mount tuning (1 MB kernel readahead, longer attribute and
-   entry TTLs with kernel invalidation, splice off) needs privileges and
-   changes the live mount: decide it in an ADR.
+   release and interrupting the pump reader when the request context ends. The
+   header-read and takeover logic only behind a simulator seam that drives the
+   handle and pump code without the engine; Flodni's pump has diverged and
+   resume positions depend on it. Built (#237).
+7. **Measure first, then decide.** [FINISHED] Request refill (a candidate cap,
+   stealing from stalled holders, half-queue refill) touches the same functions
+   as Flodni's adaptive pipeline, so it is a performance project with a
+   benchmark on a real swarm. Mount tuning (1 MB kernel readahead, longer
+   attribute and entry TTLs with kernel invalidation, splice off) needs
+   privileges and changes the live mount. Flodni never writes sysfs: it logs the
+   mount's BDI id once at start and exposes `read_ahead_kb` as the gauge
+   `flodni_fuse_read_ahead_bytes` (observe only, built), so the host can tune it
+   and the effect can be seen. The TTLs and splice come only as config options
+   with defaults unchanged: the ADR is
+   [0005](architecture/decisions/0005-fuse-timeouts-splice-readahead.md); the
+   options exist (`attr_timeout_seconds`, `entry_timeout_seconds`,
+   `fuse_disable_splice`, startup-only, a timeout outside 0 to 60 s refuses the
+   start), defaults unchanged. A TTL above 1 s warns at start until kernel
+   dentry invalidation is built. Raising them is for the deployment to A/B with
+   numbers. Built (#233, #238, #239).
 
 Not needed: the cold-open wake grace (`StartWake` exists), disabling WebTorrent
 (already off), and the TV-sync duplicate-name fix (no syncer in this tree).
+
+## Ideas from upstream v1.11.12 to v1.11.15 (after v0.3.5)
+
+From a review of upstream Tiramisu v1.11.12 to v1.11.15 against Flodni's
+tree, and from a field report: a private-tracker season pack whose only
+connected seeder dropped mid-play left 0 peers for about 8 minutes, and
+episode starts whose middle was not cached stalled 10 to 12 times per
+session, up to 20 s each, with no failed reads. The order puts the
+measurement before the change it is meant to measure. Steps 1 to 4 are built.
+
+1. **Panel security headers.** [FINISHED] The panel sets only `frame-ancestors
+   'none'` and `X-Frame-Options: DENY`. Add `X-Content-Type-Options: nosniff`
+   and a `Referrer-Policy` on the panel and the control API's responses, and
+   `Strict-Transport-Security` only when the panel is known to be https (TLS,
+   `X-Forwarded-Proto`, or `auth_panel_https`). Upstream 53aa761. Built (#244).
+2. **Tell the end of a file apart from an early pump exit.** [FINISHED] The V306
+   check warns whenever a pump exits during confirmed playback, including when
+   it simply read the file to the end; upstream found most of its warnings were
+   that. Record a reached-end-of-file flag and log the end of the file as
+   information, keeping the warning for a real early exit. Upstream c32cd25.
+   Built (#246).
+3. **Show how far ahead of the player data is ready.** [FINISHED] During a stall
+   the operator cannot tell how much of the file past the player's position is
+   already cached or verified, or where the download frontier is. Add both to
+   each open session in `GET /api/sessions` and as metrics: bytes contiguously
+   available ahead of the last read offset (cache plus verified pieces) and the
+   download frontier offset. Bounded labels only. This is also how steps 4 and
+   the request-refill switch get measured. Inspired by upstream 7eb7000 (a piece
+   map in its UI); no UI here. Built (#247).
+4. **A connection boost at cold start, opt-in.** [FINISHED] On a player's first
+   read past the file header (never a scan, a probe or warm-on-add), when the
+   per-torrent connection limit is below 35, raise it to 35 until 1 MiB of
+   useful data has arrived or 30 s have passed, then restore the configured
+   limit. It helps swarms with more peers than the limit and does little for
+   small private swarms, so it ships behind a switch, default off, measured with
+   step 3. A test pins the raise and the restore, including a torrent closed
+   during the boost. Upstream 2b0df97. Built (#248).
+
+Not needed: upstream's season-pack name parsing (Flodni's), its shield and
+sign-in changes (Flodni has both, broader), and the commits for parts Flodni
+removed (UI, themes, macOS, music).
 
 ## Done
 

@@ -12,6 +12,7 @@ import (
 	"net"
 	"net/netip"
 	"net/url"
+	neturl "net/url"
 	"runtime"
 	"sort"
 	"strings"
@@ -449,7 +450,7 @@ func (t *Torrent) saveMetadataPiece(index int, data []byte) {
 	if t.haveInfo() {
 		return
 	}
-	if index >= len(t.metadataCompletedChunks) {
+	if index < 0 || index >= len(t.metadataCompletedChunks) {
 		t.logger.Printf("%s: ignoring metadata piece %d", t, index)
 		return
 	}
@@ -462,8 +463,12 @@ func (t *Torrent) metadataPieceCount() int {
 }
 
 func (t *Torrent) haveMetadataPiece(piece int) bool {
+	if piece < 0 {
+		return false
+	}
 	if t.haveInfo() {
-		return (1<<14)*piece < len(t.metadataBytes)
+		// Compare indexes, not offsets: (1<<14)*piece wraps for a large peer-supplied piece.
+		return piece < t.metadataPieceCount()
 	} else {
 		return piece < len(t.metadataCompletedChunks) && t.metadataCompletedChunks[piece]
 	}
@@ -635,7 +640,9 @@ func (t *Torrent) setMetadataSize(size int) (err error) {
 		// We already know the correct metadata size.
 		return
 	}
-	if uint32(size) > maxMetadataSize {
+	// Compare on the wide type: uint32(size) truncates a peer-supplied negative or 33-bit value
+	// to a small one that then passes.
+	if size < 0 || int64(size) > int64(maxMetadataSize) {
 		return log.WithLevel(log.Warning, errors.New("bad size"))
 	}
 	if len(t.metadataBytes) == size {
@@ -3531,6 +3538,11 @@ func (t *Torrent) addWebSeed(url string, opts ...AddWebSeedsOpt) {
 	if _, ok := t.webSeeds[url]; ok {
 		return
 	}
+	// Validate once here: an unparsable URL would otherwise fail every request made to it.
+	if _, err := neturl.Parse(url); err != nil {
+		t.logger.Levelf(log.Warning, "dropping unparsable webseed URL: %v", err)
+		return
+	}
 	// I don't think Go http supports pipelining requests. However, we can have more ready to go
 	// right away. This value should be some multiple of the number of connections to a host. I
 	// would expect that double maxRequests plus a bit would be appropriate. This value is based on
@@ -3706,10 +3718,12 @@ func (t *Torrent) checkValidReceiveChunk(r Request) error {
 	if r.Begin >= pieceLength {
 		return fmt.Errorf("chunk begins beyond end of piece (%v >= %v)", r.Begin, pieceLength)
 	}
-	// We could check chunk lengths here, but chunk request size is not changed often, and tricky
-	// for peers to manipulate as they need to send potentially large buffers to begin with. There
-	// should be considerable checks elsewhere for this case due to the network overhead. We should
-	// catch most of the overflow manipulation stuff by checking index and begin above.
+	// The chunk must be exactly the one we would request: a misaligned or oversized chunk would be
+	// written past its chunk, or past the piece, which the storage layer panics on. Adapted from
+	// upstream anacrolix/torrent 4b30f293 via Tiramisu fd976eb.
+	if expected := t.requestIndexToRequest(t.requestIndexFromRequest(r)); r != expected {
+		return fmt.Errorf("chunk %v doesn't match expected request %v", r, expected)
+	}
 	return nil
 }
 
@@ -3895,9 +3909,16 @@ func (t *Torrent) Announce() {
 // result once every announce has returned: peers is the sum of the tracker responses, errs
 // counts the announces that failed, total is the number of trackers announced to, and
 // failures carries one "url: error" entry per failed announce. Trackers still backing off a
-// failure are skipped and not counted. onDone runs on a separate goroutine and may be nil.
+// failure are skipped and not counted. onDone runs on a separate goroutine and may be nil. A
+// private torrent is never announced to from here, and onDone never runs for one.
 func (t *Torrent) AnnounceTracked(onDone func(peers, errs, total int, failures []string)) {
 	t.cl.lock()
+	// It ignores the tracker's interval and the in-flight reservation, so a private torrent's
+	// tracker is never announced to from here; AnnounceWhenDue is the only early path for one.
+	if t.isPrivate() {
+		t.cl.unlock()
+		return
+	}
 	now := time.Now()
 	scrapers := make([]*trackerScraper, 0, len(t.trackerAnnouncers))
 	for _, ta := range t.trackerAnnouncers {

@@ -153,7 +153,8 @@ day to day.
 | the panel behind an identity-aware proxy | the proxy's assertion (below), which is `admin` |
 | the break-glass credential | `admin`, kept offline |
 
-That is six tokens plus the break-glass one. The break-glass `admin` token is
+`GET /api/library/list` needs `read`, not `library`. That is six tokens plus the
+break-glass one. The break-glass `admin` token is
 also the way into the panel when the identity provider is down.
 
 A configuration that uses the tokens file and the proxy sign-in looks like this
@@ -304,6 +305,11 @@ mode) and only the control port reads the cookie, never the engine's.
   the panel's hostname, so run no other service you do not trust on it.
 - The panel page answers `Content-Security-Policy: frame-ancestors 'none'` and
   `X-Frame-Options: DENY`.
+- Every control-port response (the panel, every API route, refusals and the open
+  routes) carries `X-Content-Type-Options: nosniff` and `Referrer-Policy:
+  same-origin`. `Strict-Transport-Security: max-age=31536000` is added only when the
+  request is known to be https: it came over TLS, the first `X-Forwarded-Proto` is
+  `https`, or `auth_panel_https` is true. The engine port is unchanged.
 
 #### Upgrading from v0.2.x to v0.3.0
 
@@ -324,6 +330,20 @@ marked "every mode". Read these before the first start of v0.3.0:
 - The library add and inspect routes accept only a `magnet:` link whose first
   `xt` is an anchored 40-hex or 32-base32 hash, in every mode; any other link,
   `http(s)` and `file:` included, is 400 before the engine is called.
+- `POST /torrents` (the engine port) no longer reads a `file:` path: the
+  link is refused as an unknown scheme. An `http(s)` link is the only fetch an
+  add makes: at most 10 MiB, 60 s in all, up to 3 redirects and only on the
+  host it started at (a redirect to a `magnet:` link still works). The poster
+  check has one 10 s deadline in total, HEAD and GET fallback together, and the
+  same redirect rule.
+- With `save_to_db` set, `POST /torrents` answers only after the record is
+  saved: 200 when it is, 504 when no metadata arrived before the timeout (the
+  optional `metadata_wait`, in seconds, bounds it), 500 when the save failed (a
+  JSON `error` says which). Without `save_to_db` it answers at once, as before.
+  `POST /torrent/upload` with `save` still saves in the background. The library
+  add sends its `metadata_wait` on, so a dead swarm answers 504 "no metadata"
+  within about that wait plus 5 s, as before, not 502; the add call is capped at
+  2 minutes (it was 30 s per call before the engine waited for the record).
 - The engine answers 404, not a 307 redirect, to `POST /torrents/` with a
   trailing slash, in every mode.
 - Scoped mode, once chosen: both ports deny by default, a wrong bearer is
@@ -685,6 +705,7 @@ fails, the features are just inactive.
 | Played-file protection (see "Warmup cache eviction") | mark a file played, so eviction ranks it last | Built |
 | Reader budget refusal (see "Reader budget") | arm: refusal starts at the first matched play webhook after start, and a webhook confirms a play | Built, opt-in, off by default (`refuse_unconfirmed_reads`) |
 | Keep-alive of a confirmed play (see "Keep-alive") | confirm the play, so its torrent is not closed for idleness | Built, on by default (`playback_keepalive_minutes`) |
+| Re-announce of a starved confirmed torrent (see "Starved-torrent re-announce") | ask the torrent's own trackers for peers when playback starves | Built, on by default; not measured on a real swarm |
 
 - **Set it up.** Point the media server's webhook at
   `http://<host>:<metrics_port>/plex/webhook` (`/webhook` answers the same
@@ -871,7 +892,16 @@ play is confirmed.
   128 MB), and its peer connections. Size the cap so that cap x `CacheSize`
   stays well under the container's memory limit: four held torrents at 512 MB
   is about 2 GB. The read-ahead cache is one global budget and does not grow
-  with the number of plays. A held torrent keeps uploading what its cache
+  with the number of plays. That budget, `read_ahead_budget_mb`, is shared by
+  the playing streams: each pump may lead its player by the budget divided by
+  the pumps of playing files, minus three chunks of slack (never under 32 MiB,
+  or two chunks if larger, while the budget allows). Scan, paused and
+  unconfirmed pumps are not counted. The leads now fit the budget together;
+  the cache's eviction order across streams is being fixed separately, so a
+  stream that starts beside another can still cost it chunks ahead of its
+  player for a while. One stream gets the whole budget minus the slack, as
+  before. The share is in `flodni_pump_lead_limit_bytes`.
+  A held torrent keeps uploading what its cache
   holds, under the configured limits, for the play plus the ceiling.
 - **The off switch.** `playback_keepalive_minutes` (default 15, read live) is
   the one switch: 0 turns the keep-alive off and every torrent idle-closes, a
@@ -897,6 +927,50 @@ play is confirmed.
   and by the end-to-end `keep-alive` variant (a confirmed torrent is held
   through two idle windows and released by a stop webhook); the ceiling is
   unit-tested only.
+
+## Starved-torrent re-announce
+
+Built, on by default, no switch. After an engine rebuild
+a playing torrent can come back with one connected peer while its tracker lists
+many, and only a fresh announce finds the others. A torrent with a
+webhook-confirmed playback that is not stopped is announced to when it
+starves.
+
+- **What triggers it.** All of: fewer than 3 connected peers for 60 s (sampled
+  every 5 s), and in that window evidence that the player feels it: a read
+  stall, a read still in flight past the stall threshold (a hung read never
+  completes, so it is never counted as a stall), or a buffer that stops short of
+  the file's end, is under 32 MiB and either shrank or is empty with no read
+  progress. Low peers alone do nothing, nor does a torrent nobody is playing,
+  nor does the last stretch of a fully buffered file (its ahead shrinks to the
+  end without anything missing). The announce goes to the torrent's own
+  trackers through the normal announce; it asks no DHT and no PEX.
+- **Limits.** At least 2 minutes between two forced announces of one torrent,
+  doubling with every announce that did not end the starvation, up to 30
+  minutes; 2 minutes at or over 3 peers start the gap over. A torrent that
+  leaves the samples (an engine rebuild, an idle close, a moment without a
+  session) keeps its gap, so it cannot fire again 60 s after it comes back. The
+  constants are in `internal/daemon/starved.go`, not config keys.
+- **Private torrents** re-announce after the tracker's `min interval` when it
+  sends one, never earlier (the engine's `AnnounceWhenDue`, which sends nothing
+  when no `min interval` is known or a tracker is UDP). A torrent whose
+  metadata is not known yet is never announced. An announce that sends nothing
+  is a deferral: it is not counted, consumes no backoff, and is tried again on
+  the next sample. `flodni_private_torrents_early_announce{state}` shows
+  without any extra tracker request whether this path can fire: how many
+  loaded private torrents have an eligible tracker, none, or no successful
+  announce yet.
+- **Priority after a rebuild.** A torrent the engine re-adds while a confirmed
+  playback of it is open gets its priority flag back (the flag lived on the
+  replaced object). Aggressive mode is not restored by this.
+- **Observability.** One `[Starved] re-announce` log line per forced announce
+  (reason, private, connected peers, stalls, ahead; never a tracker URL) and
+  `flodni_reannounce_total{reason="starved",private="true"|"false"}`, both
+  series present from 0. The `private="true"` series is how to confirm the
+  private path fires.
+- **Not changed.** The weak-swarm discovery boost for a public torrent keeps
+  its own rule and cooldown; both can announce the same public torrent.
+  Measured on a real swarm: not yet.
 
 ## Engine stall gaps
 
@@ -942,6 +1016,69 @@ the places they were first seen (the stale cache priorities, now dropped).
   single-seeder case after a wake is therefore not covered), and two peers
   dropping together (one address is redialed, not both). A redial the torrent
   did not take (an address it already knows) is not counted.
+- **Re-announce after the tracker's `min interval`** (engine; no switch).
+  The engine now keeps the `min interval` an HTTP tracker sends with its
+  announce interval (a UDP tracker sends none). The engine method
+  `AnnounceWhenDue` lets a torrent whose swarm is starved announce again
+  after that `min interval`, and only if the tracker sent one that is shorter
+  than its interval. It is for private torrents, whose regular announce
+  cannot be shortened (a tracker's `min interval`, the unofficial key most
+  trackers send, is the least a client must wait; its regular interval is
+  longer): with no `min interval`, or with a UDP tracker, it sends nothing
+  and returns 0. The regular announce loop and the
+  forced announce share one per-tracker record, so neither starts while the
+  other is in flight, the regular loop waits its normal interval from the
+  forced announce's end, and at most one forced announce goes out between two
+  regular ones. A forced announce follows only a successful regular one; if it
+  fails, the regular loop's next announce moves to the later of its previous
+  due time and one min interval after the failure (never a full interval from
+  it, never sooner than the min interval). A malformed `min interval` is
+  ignored and the announce proceeds. A private torrent reaches only the
+  trackers it carries: no DHT, PEX or added tracker. Implemented and tested
+  with a fake tracker in
+  `internal/anacrolix-torrent/forced_announce_test.go`. The daemon calls it for
+  a starved private torrent (see "Starved-torrent re-announce").
+- **`engine_refill_v2`** in `config.json` (default `false`, read once at
+  start: a change needs a restart). Four request-refill changes adapted from
+  upstream, none of them measured on a real swarm yet, so they are opt-in:
+  a refill sorts at most the larger of two pieces and four queues of
+  candidate chunks instead of the whole readahead window; a peer whose
+  requests another peer holds may be robbed of them when it has delivered
+  nothing for 2 s while expecting chunks (the steal grace still applies);
+  a peer's queue is topped up when it falls to half of its target instead of
+  at empty, paused for 5 s after the peer rejects a request it held; and the
+  request-update timer, which is compiled out today, would use a timer that
+  releases its function when stopped. The queue target is whatever the
+  engine's adaptive pipeline (or Gradient2) says, so the half-queue point and
+  the candidate cap follow it. With the switch off none of this code is
+  reached: the refill decisions are the ones the engine made before. To A/B
+  it on one swarm, run a period with it off and a period with it on, same
+  library and viewers, and compare `flodni_read_stalls_total`,
+  `flodni_session_first_byte_seconds`, `flodni_readahead_refetched_bytes_total`
+  and the sessions' `stalls` and
+  `max_stall_ms`. The
+  decisions are pinned in `internal/anacrolix-torrent/refill_flagoff_test.go`
+  (switch off) and `refill_v2_test.go` (switch on).
+- **`engine_cold_boost`** in `config.json` (default `false`, read once at
+  start: a change needs a restart). When a player starts reading a file, that
+  is the primary handle's first read past the header region (the SSD head
+  window), the torrent's per-connection limit is raised from the configured
+  value to 35 if it is below 35 (the default is 25), until 1 MiB of useful
+  data has arrived or 30 s have passed. Then the configured limit is restored
+  exactly once, also when the torrent closes during the boost. Library scans,
+  warm on add, probe handles, header reads and tail probes never start it,
+  and a later seek on the same handle does not start it again. The end is
+  checked on the once-a-second stats tick, so the boost ends within a second
+  of either condition. It helps a swarm with more peers than the limit, where
+  a cold start waits for one of them to unchoke the torrent; it does little
+  for a small private swarm that has fewer peers than the limit anyway. A
+  limit of 35 or more is left alone. It adds no peer source: discovery is
+  unchanged, so a private torrent stays private. To A/B it, run a period with
+  it off and a period with it on, same library and viewers, and compare
+  `flodni_session_first_byte_seconds` and `flodni_read_stalls_total`. With the
+  switch off the code is not reached. Pinned in
+  `internal/gostorm/torr/coldboost_test.go` (the engine side) and
+  `internal/daemon/coldboost_handle_test.go` (when it starts).
 
 ## Readability record
 
@@ -1153,7 +1290,8 @@ grow.
   answered, ended in an error, nothing to scrape), and `previous` with the
   finished pass before it (or null).
 - **Health.** Each torrent object has `scrape`, null until a pass has reached
-  it:
+  it. A scrape entry alone lists a torrent only while it is stored: one refused,
+  dropped or removed after a pass began is not listed:
 
 | Field | Meaning |
 |---|---|
@@ -1208,7 +1346,8 @@ the same rules: one younger than 25 s is never condemned as a dead swarm.
 ```
 
 Everything after `[Session] ` is one JSON object on one line, the same
-object `/api/sessions` returns; there an open session has outcome `open`,
+object `/api/sessions` returns (an open session there also carries the
+four fields marked "open sessions only"); there it has outcome `open`,
 no `closed_at` and live counters, so the byte fields can differ from
 `bytes_served` by a read in flight. Parse the JSON; do not grep the path,
 which `json.Marshal` escapes (`&`, `<`, `>`). Key order is not part of the
@@ -1238,6 +1377,14 @@ and `[DeadSwarm]` lines are unchanged, and their wording is not a contract.
 | `confirmed` | boolean | A play webhook confirmed the file while the session was open, or it was confirmed when the session started. Sticky: a later stop webhook does not clear it. |
 | `id`, `resumed_from` | number | A number for the session, unique within one daemon run (it restarts at 1), and the `id` of the session this one continues; 0 for a session that began with an open. Follow `resumed_from` to stitch a paused playback back together. |
 | `outcome` | string | `served`: 1 MiB or more, or over 64 KiB with a read past 8 MiB or in the tail window. `probe`: fewer bytes, a scan. `unserved`: no bytes. `dead_swarm`: the session counted as a failure in the readability record, whatever it served; it never appears when the state database is off. The thresholds may change. |
+| `session_age_seconds` | number | Open sessions only, not in the log line: seconds since the session opened. |
+| `last_read_offset`, `last_read_end` | number | Open sessions only, not in the log line: where the last served read started, and where it ended (start plus the bytes returned), in file bytes. Absent until a read has returned data. |
+| `ahead_bytes` | number | Open sessions only, not in the log line: how many bytes from `last_read_end` on the player can read without waiting. It walks forward over the read-ahead cache and the verified pieces together and stops at the first byte neither holds, at the end of the file, or after 1 GiB. Absent when `last_read_end` is, when the stub carries no `file_index`, or when the engine does not hold the torrent. Worked out when you ask, never on the read path. |
+| `frontier_offset` | number | Open sessions only, not in the log line: the end (exclusive, in file bytes) of the run of verified pieces that starts at `last_read_end`, the engine alone, without the cache. It equals `last_read_end` when the piece under it is not complete, and stops at the end of the file or 1 GiB past `last_read_end`. Present when `ahead_bytes` is. |
+| `pump_offset` | number | Open sessions only, not in the log line: the file offset the pump of this file fetches next. Present while a pump runs for the file. Read it with `player_off` and `ahead_bytes` to see whether a shallow `ahead_bytes` is a pump that lags or one that is not following the player. |
+| `player_off` | number | Open sessions only: the player position the pump last saved (written when a primary handle is released), so it can trail the live position. Present with `pump_offset`. |
+| `primary` | bool | Open sessions only: whether a primary handle is open on the file, the handle the pump follows. Present with `pump_offset`. |
+| `refs` | number | Open sessions only: how many handles share the file's pump. Present with `pump_offset`. |
 
 - The four byte fields name the path that answered each read, not where
   the bytes came from. Bytes fetched from the swarm in a session reappear
@@ -1482,6 +1629,34 @@ confirmation also outlives the playback: it stays until a stop webhook, or
 until 15 minutes after the last handle of the file closes, and a scan in
 that window is not counted.
 
+## Read-ahead cache
+
+One in-memory cache, sized by `read_ahead_budget_mb`, holds the chunks the pump
+reads ahead of every player. All streams share it. It does not belong to the
+file opened last.
+
+- **Opening a file** never drops another file's chunks while that file is being
+  read: a file is alive while any of its chunks was read or written in the last
+  120 s. Opening a file sweeps only the files that went idle past that window.
+- **A file with a player is never idle.** Its viewer may be paused, so its
+  chunks survive any open and any eviction of the idle class.
+- **Over budget**, one chunk goes at a time, in this order:
+  1. a chunk of an idle file;
+  2. a chunk entirely behind its player (already consumed), the least recently
+     touched first;
+  3. the chunk farthest ahead of its player, taken first from a file with no
+     player (a scan), then from the file that holds the most bytes. The chunk
+     just written is never the one dropped.
+- **The player offset** is the offset the pump follows for the file. A file with
+  no known player gives up its oldest-written chunk instead, as a lone stream
+  always did.
+- **One stream** behaves as before: what the player has passed goes first, what
+  is ahead stays.
+- **Metrics.** `flodni_readahead_evictions_total` is split by `reason` (`idle`,
+  `behind`, `ahead`). `flodni_readahead_evictions_near_player_total` counts the
+  harmful drops (a chunk within the player's fair share of the budget) and
+  should stay near 0; the first one per file in 30 s is also logged at INFO.
+
 ## Warmup cache eviction
 
 With the warmup cache on, a new head file that would pass the quota evicts
@@ -1662,6 +1837,49 @@ renamed and its registry row is never re-keyed, and stubs are found by the
   vanished and `Lite` shared the key). A show whose rows were registered under
   the old form keeps them: an add finds the row by the old key when the new one
   has none, and replaces it in place.
+
+## Engine settings: what applies live
+
+`POST /settings` (`action: set`, or `def` for the defaults; the panel's Apply uses
+`set`) stores the settings, then applies what changed. How it applies depends on how
+the engine reads the field:
+
+| Applied | Fields |
+| --- | --- |
+| **In place**: stored, no torrent is dropped, the torrent client stays | `CacheSize`, `ReaderReadAHead`, `PreloadCache`, `UseDisk`, `TorrentsSavePath`, `RemoveCacheOnDrop`, `RetrackersMode`, `TorrentDisconnectTimeout`, `ResponsiveMode`, `AdaptiveShield`, and the fields the engine does not read after start (`BlockListURL`, `SslPort`, `SslCert`, `SslKey`, `ShowFSActiveTorr`, `StoreSettingsInJson`) |
+| **Restarts the engine**: drops every active torrent, then builds a new client | `ForceEncrypt`, `EnableDebug`, `EnableIPv6`, `DisableTCP`, `DisableUTP`, `DisableUPNP`, `DisableDHT`, `DisablePEX`, `DisableUpload`, `DownloadRateLimit`, `UploadRateLimit`, `ConnectionsLimit`, `AggressivePeerManagement`, `PeersListenPort` |
+
+A request that changes only in-place fields never touches the client. One that changes
+any restart field rebuilds, as every settings save used to.
+
+**Torrents that are already loaded.** A `CacheSize` change does **not** resize the cache
+of a torrent that is already loaded. It applies to torrents loaded after the change: a
+torrent keeps the cache it was opened with until it is closed (idle expiry or a drop)
+and loaded again. Its read-ahead is derived from that size, so it cannot outgrow it. A
+`ReaderReadAHead` change applies to loaded torrents too, on their next read-ahead
+update (about a second): it is a percentage of the cache they have, and no cache is
+resized. `RetrackersMode` applies to torrents added afterwards. `ResponsiveMode` is latched
+when a stream opens, so it applies to readers opened after the change.
+A preload is a share of the cache the torrent has. `UseDisk` and
+`TorrentsSavePath` do not move the warmup directory, which is fixed at start.
+
+**Download speed.** The engine's torrent status reports `download_speed` as
+the rate of useful data (what the torrent kept) and `download_speed_raw` as the
+wire rate, which also counts protocol overhead, duplicates and waste. Both
+are sampled once a second.
+
+**Refusal under playback.** A change that would restart the engine while the daemon
+counts a confirmed playing session (a media-server webhook confirmed it, no stop, and
+a handle on the file is open) answers `409` and stores nothing:
+
+```json
+{"error": "settings change needs an engine restart (DisableDHT, PeersListenPort) and 1 playing session(s) would be interrupted; resend with force to restart anyway",
+ "fields": ["DisableDHT", "PeersListenPort"], "sessions": 1}
+```
+
+Add `"force": true` to the request to restart anyway. A change to in-place fields is
+never refused. The panel asks for confirmation before it applies a change to a restart
+field, and sends `force` only after you confirm. A plain Apply sends none.
 
 ## Engine add semantics
 
@@ -2296,6 +2514,26 @@ file of that length (by name if several); else the open fails with `EIO`.
   stored list whose stale stub shares its index with another file's warm head
   of a plausible length; `GET /api/library/audit` lists such stubs.
 
+## FUSE mount options
+
+Startup-only: the mount is made once, so a save from the Control Panel changes
+them at the next start. A timeout outside its range refuses the start (and the
+save). The reasoning, and what Flodni leaves to the host, is
+[ADR 0005](docs/architecture/decisions/0005-fuse-timeouts-splice-readahead.md).
+
+| Key | Values | Default |
+| --- | --- | --- |
+| `attr_timeout_seconds` | seconds, 0 to 60 | `1` |
+| `entry_timeout_seconds` | seconds, 0 to 60 | `1` |
+| `negative_timeout_seconds` | seconds, 0 to 60 | `0` |
+| `fuse_disable_splice` | `true`, `false` | `false` |
+
+Flodni does not invalidate the kernel's cached names when a stub is removed or
+replaced, so an `attr_timeout_seconds` or `entry_timeout_seconds` above 1 can
+keep a removed stub visible for that long. Start logs a `[Config] WARNING` line
+when either is above the default. The kernel's readahead is host policy: Flodni
+never writes it.
+
 ## Logging
 
 The daemon logs through `log/slog` (`internal/flog`). The default output is
@@ -2329,7 +2567,8 @@ with `WARNING` or `Warning` near its start is Warn, one with `ERROR` or
 here, in either format; match them by substring: `[DiskWarmup] Initial
 size`, `[DiskWarmup] Active`, `[StateDB] Active:`, `[StateDB] Migration
 complete:`, `[StateDB] Migration already completed`, `Failed to open
-StateDB`, `InodeMap: Loaded`, `FUSE mounted at`, `Library torrents with no
+StateDB`, `InodeMap: Loaded`, `FUSE mounted at`, `[FUSE] mounted, bdi`, `Library
+torrents with no
 stored engine record with metainfo`, `Failed to parse`, `physical_source_path
 ... differs`, `CORRUPT CACHE`, `prune skipped`, `Startup GC: Pruned`, and,
 from the GoStorm engine, `Successfully migrated`, `Settings file was corrupt`
@@ -2409,6 +2648,8 @@ scraper on the same host or Docker network.
 | `flodni_torrent_reopens_total` | counter | `confirmed` | Closed torrents a read on an open handle woke again; the wake at open is not counted. `confirmed` as above. |
 | `flodni_wake_refused_total` | counter | none | Wakes the engine refused because it keeps no record of the torrent: one per handle at a read, one per open. Not a failed read and not a dead swarm. 0 from start. See "A stub the engine does not store". |
 | `flodni_read_stalls_total` | counter | `confirmed` | Served reads that took over one second; failed reads are not counted. `confirmed` as above. Independent of sessions. |
+| `flodni_reannounce_total` | counter | `reason`, `private` | Tracker re-announces actually sent for a torrent with a confirmed playback whose swarm starved; `reason` is `starved`, `private` is `true` for a private torrent (counted only when its tracker's min interval allowed the announce) and `false` for a public one. Both series present from 0. See "Starved-torrent re-announce". |
+| `flodni_private_torrents_early_announce` | gauge | `state` | Loaded private torrents by whether any of their trackers allows an early (starved) re-announce: `eligible` when a tracker's last successful announce sent a min interval below its interval, `ineligible` when none did, `unknown` before a successful announce. Passive: read from regular announces, no extra tracker request. All three present from 0. See "Starved-torrent re-announce". |
 | `flodni_keepalive_releases_total` | counter | `reason` | Holds that ended: `stop` (a stop webhook, or the playback state dropped) or `ceiling` (`playback_keepalive_minutes` after the last activity). The torrent then closes at its next idle check. Both values present from 0. See Keep-alive. |
 | `flodni_keepalive_evicted_total` | counter | none | Confirmed torrents that lost their hold to `playback_keepalive_max_torrents`, once per episode. Present from 0. |
 | `flodni_keepalive_held_torrents` | gauge | none | Idle torrents the keep-alive is keeping open now (a torrent with a reader is not counted). |
@@ -2431,6 +2672,8 @@ scraper on the same host or Docker network.
 | `flodni_library_torrents_unstored` | gauge | none | Library torrents with no stored engine record holding metainfo, counted once at startup after the library walk and not refreshed. Not exported until counted. See "A stub the engine does not store". |
 | `flodni_library_unlinked_stubs` | gauge | none | Stubs no library symlink points at (`linked` is `false` in `GET /api/library/list`), as of the last list of movies and of tv (a client list, the audit and a catch-up pass refresh it). Not exported, rather than 0, while there is no linked set or a kind has not been listed yet. See "Listing stubs". |
 | `flodni_stub_index_mismatch_total` | counter | none | Library paths whose stub file index differs from the file an open resolved by size and name, once per path per process. Non-zero means a stale stub. See "A stub whose file index is stale". |
+| `flodni_playing_sessions_without_pump` | gauge | none | Confirmed playbacks with an open primary handle and no read-ahead pump right now, computed at scrape; a player in the last read-ahead lead of the file is not counted (its pump ended for good). The pump watchdog restarts a missing pump after 10 s, so a value above 0 for a few minutes means it could not. |
+| `flodni_pump_watchdog_restarts_total` | counter | none | Pumps the watchdog started for a confirmed playback that had none for 10 s. 0 from start. |
 | `flodni_tracker_scrapes_total` | counter | `result` | Experimental. Tracker scrapes per torrent and tracker: `ok` (answered), `error` (the request failed or the answer left the torrent out), `skipped` (no BEP 48 scrape URL or an unsupported scheme). All values present from 0 once the scraper runs. See Tracker scrape. |
 | `flodni_torrents_by_seeders` | gauge | `bucket` | Experimental. Torrents by the seeders of their latest scrape answer: `0`, `1-2`, `3+`. A torrent with an error entry is in none. |
 | `flodni_tracker_scrape_pass_running` | gauge | none | Experimental. 1 while a scrape pass runs. |
@@ -2439,13 +2682,19 @@ scraper on the same host or Docker network.
 | `flodni_readahead_cache_active_bytes` | gauge | none | The part that is not stale. |
 | `flodni_readahead_cache_entries` | gauge | none | Entries in the cache. |
 | `flodni_readahead_cache_budget_bytes` | gauge | none | The cache's size budget. |
-| `flodni_readahead_evictions_total` | counter | none | Chunks the cache dropped on a `Put` to stay under its budget. Chunks the stale sweep removes are not counted. 0 from start. |
+| `flodni_playing_pumps` | gauge | none | Read-ahead pumps of playing files, the streams `read_ahead_budget_mb` is shared among. Scan pumps and pumps of paused or unconfirmed files are not counted. 0 when none runs. |
+| `flodni_pump_lead_limit_bytes` | gauge | none | How far one pump may read ahead of its player: its share of `read_ahead_budget_mb` (the budget divided by `flodni_playing_pumps`, minus three chunks of slack), worked out for a chunk of `read_ahead_base`. With no pump running it is the single-stream limit. |
+| `flodni_readahead_evictions_total` | counter | `reason` | Chunks the cache dropped on a `Put` to stay under its budget: `idle` (path not read for 120 s), `behind` (already consumed by the player) or `ahead` (farthest ahead on the path holding the most bytes). Chunks the idle sweep removes are not counted. The split is breaking for an unlabelled query: wrap it in `sum()`. 0 from start. |
+| `flodni_readahead_evictions_near_player_total` | counter | none | Evictions of a chunk that starts within the player's fair share of the budget (the budget divided by the paths with a player, never under 32 MiB, the pump's lead floor), for a path whose player is known. The harmful kind, expected to stay near 0. 0 from start. |
 | `flodni_warmup_head_fill_duration_seconds` | histogram | none | Time from the first chunk to the last of a head fill, per file whose head completed. Buckets 2, 5, 10, 15, 30, 60 and 120 s. |
 | `flodni_fuse_short_reads_total` | counter | none | Reads served with fewer bytes than requested away from EOF. |
 | `flodni_fuse_short_read_results_total` | counter | `result` | Outcome of the refill: `repaired` or `failed`. |
+| `flodni_fuse_read_ahead_bytes` | gauge | none | Kernel read-ahead of the FUSE mount in bytes (`read_ahead_kb` times 1024), read from sysfs at each scrape. Flodni never writes it; the host may tune it (the start line `[FUSE] mounted, bdi <major:minor>, read_ahead_kb <n>` names the device). Absent where sysfs cannot be read. |
 | `flodni_fetch_dedup_total` | counter | none | Concurrent fetches of one chunk that shared a single fetch. |
 | `flodni_engine_short_reads_total` | counter | `path` | Engine reads that ended short and were reported as success: `stream` (the sequential reader) or `fetch` (the stateless block fetch behind the FUSE fallback). 0 from start. |
 | `flodni_engine_short_read_repairs_total` | counter | `result` | Outcome of the stream reader's refill loop, per read that needed it: `repaired` after a reconnect, `unfilled` when a gap stayed. |
+| `flodni_readahead_refetched_bytes_total` | counter | none | Bytes the engine fetched again for a piece that had completed and been evicted from the in-memory piece cache (kept per torrent while it is open). Counted, not acted on: the baseline for judging eviction. 0 from start. |
+| `flodni_readahead_stranded_partial_bytes` | gauge | none | Bytes held by partially written pieces outside every reader's protected window, over open torrents. Eviction only takes complete pieces, so after a seek these bytes stay until the cache frees them, on its clean pass or its own 5 s timer (at most every 5 s), for a piece untouched for 20 s that the engine no longer wants and has nothing in flight for (it forgets the chunks first, so a later read downloads them again). Sampled at scrape under each cache's reader read lock; no engine lock. Alert on a value that stays high with no one playing. |
 | `flodni_engine_peer_redials_total` | counter | none | Peers the opt-in redial (`redial_dropped_peer`) added back to a private torrent after its only connected peer dropped. 0 with the switch off. See Engine stall gaps. |
 | `flodni_engine_db_write_errors_total` | counter | `op` | Engine database (`config.db`) commits that failed, by `op`: `set` (a record save), `rem` (a removal) or `clear`. Each is a record not saved or not removed; alert on any increase. All three present from 0. See Engine state and backup. |
 | `flodni_engine_hedge_triggers_total` | counter | none | Tail-hedge duplicate requests the engine fired. A process counter: unlike `hedge_trigger_count` in `/metrics`, it does not fall when a torrent expires. |
@@ -2453,6 +2702,8 @@ scraper on the same host or Docker network.
 | `flodni_engine_peer_churn_drops_total` | counter | `transport` | Peers dropped by the warmup-probe churn, `tcp` or `utp`. Process counter. |
 | `flodni_engine_gradient2_backoff_samples_total` | counter | none | Gradient2 limiter samples whose latency gradient was below 1, the loop reacting to rising latency. Stays 0 while the limiter is off, which is the default. Process counter. |
 | `flodni_sessions_open` | gauge | none | Sessions open now, the length of the `open` list of `/api/sessions`. |
+| `flodni_sessions_min_ahead_bytes` | gauge | none | The smallest `ahead_bytes` over open sessions that a play webhook confirmed and that opened more than 60 seconds ago (the first 60 seconds are left out, so a cold start does not flap it). No sample while no session qualifies: absent, not 0. Worked out at scrape. The alert to use: under 16 MiB for 60 s while a session is playing. |
+| `flodni_session_ahead_bytes` | histogram | none | `ahead_bytes` of every open session that has one, sampled at scrape. Buckets 1, 4, 16, 32, 64, 128, 256, 512, 768 and 1024 MiB. Capped at 1 GiB, so the top bucket and `+Inf` hold sessions with 1 GiB or more ahead. |
 | `go_goroutines` | gauge | none | Goroutines that currently exist. |
 | `go_memstats_heap_inuse_bytes` | gauge | none | Bytes in in-use heap spans. |
 | `go_memstats_sys_bytes` | gauge | none | Bytes the Go runtime obtained from the system. |

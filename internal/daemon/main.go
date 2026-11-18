@@ -66,11 +66,17 @@ var masterDataSemaphore chan struct{}
 var startTime = time.Now()
 var metaCache *cache.LRUCache
 var raCache = readahead.New(readahead.Config{
-	Base:   func() int64 { return gc().ReadAheadBase },
-	Budget: func() int64 { return gc().ReadAheadBudget },
-	Logf:   func(format string, args ...any) { flog.Printf(logger, format, args...) },
-	Go:     safeGo,
+	Base:      func() int64 { return gc().ReadAheadBase },
+	Budget:    func() int64 { return gc().ReadAheadBudget },
+	Logf:      func(format string, args ...any) { flog.Printf(logger, format, args...) },
+	Go:        safeGo,
+	PlayerOff: raPlayerOff,
 })
+
+// raPlayerOff tells the read-ahead cache where a path's player is: the offset the pump
+// follows for the path (the larger when two primaries exist), found whenever a primary handle
+// exists: a player at offset 0 is a player.
+func raPlayerOff(path string) (int64, bool) { return primaryFollowOffsetFound(path) }
 
 // engineReadyBound is how long start-up waits for the engine before it goes on.
 const engineReadyBound = 60 * time.Second
@@ -319,11 +325,20 @@ func Run() {
 	// closes. Set before the engine and its ticker start. The hook only counts; it
 	// changes nothing about when a torrent closes.
 	torr.OnIdleClose = countIdleClose
+	torr.ConfirmedPlayback = hashConfirmed
+	// The engine refuses a restart under playback; only the daemon knows what plays.
+	torr.SetPlaybackProbe(confirmedPlayingSessions)
 	// Keep-alive (phase b): the engine asks before it closes an idle torrent. The
 	// predicate reads the playback state only and never calls into the engine.
 	torr.HoldExpiry = keepaliveHold
 	// Redial of a dropped only peer (opt-in, off by default): the engine asks when a peer drops.
 	torr.RedialDroppedPeer = func() bool { return gc().RedialDroppedPeer }
+	// Request refill v2 (opt-in, off by default, startup-only): read once, before the engine
+	// builds its client.
+	torr.EngineRefillV2 = gc().EngineRefillV2
+	// Cold-start connection boost (opt-in, off by default, startup-only): read once, before
+	// the first torrent wakes.
+	torr.EngineColdBoost = gc().EngineColdBoost
 	go func() {
 		logger.Info("Starting Embedded GoStorm Engine...")
 		server.Start() // Starts Web Server on 8090 and Engine
@@ -414,6 +429,7 @@ func Run() {
 	warmWake = nativeClient.WakeStored
 
 	go tuner.Start(context.Background())
+	go runStarvedReannounce(context.Background())
 
 	// Metadata LRU cache: capacity from config, 24h TTL.
 	metaCache = cache.NewLRUCache(gc().MetadataCacheSize, 24*time.Hour)
@@ -516,6 +532,7 @@ func Run() {
 
 	globalCleanupManager = NewCleanupManager(logger, metaCache, nativeBridge)
 	globalCleanupManager.Start()
+	startPumpWatchdog(backgroundStopChan)
 
 	globalTorrentRemover = NewTorrentRemover(logger)
 
@@ -749,9 +766,12 @@ func Run() {
 	// Control server: metrics, dashboard API and the library API.
 	// WriteTimeout bounds the slowest handler, POST /api/library/add. Worst
 	// case from internal/library: the .torrent upload (30 s, gostorm client
-	// timeout) + AddTorrent (30 s) + the metadata wait (maxMetadataWait 300 s,
-	// plus one 30 s poll and one 3 s sleep past the deadline) + the replacement
-	// read (replacementReadTimeout 60 s) + a cleanup RemoveTorrent (30 s) = 483 s.
+	// timeout) + the engine add (at most 120 s: the add waits for the metadata
+	// and saves the record, bounded by the caller's metadata_wait plus 5 s) +
+	// the metadata poll (maxMetadataWait 300 s, plus one 30 s poll and one 3 s
+	// sleep past the deadline; an add that answered has the metadata, so this
+	// is a ceiling, not a typical cost) + the replacement read
+	// (replacementReadTimeout 60 s) + a cleanup RemoveTorrent (30 s) = 573 s.
 	// 600 s leaves margin. Waiting on another add of the same hash is not
 	// counted: that client is cut off, the add itself still completes.
 	// ReadTimeout covers the body, capped at 1 MiB (maxBodyBytes): 60 s is
@@ -835,35 +855,10 @@ func Run() {
 	// Crea root node virtuale
 	rootData := &VirtualMkvRoot{sourcePath: source}
 
-	// Enable attribute caching from config
-	attrTimeout := time.Duration(gc().AttrTimeoutSeconds * float64(time.Second))
-	entryTimeout := time.Duration(gc().EntryTimeoutSeconds * float64(time.Second))
-	negativeTimeout := time.Duration(gc().NegativeTimeoutSeconds * float64(time.Second))
-
-	// go-fuse checks out ~MaxWrite per in-flight request; 0 leaves that unbounded.
-	// Past the cap it stops reading /dev/fuse, so this trades RAM for latency.
-	maxInflight := int(gc().FuseMaxInflightMB * 1024 * 1024)
-
-	server, err = fs.Mount(mount, rootData, &fs.Options{
-		AttrTimeout: &attrTimeout, EntryTimeout: &entryTimeout,
-		NegativeTimeout: &negativeTimeout,
-		MountOptions: fuse.MountOptions{
-			MaxInflightRequestBytes: maxInflight,
-			AllowOther:              true,
-			MaxBackground:           gc().ConcurrencyLimit,
-			// MaxWrite:                 1024 * 1024,
-			MaxWrite: 4 * 1024 * 1024, // Samba Turbo: 4MB write buffer
-			// MaxReadAhead:             1024 * 1024,
-			MaxReadAhead:             4 * 1024 * 1024, // Samba Turbo: 4MB read-ahead
-			RememberInodes:           true,            // ENABLED: safe with explicit cache control
-			ExplicitDataCacheControl: true,            // attribute-driven invalidation only, not open-time
-			SyncRead:                 false,           // ENABLED ASYNC READS for 4K performance
-			// NFS Export: Stable filesystem identification
-			FsName: "flodni",
-		},
-		UID: gc().UID, // Default file ownership: pi user (1000)
-		GID: gc().GID, // Default file ownership: pi group (1000)
-	})
+	if w := fuseTTLWarning(gc()); w != "" {
+		logger.Warn(w)
+	}
+	server, err = fs.Mount(mount, rootData, fuseOptions(gc()))
 	if err != nil {
 		logger.Error("FUSE mount failed", "err", err)
 		os.Exit(1)
@@ -871,6 +866,7 @@ func Run() {
 
 	flog.Printf(logger, fuseMountedFmt, mount)
 	app.startup.markMounted(mount)
+	go observeMountBDI(mount)
 
 	go ttffCleanupLoop()
 
@@ -894,8 +890,9 @@ func startHandleGC() {
 
 				if idle > 1*time.Hour {
 					logger.Info(fmt.Sprintf("[V239] Force closing orphan handle (idle 1h): %s", path), "path", path)
-					// We simulate a FUSE Release to cleanup all resources
-					_ = h.Release(context.Background())
+					// Drop the handle's resources without spending the kernel Release's
+					// latch: the handle may read again, and the real Release must still run.
+					h.sweepOrphan()
 					count++
 				}
 				return true

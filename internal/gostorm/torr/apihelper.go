@@ -3,9 +3,11 @@ package torr
 import (
 	"context"
 	"encoding/hex"
+	"errors"
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 
@@ -126,10 +128,82 @@ func AddTorrent(spec *torrent.TorrentSpec, title, poster string, data string, ca
 	return torr, nil
 }
 
+// ErrNoMetadata and ErrNotSaved are why an add that asked for a record has none.
+var (
+	ErrNoMetadata = errors.New("no metadata before the timeout")
+	ErrNotSaved   = errors.New("the record was not saved")
+)
+
+// SetAddedTitle gives an added torrent without a title the cleaned display name of its
+// link, or the name its metadata carries. Call it once the metadata is in.
+func SetAddedTitle(tor *Torrent, displayName string) {
+	if tor.Title != "" {
+		return
+	}
+	tor.Title = displayName // prefer dn over name
+	tor.Title = strings.ReplaceAll(tor.Title, "rutor.info", "")
+	tor.Title = strings.ReplaceAll(tor.Title, "_", " ")
+	tor.Title = strings.Trim(tor.Title, " ")
+	if tor.Title == "" && tor.Torrent != nil {
+		tor.Title = tor.Name()
+	}
+}
+
+// SaveAdded is the add that must not answer before its record exists: it waits for the
+// metadata, titles the torrent and commits the record, and says which of the two failed.
+// It does not use the save debounce: a save made a moment ago does not stand for this one.
+//
+// wait bounds the metadata wait (the caller's metadata_wait); zero keeps the engine's own.
+func SaveAdded(tor *Torrent, displayName string, wait time.Duration) error {
+	if !gotInfoWithin(tor, wait) {
+		return ErrNoMetadata
+	}
+	SetAddedTitle(tor, displayName)
+	if !saveTorrentToDB(tor) {
+		return ErrNotSaved
+	}
+	lastSaveTimes.Store(tor.Hash(), time.Now())
+	return nil
+}
+
+// waitInfo is the metadata wait of an add; a variable so a test can stand in for it.
+var waitInfo = func(t *Torrent) bool { return t.GotInfo() }
+
+// gotInfoWithin waits for the metadata for at most wait (zero: the engine's own limit). A
+// torrent given up on is closed, as one that timed out inside GotInfo is.
+func gotInfoWithin(tor *Torrent, wait time.Duration) bool {
+	info := waitInfo
+	if wait <= 0 {
+		return info(tor)
+	}
+	done := make(chan bool, 1)
+	go func() { done <- info(tor) }()
+	timer := time.NewTimer(wait)
+	defer timer.Stop()
+	select {
+	case ok := <-done:
+		return ok
+	case <-timer.C:
+		tor.Close()
+		return false
+	}
+}
+
 // ForceSaveTorrentToDB bypasses debounce — use only when the torrent is about
 // to be removed (expiry) so the final peer snapshot is always persisted.
 func ForceSaveTorrentToDB(torr *Torrent) {
 	_ = saveTorrentToDB(torr)
+}
+
+// SaveMetadataIfMissing saves the torrent only while its InfoBytes are not stored yet, which
+// is what lets the next Wake skip the metadata wait. Once they are, a save on every wake only
+// snapshots peers under the client lock during playback; ForceSaveTorrentToDB at expiry keeps
+// the peer list current. Adapted from upstream Tiramisu 4a25ffd.
+func SaveMetadataIfMissing(torr *Torrent) {
+	if torr == nil || torr.TorrentSpec == nil || len(torr.TorrentSpec.InfoBytes) > 0 {
+		return
+	}
+	SaveTorrentToDB(torr)
 }
 
 // SaveTorrentToDB saves with a 30s debounce per hash to avoid redundant fsyncs.
@@ -485,37 +559,6 @@ func DropTorrent(hashHex string) {
 	bts.RemoveTorrent(hash)
 }
 
-func SetSettings(set *sets.BTSets) {
-	if sets.ReadOnly {
-		log.TLogln("API SetSettings: Read-only DB mode!")
-		return
-	}
-	// V227: Serialize — prevent concurrent SetSettings from interleaving disconnect/connect
-	settingsMu.Lock()
-	defer settingsMu.Unlock()
-
-	sets.SetBTSets(set)
-	log.TLogln("drop all torrents")
-	dropAllTorrent()
-	time.Sleep(time.Millisecond * 200)
-	log.TLogln("disconect")
-
-	btsMu.Lock()
-	bts.Disconnect()
-	btsMu.Unlock()
-
-	log.TLogln("connect")
-
-	// Connect() calls InitApiHelper() which acquires btsMu.Lock() internally.
-	// Do NOT wrap in btsMu.Lock here — RWMutex is not reentrant → deadlock.
-	if err := reconnect(bts.Connect, 30, time.Second); err != nil {
-		log.TLogln("connect failed:", err)
-	}
-
-	time.Sleep(time.Millisecond * 200)
-	log.TLogln("end set settings")
-}
-
 // reconnect retries Connect: the closed client's uTP socket is released lazily, and until
 // then the peer port fails with "address already in use", leaving bts.client nil.
 func reconnect(connect func() error, attempts int, wait time.Duration) error {
@@ -535,37 +578,6 @@ func reconnect(connect func() error, attempts int, wait time.Duration) error {
 		}
 	}
 	return err
-}
-
-func SetDefSettings() {
-	if sets.ReadOnly {
-		log.TLogln("API SetDefSettings: Read-only DB mode!")
-		return
-	}
-	// V227: Serialize — prevent concurrent settings changes
-	settingsMu.Lock()
-	defer settingsMu.Unlock()
-
-	sets.SetDefaultConfig()
-	log.TLogln("drop all torrents")
-	dropAllTorrent()
-	time.Sleep(time.Millisecond * 200)
-	log.TLogln("disconect")
-
-	btsMu.Lock()
-	bts.Disconnect()
-	btsMu.Unlock()
-
-	log.TLogln("connect")
-
-	// Connect() calls InitApiHelper() which acquires btsMu.Lock() internally.
-	// Do NOT wrap in btsMu.Lock here — RWMutex is not reentrant → deadlock.
-	if err := reconnect(bts.Connect, 30, time.Second); err != nil {
-		log.TLogln("connect failed:", err)
-	}
-
-	time.Sleep(time.Millisecond * 200)
-	log.TLogln("end set default settings")
 }
 
 func dropAllTorrent() {
@@ -610,15 +622,25 @@ func Shutdown() {
 	os.Exit(0)
 }
 
+// preloadSize is the PreloadCache share of the cache the torrent has: the size it was
+// opened with, which a later CacheSize change does not move. A torrent with no cache
+// yet gets the share of the live size.
+func preloadSize(torr *Torrent) int64 {
+	cacheSize := sets.BTsets.CacheSize
+	if torr != nil && torr.cache != nil {
+		cacheSize = torr.cache.OpenSize()
+	}
+	size := int64((float32(cacheSize) / 100.0) * float32(sets.BTsets.PreloadCache))
+	if size > cacheSize {
+		size = cacheSize
+	}
+	return size
+}
+
 func Preload(torr *Torrent, index int) {
-	cache := float32(sets.BTsets.CacheSize)
-	preload := float32(sets.BTsets.PreloadCache)
-	size := int64((cache / 100.0) * preload)
+	size := preloadSize(torr)
 	if size <= 0 {
 		return
-	}
-	if size > sets.BTsets.CacheSize {
-		size = sets.BTsets.CacheSize
 	}
 	// V239: Leak Plumbing - Use context with timeout for API preloads
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)

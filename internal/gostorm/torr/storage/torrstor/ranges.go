@@ -111,7 +111,19 @@ const minPerReaderReadahead = 8 << 20
 // CacheReadahead is the whole-cache read-ahead the stats tick hands AdjustRA: the cache size
 // (64 MiB when unset) times the read-ahead percentage (95 when unset), at least 8 MiB.
 func CacheReadahead() int64 {
-	cacheSize := settings.BTsets.CacheSize
+	return readaheadFor(settings.BTsets.CacheSize)
+}
+
+// Readahead is CacheReadahead for this cache: derived from the size it was opened with,
+// with the percentage read live.
+// OpenSize is the size the cache was opened with.
+func (c *Cache) OpenSize() int64 { return c.openSize }
+
+func (c *Cache) Readahead() int64 {
+	return readaheadFor(c.openSize)
+}
+
+func readaheadFor(cacheSize int64) int64 {
 	if cacheSize == 0 {
 		cacheSize = 64 << 20 // 64 MB default
 	}
@@ -147,4 +159,25 @@ func perReaderReadahead(total int64, readers int) int64 {
 		ra = total
 	}
 	return ra
+}
+
+// protectedWindow returns a reader's eviction-protected byte range around cur. The forward side
+// covers the readahead actually requested: protecting less let the band between the two be
+// fetched with deadlines and then evicted as the oldest complete pieces (about 11% re-download
+// with 4-8 MiB pieces). The whole window is capped at protected, the share of the cache the
+// reader may pin, so protection never exceeds what the cache can hold; what the readahead
+// leaves of it goes behind cur. Until the first readahead is set (0) the percentage prc applies.
+// Adapted from upstream Tiramisu 42658e1.
+func protectedWindow(cur, protected, prc, readahead int64) (begin, end int64) {
+	forward := protected * prc / 100
+	if readahead > 0 {
+		forward = readahead
+	}
+	if forward > protected {
+		forward = protected
+	}
+	if forward < 0 {
+		forward = 0
+	}
+	return cur - (protected - forward), cur + forward
 }

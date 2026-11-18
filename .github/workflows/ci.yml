@@ -62,10 +62,14 @@ jobs:
           echo "### Tests: $count test file(s) outside the vendored engine" >> "$GITHUB_STEP_SUMMARY"
           go list ./... | grep -v 'internal/anacrolix-torrent' | xargs -r go test -race -count=1
       # The vendored engine is its own module, so ./... above never reaches it. Its
-      # private-torrent guards pin CLAUDE.md hard rule 3.
-      - name: Engine private-torrent and request-server tests
+      # private-torrent guards pin CLAUDE.md hard rule 3, its malformed-input tests pin the
+      # refusal of bad peer, tracker and webseed input.
+      - name: Engine private-torrent, request-server and malformed-input tests
         working-directory: internal/anacrolix-torrent
-        run: go test -race -count=1 -run 'Private|PeerRequestServer|PeerWake|ProcessCounters' .
+        run: |
+          go test -race -count=1 -run 'Private|PeerRequestServer|PeerWake|ProcessCounters|Malformed|RefillV2|RefillFlagOff|ForgetPartial|CompletePieces|Forced|AnnounceTracked' .
+          go test -race -count=1 -run 'Malformed|MinInterval' ./tracker/http ./webseed
+          go test -race -count=1 -run DecodeDepth ./bencode
 
   workflow-lint:
     name: Workflow lint (actionlint, zizmor)
@@ -140,6 +144,10 @@ jobs:
 
   image-build:
     name: Image build
+    # Image and end-to-end jobs run on pull requests and release tags only. A push to
+    # main is a squash of a pull request whose identical tree already passed them (the
+    # merge flow checks the tree), and a release tag runs them again before publishing.
+    if: github.event_name == 'pull_request' || startsWith(github.ref, 'refs/tags/v')
     # Builds the code under test with no write permission and no secret, beside the checks.
     # The end-to-end matrix starts as soon as the images are saved here; the smoke test and
     # the scan (job "image") run beside it on the same images.
@@ -201,7 +209,7 @@ jobs:
   image:
     name: Image (build, smoke test, scan)
     needs: image-build
-    if: ${{ always() }}
+    if: ${{ always() && (github.event_name == 'pull_request' || startsWith(github.ref, 'refs/tags/v')) }}
     runs-on: ubuntu-latest
     timeout-minutes: 20
     permissions:
@@ -298,7 +306,7 @@ jobs:
   e2e-result:
     name: End-to-end
     needs: e2e
-    if: ${{ always() }}
+    if: ${{ always() && (github.event_name == 'pull_request' || startsWith(github.ref, 'refs/tags/v')) }}
     runs-on: ubuntu-latest
     timeout-minutes: 5
     permissions: {}

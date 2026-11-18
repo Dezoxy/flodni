@@ -11,7 +11,7 @@ replace (
 
 require (
 	github.com/anacrolix/dht/v2 v2.24.0
-	github.com/anacrolix/log v0.17.1-0.20251118025802-918f1157b7bb
+	github.com/anacrolix/log v0.17.1-0.20260908045853-8c4d2cc1c9e2
 	github.com/anacrolix/missinggo/v2 v2.11.0
 	github.com/anacrolix/publicip v0.3.1
 	github.com/anacrolix/torrent v1.55.0
