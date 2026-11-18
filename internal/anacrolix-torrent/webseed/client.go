@@ -173,8 +173,7 @@ func recvPartResult(ctx context.Context, buf io.Writer, part requestPart) error 
 		// responses to small files.
 		if part.e.Start < 48<<10 {
 			if part.e.Start != 0 {
-				log.Printf("resp status ok but requested range [url=%q, range=%q]",
-					part.req.URL,
+				log.Printf("resp status ok but requested range [range=%q]",
 					part.req.Header.Get("Range"))
 			}
 			// Instead of discarding, we could try receiving all the chunks present in the response
