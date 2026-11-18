@@ -1848,6 +1848,10 @@ renamed and its registry row is never re-keyed, and stubs are found by the
   `Dune (2021)`) is part of the title and is not read as a second year. A title
   with no ASCII letter or digit is named with the first eight hash characters
   instead of an empty base with a leading underscore.
+- **Dates.** `release_date` and `first_air_date` are empty or `YYYY` or
+  `YYYY-MM-DD` in ASCII digits; anything else is a 400 that names the field. The
+  year in a name (a movie stub, a show folder such as `Name (2013)`) is those four
+  digits and nothing else, so a date can never put a separator or `..` into a path.
 - **Episode key.** The registry key folds Latin letters with diacritics to
   their base letters (`Élite` gives `elite_s01e01`; before, the accented letter
   vanished and `Lite` shared the key). A show whose rows were registered under
