@@ -297,10 +297,16 @@ func collectPlaybackProm(w *promtext.Writer) {
 	w.Counter("flodni_wake_refused_total",
 		"Wakes the engine refused because it keeps no record of the torrent: one per handle at a read, one per open. Not a failed read and not a dead swarm; 0 from start.",
 		promSample(wakeRefusedCount.Load()))
+	stalls := make([]promtext.Sample, 0, 4)
+	for _, conf := range []string{"true", "false"} {
+		for cause, name := range stallCauseNames {
+			stalls = append(stalls, promSample(keepaliveCounters.stalls[confirmedIdx(conf == "true")][cause].Load(),
+				lbl("confirmed", conf), lbl("cause", name)))
+		}
+	}
 	w.Counter("flodni_read_stalls_total",
-		"Served reads that took longer than one second. Failed reads are not counted. confirmed as in flodni_torrent_idle_closes_total.",
-		promSample(keepaliveCounters.stalls[1].Load(), lbl("confirmed", "true")),
-		promSample(keepaliveCounters.stalls[0].Load(), lbl("confirmed", "false")))
+		"Served reads that took longer than one second. Failed reads are not counted. confirmed as in flodni_torrent_idle_closes_total. cause is seek when the stall began after a non-sequential jump of the session's read position (the same jump the session seek count uses) and before the first read the read-ahead cache served after it, no more than 15 s after the jump; playback for every other stall. Present from 0 for all four label pairs.",
+		stalls...)
 	w.Counter("flodni_reannounce_total",
 		"Tracker re-announces actually sent for a torrent with a confirmed playback whose swarm starved (fewer than 3 connected peers for 60 s with a read stall, a hung read or a short, shrinking buffer), by reason (starved) and private (true for a private torrent, sent only when its tracker's min interval allowed it). Present from 0.",
 		promSample(reannounces[1].Load(), lbl("reason", "starved"), lbl("private", "true")),

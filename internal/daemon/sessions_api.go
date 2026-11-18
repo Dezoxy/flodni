@@ -67,6 +67,8 @@ type sessionRecord struct {
 	Stalls     int64 `json:"stalls"`
 	MaxStallMS int64 `json:"max_stall_ms"`
 	Confirmed  bool  `json:"confirmed"`
+	// Stalls that counted as cause seek (see flodni_read_stalls_total); a subset of stalls.
+	StallsAfterSeek int64 `json:"stalls_after_seek"`
 	// Added with resumed sessions. A read after a close opens a new session; ids are
 	// per process (they restart at 1), resumed_from is 0 for a session opened fresh.
 	ID          uint64 `json:"id"`
@@ -95,6 +97,7 @@ func (s *TTFFSession) record(closedAt time.Time, dead bool) sessionRecord {
 		FailureReason:   s.failReason.Load(),
 		Reopens:         s.reopens.Load(),
 		Stalls:          s.stallCount.Load(),
+		StallsAfterSeek: s.seekStalls.Load(),
 		MaxStallMS:      s.maxStallMS.Load(),
 		Confirmed:       s.confirmed.Load(),
 		ID:              s.id,

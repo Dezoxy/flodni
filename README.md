@@ -1451,6 +1451,7 @@ and `[DeadSwarm]` lines are unchanged, and their wording is not a contract.
 | `failure_reason` | string or null | Why the last failed read gave up (the values of `last_failure_reason`); `null` if no read failed. Set whenever a read failed; only `dead_swarm` says the session counted as a failure. |
 | `reopens` | number | Times a read on an open handle woke a torrent the engine had closed as idle. The wake at open does not count. |
 | `stalls`, `max_stall_ms` | number | Served reads that took over one second, and the slowest one in milliseconds. Failed reads are not counted. |
+| `stalls_after_seek` | number | How many of `stalls` counted as cause `seek` (see `flodni_read_stalls_total`). The `[TTFF]` close line ends with the same number as `seek_stalls=N`. |
 | `confirmed` | boolean | A play webhook confirmed the file while the session was open, or it was confirmed when the session started. Sticky: a later stop webhook does not clear it. |
 | `id`, `resumed_from` | number | A number for the session, unique within one daemon run (it restarts at 1), and the `id` of the session this one continues; 0 for a session that began with an open. Follow `resumed_from` to stitch a paused playback back together. |
 | `outcome` | string | `served`: 1 MiB or more, or over 64 KiB with a read past 8 MiB or in the tail window. `probe`: fewer bytes, a scan. `unserved`: no bytes. `dead_swarm`: the session counted as a failure in the readability record, whatever it served; it never appears when the state database is off. The thresholds may change. |
@@ -2728,7 +2729,7 @@ scraper on the same host or Docker network.
 | `flodni_torrent_idle_closes_total` | counter | `confirmed` | Torrents the engine closed because no reader had them for the idle timeout. `confirmed` is `true` when a file of the torrent had a webhook-confirmed playback; the label is refreshed once a second. Both values present from 0. With the keep-alive on, a torrent it holds is not counted; see Keep-alive. |
 | `flodni_torrent_reopens_total` | counter | `confirmed` | Closed torrents a read on an open handle woke again; the wake at open is not counted. `confirmed` as above. |
 | `flodni_wake_refused_total` | counter | none | Wakes the engine refused because it keeps no record of the torrent: one per handle at a read, one per open. Not a failed read and not a dead swarm. 0 from start. See "A stub the engine does not store". |
-| `flodni_read_stalls_total` | counter | `confirmed` | Served reads that took over one second; failed reads are not counted. `confirmed` as above. Independent of sessions. |
+| `flodni_read_stalls_total` | counter | `confirmed`, `cause` | Served reads that took over one second; failed reads are not counted. `confirmed` as above. `cause` is `seek` or `playback`, all four pairs present from 0; see "Stall cause" below. Independent of sessions. |
 | `flodni_reannounce_total` | counter | `reason`, `private` | Tracker re-announces actually sent for a torrent with a confirmed playback whose swarm starved; `reason` is `starved`, `private` is `true` for a private torrent (counted only when its tracker's min interval allowed the announce) and `false` for a public one. Both series present from 0. See "Starved-torrent re-announce". |
 | `flodni_private_torrents_early_announce` | gauge | `state` | Loaded private torrents by whether any of their trackers allows an early (starved) re-announce: `eligible` when a tracker's last successful announce sent a min interval below its interval, `ineligible` when none did, `unknown` before a successful announce. Passive: read from regular announces, no extra tracker request. All three present from 0. See "Starved-torrent re-announce". |
 | `flodni_keepalive_releases_total` | counter | `reason` | Holds that ended: `stop` (a stop webhook, or the playback state dropped) or `ceiling` (`playback_keepalive_minutes` after the last activity). The torrent then closes at its next idle check. Both values present from 0. See Keep-alive. |
@@ -2838,6 +2839,26 @@ to be stable; buckets and help text are not.
   there. Records of torrents that left the library are not subtracted (a
   startup prune removes them), and `never_read` stops at 0 rather than
   going negative.
+
+**Stall cause.** `flodni_read_stalls_total{confirmed, cause}` splits each stall
+by what the reader had just done. `cause="seek"`: the stall began after a
+non-sequential jump of the file's read position (the jump the session's
+`[TTFF]` seek count uses: a read more than the read-ahead budget away from the
+previous one, or from the header) and before the first read the read-ahead
+cache served after that jump, and no more than 15 s after the jump began (the
+cap keeps a slow swarm after a seek from being hidden for good). The read that
+jumps counts, so a seek's cold start is a seek stall. `cause="playback"`:
+every other stall. The position is tracked per session, which is per file, so
+a second handle on the same file shares it. It is accounting only: reads and
+the pump behave as before. For a stall alert, use
+`flodni_read_stalls_total{cause="playback"}`; the seek series show how often
+viewers seek.
+
+**Breaking:** the series gained a label, so each old series became two. A
+query, recording rule or alert that selects `{confirmed="true"}` now also sums
+both causes (so a seek-heavy viewer still trips it), and one that matches on
+the exact label set `{confirmed}` finds nothing. `sum by (confirmed)` is
+unaffected. Add `cause="playback"` to an alert that should ignore seeks.
 
 ## Viewing the model
 
