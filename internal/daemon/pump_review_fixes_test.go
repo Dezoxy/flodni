@@ -201,3 +201,58 @@ func TestAScansIndexReadStillEndsItsPump(t *testing.T) {
 	s.read(eofSize-10*mb+probeStep, probeStep)
 	waitUntil(t, "the scan's pump to end at the end of the file", func() bool { return !pumpRegistered(path) })
 }
+
+// A piece length that does not divide the read-ahead base: the pump's chunk is smaller than
+// the fallback ChunkSize, so its end-of-file boundary differs from the fallback's. The pump
+// ended at a genuine end with the player paused between the two boundaries: the watchdog
+// must use the pump's chunk, not the fallback, and leave it be.
+func TestTheWatchdogUsesThePumpsChunkAfterAGenuineEnd(t *testing.T) {
+	const path = "/test/wd-piece-len.mkv"
+	size := 1001 * mb
+	sim := newPumpSim(t, path, size, size-101*mb, 0)
+	raCache.SetPieceLen(path, 3*mb) // the pump's chunk becomes 3 MiB; the fallback is 4 MiB
+	a := sim.open("A")
+	sim.settle()
+	playTo(a, size-101*mb, size-55*mb) // 946 MiB: at the end for 3 MiB chunks (944), not for 4 MiB ones (948)
+	waitUntil(t, "the pump to end at the end of the file", func() bool { return !pumpRegistered(path) })
+
+	if body := gaugeBody(t); !strings.Contains(body, "flodni_playing_sessions_without_pump 0\n") {
+		t.Errorf("gauge with the player paused in the last lead:\n%s", body)
+	}
+	restarts := pumpWatchdogRestarts.Load()
+	w := newPumpWatchdog()
+	t0 := time.Now()
+	for i := time.Duration(0); i < 3; i++ {
+		w.tick(t0.Add(i * pumpWatchdogGrace))
+	}
+	if pumpRegistered(path) || pumpWatchdogRestarts.Load() != restarts {
+		t.Error("the watchdog restarted a pump that ended at the end of the file")
+	}
+}
+
+// A Release racing the creation of a pump leaves no count and no pump behind.
+func TestAReleaseRacingPumpCreationLeavesNoCountAndNoPump(t *testing.T) {
+	const path = "/test/release-race.mkv"
+	sim := newPumpSim(t, path, eofSize, eofAt, 0)
+	for round := 0; round < 12; round++ {
+		a := sim.open("A")
+		sim.settle()
+		a.readRange(eofAt, 4*probeStep, probeStep)
+		sim.endPump()
+		var wg sync.WaitGroup
+		wg.Add(2)
+		go func() {
+			defer wg.Done()
+			a.read(300*mb+int64(round)*8*mb, probeStep) // a seek: a cache miss that starts a pump
+		}()
+		go func() {
+			defer wg.Done()
+			a.release()
+		}()
+		wg.Wait()
+		waitUntil(t, "no pump to survive the released handle", func() bool { return !pumpRegistered(path) })
+		if got := globalOpenTracker.CountByPath(path); got != 0 {
+			t.Fatalf("round %d: open count = %d, want 0", round, got)
+		}
+	}
+}

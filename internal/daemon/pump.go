@@ -56,6 +56,9 @@ func (h *MkvHandle) attachRef(ps *NativePumpState) (int32, bool) {
 	h.mu.Unlock()
 	newRefs := atomic.AddInt32(&ps.refCount, 1)
 	h.countOpen()
+	if h.released.Load() { // a Release ran before the count was taken: nothing else gives it back
+		h.uncountOpen()
+	}
 	return newRefs, true
 }
 
@@ -225,6 +228,10 @@ func (h *MkvHandle) startNativePump(finalHash string, fileIdx int) {
 		h.pumpState = sharedState
 		h.mu.Unlock()
 		h.countOpen()
+		if h.released.Load() { // as in attachRef; and no pump is left for a handle that is gone
+			h.uncountOpen()
+			pumpCancel()
+		}
 		pumpCreationMu.Unlock() // SUCCESS: Shared state registered, global lock released
 
 		logger.Info(fmt.Sprintf("[V264] Native Pump Started (Slot Acquired): %s", filepath.Base(h.path)), "file", filepath.Base(h.path))
@@ -384,7 +391,11 @@ func (h *MkvHandle) nativePump(ctx context.Context, pumpReader streamReader, sta
 			// otherwise pieceLens keeps growing with entries for paths no pump is streaming
 			// anymore, and a future pump for the same path with a different piece length would
 			// see the stale entry via ChunkSize() until a fresh SetPieceLen call overwrites it.
-			raCache.ClearPieceLen(h.path)
+			// A pump that ended at the end of the file leaves it: the watchdog reads the chunk size
+			// to tell that end from a missing pump, and the next pump overwrites it at its start.
+			if !reachedEOF {
+				raCache.ClearPieceLen(h.path)
+			}
 		}
 
 		if pumpExitedHealthy && reachedEOF {

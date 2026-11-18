@@ -642,6 +642,10 @@ func (h *MkvHandle) readInner(fuseCtx context.Context, dest []byte, off int64) (
 							h.pumpState = sharedState
 							h.mu.Unlock()
 							h.countOpen()
+							if h.released.Load() { // as in attachRef; and no pump is left for a handle that is gone
+								h.uncountOpen()
+								pumpCancel()
+							}
 
 							logger.Info(fmt.Sprintf("[Pump] Upgraded on-the-fly for confirmed playback: %s", filepath.Base(h.path)), "file", filepath.Base(h.path))
 
@@ -1033,7 +1037,10 @@ func (h *MkvHandle) releaseResources() syscall.Errno {
 			return 0 // the sweep dropped it, and nothing attached since
 		}
 		h.uncountOpen()
-		if !ownsPumpState(h.pumpState, ps) {
+		h.mu.Lock()
+		owned := h.pumpState
+		h.mu.Unlock()
+		if !ownsPumpState(owned, ps) {
 			logger.Info(fmt.Sprintf("[Pump] Stale handle for %s: pump was replaced, refCount left alone", filepath.Base(h.path)), "file", filepath.Base(h.path))
 			return 0
 		}
