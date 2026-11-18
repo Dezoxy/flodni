@@ -980,7 +980,8 @@ the places they were first seen (the stale cache priorities, now dropped).
   due time and one min interval after the failure (never a full interval from
   it, never sooner than the min interval). A malformed `min interval` is
   ignored and the announce proceeds. A private torrent reaches only the
-  trackers it carries: no DHT, PEX or added tracker. Implemented and tested with a fake tracker in
+  trackers it carries: no DHT, PEX or added tracker. Implemented and tested
+  with a fake tracker in
   `internal/anacrolix-torrent/forced_announce_test.go`; the daemon does not
   call it yet, so a private torrent still gets nothing beyond the regular
   loop in a running Flodni.
