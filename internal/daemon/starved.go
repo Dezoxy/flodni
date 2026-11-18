@@ -10,6 +10,7 @@ import (
 	"flodni/internal/gostorm/torr"
 
 	"github.com/anacrolix/torrent"
+	"github.com/anacrolix/torrent/metainfo"
 )
 
 // Re-announce of a starved torrent during a confirmed playback.
@@ -21,9 +22,11 @@ import (
 // to its trackers once, then not again before a gap that doubles with every announce that did
 // not cure it.
 //
-// Public torrents only. A private torrent (and one whose metadata is not known yet, which
-// counts as private) is skipped (hard rule 3): the engine keeps no tracker min interval yet, so a
-// forced announce could not stay inside it. It relies on the tracker's regular interval.
+// A public torrent is announced to through the normal announce. A private torrent only ever
+// goes through the engine's AnnounceWhenDue, which sends nothing before a tracker's min
+// interval has passed (and nothing at all when the tracker sent none). A torrent whose
+// metadata is not known yet is never announced. An announce that sends nothing is a deferral:
+// it is not counted and consumes no backoff, and the torrent is asked again on the next tick.
 const (
 	starvedPeerFloor = 3
 	starvedWindow    = 60 * time.Second
@@ -124,9 +127,8 @@ func (s *starveState) step(now time.Time, o starveObs) bool {
 
 // starveTarget is the torrent a forced announce goes to.
 type starveTarget interface {
-	// Private is true for a private torrent and for one whose metadata is not known.
-	Private() bool
-	Announce(o starveObs)
+	// Announce returns how many announces were actually sent; 0 means deferred or none.
+	Announce(o starveObs) int
 }
 
 type starveSample struct {
@@ -160,7 +162,7 @@ func (c *starveController) tick(now time.Time, samples []starveSample) {
 	seen := make(map[string]bool, len(samples))
 	for _, sm := range samples {
 		tg := c.target(sm.hash)
-		if tg == nil || tg.Private() {
+		if tg == nil {
 			continue
 		}
 		seen[sm.hash] = true
@@ -169,11 +171,15 @@ func (c *starveController) tick(now time.Time, samples []starveSample) {
 			st = &starveState{}
 			c.states[sm.hash] = st
 		}
+		prev := *st // plain values: a copy restores it exactly
 		if !st.step(now, sm.obs) {
 			continue
 		}
+		if tg.Announce(sm.obs) == 0 {
+			*st = prev // deferred: no backoff consumed, nothing counted
+			continue
+		}
 		reannounces.Add(1)
-		tg.Announce(sm.obs)
 	}
 	for h, st := range c.states {
 		if seen[h] {
@@ -232,22 +238,30 @@ func starveLogLine(o starveObs) string {
 // rebuild nils (drop) at any time: it is read once per call and the copy is used.
 type engineStarveTarget struct{ under func() *torrent.Torrent }
 
-func (e engineStarveTarget) Private() bool {
+func (e engineStarveTarget) Announce(o starveObs) int {
 	t := e.under()
 	if t == nil {
-		return true // gone: nothing to announce
+		return 0
 	}
-	info := t.Info()
-	return info == nil || (info.Private != nil && *info.Private)
+	n := routeStarveAnnounce(t.Info(), t.AnnounceWhenDue, func() { t.AnnounceTracked(nil) })
+	if n > 0 {
+		flog.Std.Info(starveLogLine(o), "reason", "starved", "peers", o.peers)
+	}
+	return n
 }
 
-func (e engineStarveTarget) Announce(o starveObs) {
-	t := e.under()
-	if t == nil {
-		return
+// routeStarveAnnounce picks the announce for a torrent and returns how many were sent. Unknown
+// metadata sends nothing; a private torrent only goes through due (the min-interval gated
+// announce); a public one through tracked.
+func routeStarveAnnounce(info *metainfo.Info, due func() int, tracked func()) int {
+	if info == nil {
+		return 0
 	}
-	flog.Std.Info(starveLogLine(o), "reason", "starved", "peers", o.peers)
-	t.AnnounceTracked(nil)
+	if info.Private != nil && *info.Private {
+		return due()
+	}
+	tracked()
+	return 1
 }
 
 func engineStarveTargetFor(hash string) starveTarget {

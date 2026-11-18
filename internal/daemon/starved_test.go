@@ -8,6 +8,7 @@ import (
 	"flodni/internal/gostorm/native"
 
 	"github.com/anacrolix/torrent"
+	"github.com/anacrolix/torrent/metainfo"
 )
 
 var starveT0 = time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)
@@ -153,18 +154,23 @@ func TestStarveBackoffResetsAfterRecovery(t *testing.T) {
 	}
 }
 
+// fakeStarveTarget sends nothing (returns 0, a deferral) for its first defers calls, then one
+// announce per call.
 type fakeStarveTarget struct {
-	private bool
-	calls   int
-	panics  bool
+	defers int
+	calls  int
+	panics bool
 }
 
-func (f *fakeStarveTarget) Private() bool { return f.private }
-func (f *fakeStarveTarget) Announce(starveObs) {
+func (f *fakeStarveTarget) Announce(starveObs) int {
 	f.calls++
 	if f.panics {
 		panic("boom")
 	}
+	if f.calls <= f.defers {
+		return 0
+	}
+	return 1
 }
 
 func newTestController(targets map[string]*fakeStarveTarget) *starveController {
@@ -201,17 +207,56 @@ func TestStarveControllerAnnouncesOnceAndOnlyTheStarved(t *testing.T) {
 	}
 }
 
-// Public only for now: a private torrent, or one whose privacy is not known, is never
-// announced by this feature, however starved.
-func TestStarveControllerSkipsPrivateTorrents(t *testing.T) {
+// A private torrent whose announce is deferred (the tracker's min interval has not passed, or
+// it sent none) is asked again every tick once the window is over: nothing is counted and no
+// backoff is consumed. The announce that finally goes out is counted once and starts the
+// backoff, so the next one waits the first gap from THAT send.
+func TestStarveControllerDeferralConsumesNoBackoff(t *testing.T) {
 	reannounces.Store(0)
-	priv := &fakeStarveTarget{private: true}
-	c := newTestController(map[string]*fakeStarveTarget{"priv": priv})
+	const defers = 10
+	priv := &fakeStarveTarget{defers: defers}
+	c := newTestController(map[string]*fakeStarveTarget{"p": priv})
+	sentAt, secondAt := -1, -1
 	for s := 0; s <= 1200; s += 5 {
-		c.tick(at(s), []starveSample{{hash: "priv", obs: starved(int64(s))}})
+		before := priv.calls
+		c.tick(at(s), []starveSample{{hash: "p", obs: starved(int64(s))}})
+		if priv.calls > before && priv.calls > defers {
+			if sentAt < 0 {
+				sentAt = s
+				if got := reannounces.Load(); got != 1 {
+					t.Fatalf("counter = %d at the first send, want 1 (deferrals uncounted)", got)
+				}
+			} else if secondAt < 0 {
+				secondAt = s
+			}
+		}
+		if priv.calls <= defers && reannounces.Load() != 0 {
+			t.Fatalf("counter = %d during deferral at %d s", reannounces.Load(), s)
+		}
 	}
-	if priv.calls != 0 || reannounces.Load() != 0 {
-		t.Errorf("private torrent: %d announces, counter %d, want 0", priv.calls, reannounces.Load())
+	// Window over at 60 s; deferred on each of the 10 ticks from 60 s, sent on the 11th.
+	if sentAt != 60+5*defers {
+		t.Errorf("first send at %d s, want %d", sentAt, 60+5*defers)
+	}
+	if want := sentAt + int(starvedGap/time.Second); secondAt != want {
+		t.Errorf("second send at %d s, want %d (the first gap after the send)", secondAt, want)
+	}
+	if got := priv.calls - defers; reannounces.Load() != int64(got) {
+		t.Errorf("counter = %d, want %d sends", reannounces.Load(), got)
+	}
+}
+
+// A target that never sends (metadata unknown, or a tracker without a min interval) is never
+// counted, however long it is starved.
+func TestStarveControllerNeverSendingTargetIsNeverCounted(t *testing.T) {
+	reannounces.Store(0)
+	never := &fakeStarveTarget{defers: 1 << 30}
+	c := newTestController(map[string]*fakeStarveTarget{"n": never})
+	for s := 0; s <= 1200; s += 5 {
+		c.tick(at(s), []starveSample{{hash: "n", obs: starved(int64(s))}})
+	}
+	if never.calls == 0 || reannounces.Load() != 0 {
+		t.Errorf("calls %d (want > 0), counter %d (want 0)", never.calls, reannounces.Load())
 	}
 }
 
@@ -307,17 +352,41 @@ func TestStarveSamplesOnlyConfirmedPlayback(t *testing.T) {
 }
 
 // A torrent the engine dropped between the nil check and the use (a rebuild nils the engine
-// handle) must not panic: the handle is read once, and a nil one is skipped and counts as
-// private (not announced).
+// handle) must not panic: the handle is read once and a nil one announces nothing.
 func TestStarveTargetReadsTheEngineHandleOnce(t *testing.T) {
 	calls := 0
 	nilHandle := engineStarveTarget{under: func() *torrent.Torrent { calls++; return nil }}
-	if !nilHandle.Private() {
-		t.Error("a dropped torrent must count as private")
+	if n := nilHandle.Announce(starved(1)); n != 0 { // must not panic
+		t.Errorf("dropped torrent announced %d", n)
 	}
-	nilHandle.Announce(starved(1)) // must not panic
-	if calls != 2 {
-		t.Errorf("handle read %d times for Private and Announce, want once each", calls)
+	if calls != 1 {
+		t.Errorf("handle read %d times for one Announce, want once", calls)
+	}
+}
+
+// Private torrents only ever go through the min-interval gated call, public ones through the
+// plain announce, and unknown metadata through neither.
+func TestRouteStarveAnnounce(t *testing.T) {
+	yes, no := true, false
+	for _, c := range []struct {
+		name               string
+		info               *metainfo.Info
+		due                int
+		want               int
+		wantDue, wantTrack int
+	}{
+		{"unknown metadata", nil, 1, 0, 0, 0},
+		{"private, due", &metainfo.Info{Private: &yes}, 2, 2, 1, 0},
+		{"private, deferred", &metainfo.Info{Private: &yes}, 0, 0, 1, 0},
+		{"public", &metainfo.Info{}, 5, 1, 0, 1},
+		{"public, flag false", &metainfo.Info{Private: &no}, 5, 1, 0, 1},
+	} {
+		var due, track int
+		got := routeStarveAnnounce(c.info, func() int { due++; return c.due }, func() { track++ })
+		if got != c.want || due != c.wantDue || track != c.wantTrack {
+			t.Errorf("%s: sent %d, due calls %d, tracked calls %d; want %d/%d/%d",
+				c.name, got, due, track, c.want, c.wantDue, c.wantTrack)
+		}
 	}
 }
 
