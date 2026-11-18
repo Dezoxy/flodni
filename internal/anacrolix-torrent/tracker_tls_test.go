@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/anacrolix/torrent/bencode"
@@ -72,6 +73,9 @@ func TestScraperAnnounceReportsFailureToTheHook(t *testing.T) {
 	}))
 	defer srv.Close()
 
+	// The hook runs on the test's direct announce and on the client's own background scraper
+	// (started by AddTorrentSpec), so the captured values need a lock.
+	var mu sync.Mutex
 	var hostport string
 	var hookErr error
 	cfg := NewDefaultClientConfig()
@@ -81,7 +85,11 @@ func TestScraperAnnounceReportsFailureToTheHook(t *testing.T) {
 	cfg.NoDefaultPortForwarding = true
 	cfg.DisableIPv6 = true
 	cfg.NoDHT = true
-	cfg.OnTrackerAnnounceError = func(hp string, err error) { hostport, hookErr = hp, err }
+	cfg.OnTrackerAnnounceError = func(hp string, err error) {
+		mu.Lock()
+		defer mu.Unlock()
+		hostport, hookErr = hp, err
+	}
 	cl, err := NewClient(cfg)
 	if err != nil {
 		t.Fatal(err)
@@ -97,6 +105,8 @@ func TestScraperAnnounceReportsFailureToTheHook(t *testing.T) {
 		t.Fatal(err)
 	}
 	res := scraperOf(t, tor).announce(context.Background(), tracker.None)
+	mu.Lock()
+	defer mu.Unlock()
 	if res.Err == nil || hookErr == nil {
 		t.Fatalf("announce error %v, hook error %v: want both", res.Err, hookErr)
 	}
