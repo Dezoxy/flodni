@@ -39,6 +39,17 @@ func StoredScrapeTarget(hashHex string) []ScrapeTarget {
 	return scrapeTargetsOf([]*sets.TorrentDB{db}, publicTrackers)
 }
 
+// StoredHashes is the set of stored records, by lower-case hex hash. Keys only: no
+// record is read or parsed.
+func StoredHashes() map[string]bool {
+	keys := sets.TorrentHashes()
+	out := make(map[string]bool, len(keys))
+	for _, k := range keys {
+		out[strings.ToLower(k)] = true
+	}
+	return out
+}
+
 // ScrapeReady says whether the stored records can be read yet: the settings
 // database opens in the engine's start-up, a moment after the daemon starts.
 func ScrapeReady() bool { return sets.TorrentsReady() }

@@ -1290,7 +1290,8 @@ grow.
   answered, ended in an error, nothing to scrape), and `previous` with the
   finished pass before it (or null).
 - **Health.** Each torrent object has `scrape`, null until a pass has reached
-  it:
+  it. A scrape entry alone lists a torrent only while it is stored: one refused,
+  dropped or removed after a pass began is not listed:
 
 | Field | Meaning |
 |---|---|
