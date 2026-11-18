@@ -299,6 +299,9 @@ func collectPlaybackProm(w *promtext.Writer) {
 		"Served reads that took longer than one second. Failed reads are not counted. confirmed as in flodni_torrent_idle_closes_total.",
 		promSample(keepaliveCounters.stalls[1].Load(), lbl("confirmed", "true")),
 		promSample(keepaliveCounters.stalls[0].Load(), lbl("confirmed", "false")))
+	w.Counter("flodni_reannounce_total",
+		"Tracker re-announces forced for a public torrent with a confirmed playback whose swarm starved (fewer than 3 connected peers for 60 s with a read stall, a hung read or a short, shrinking buffer), by reason (starved). Private torrents are never announced by this. Present from 0.",
+		promSample(reannounces.Load(), lbl("reason", "starved")))
 	w.Counter("flodni_keepalive_releases_total",
 		"Holds that ended, by reason: stop is a stop webhook (or the playback state dropped), ceiling is playback_keepalive_minutes after the last read or play webhook. The torrent then closes at its next idle check.",
 		promSample(keepaliveCounters.releases[0].Load(), lbl("reason", "stop")),

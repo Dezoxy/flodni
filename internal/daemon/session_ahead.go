@@ -33,6 +33,8 @@ type sessionView struct {
 	LastReadEnd       *int64 `json:"last_read_end,omitempty"`
 	AheadBytes        *int64 `json:"ahead_bytes,omitempty"`
 	FrontierOffset    *int64 `json:"frontier_offset,omitempty"`
+	// stuckFor is how long the oldest read in flight has run; for the starved re-announce only.
+	stuckFor time.Duration
 	// The pump of the session's file, absent while none runs. They say why ahead_bytes is
 	// shallow: where the pump fetches against where the player is, whether a primary
 	// handle is open (the pump follows it) and how many handles share the pump.
@@ -144,13 +146,21 @@ func (s *TTFFSession) fillAhead(v *sessionView) {
 }
 
 // openSessionViews lists the open sessions, oldest first, with the per-request fields.
-func openSessionViews(now time.Time) []sessionView {
+func openSessionViews(now time.Time) []sessionView { return openSessionViewsWhere(now, nil) }
+
+// openSessionViewsWhere is openSessionViews for the sessions keep accepts (nil: all), chosen
+// before the engine-touching ahead is computed.
+func openSessionViewsWhere(now time.Time, keep func(*TTFFSession) bool) []sessionView {
 	out := []sessionView{}
 	sessions.Range(func(_, val any) bool {
 		s := val.(*TTFFSession)
+		if keep != nil && !keep(s) {
+			return true
+		}
 		v := sessionView{sessionRecord: s.record(time.Time{}, false)}
 		age := max(int64(now.Sub(time.Unix(0, s.openedAt.Load())).Seconds()), 0)
 		v.SessionAgeSeconds = &age
+		v.stuckFor = s.stuckFor(now)
 		s.fillAhead(&v)
 		s.fillPump(&v)
 		out = append(out, v)
