@@ -11,6 +11,7 @@ import (
 type HttpResponse struct {
 	FailureReason string `bencode:"failure reason"`
 	Interval      int32  `bencode:"interval"`
+	MinInterval   int32  `bencode:"min interval"`
 	TrackerId     string `bencode:"tracker id"`
 	Complete      int32  `bencode:"complete"`
 	Incomplete    int32  `bencode:"incomplete"`

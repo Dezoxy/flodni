@@ -138,6 +138,7 @@ func (cl Client) Announce(ctx context.Context, ar AnnounceRequest, opt AnnounceO
 	}
 	vars.Add("successful http announces", 1)
 	ret.Interval = trackerResponse.Interval
+	ret.MinInterval = trackerResponse.MinInterval
 	ret.Leechers = trackerResponse.Incomplete
 	ret.Seeders = trackerResponse.Complete
 	if len(trackerResponse.Peers.List) != 0 {
@@ -158,7 +159,9 @@ func (cl Client) Announce(ctx context.Context, ar AnnounceRequest, opt AnnounceO
 
 type AnnounceResponse struct {
 	Interval int32 // Minimum seconds the local peer should wait before next announce.
-	Leechers int32
-	Seeders  int32
-	Peers    []Peer
+	// The tracker's "min interval" (seconds), 0 when it sent none; a UDP tracker has none.
+	MinInterval int32
+	Leechers    int32
+	Seeders     int32
+	Peers       []Peer
 }

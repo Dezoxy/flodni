@@ -3912,6 +3912,12 @@ func (t *Torrent) Announce() {
 // failure are skipped and not counted. onDone runs on a separate goroutine and may be nil.
 func (t *Torrent) AnnounceTracked(onDone func(peers, errs, total int, failures []string)) {
 	t.cl.lock()
+	// It ignores the tracker's interval and the in-flight reservation, so a private torrent's
+	// tracker is never announced to from here; AnnounceWhenDue is the only early path for one.
+	if t.isPrivate() {
+		t.cl.unlock()
+		return
+	}
 	now := time.Now()
 	scrapers := make([]*trackerScraper, 0, len(t.trackerAnnouncers))
 	for _, ta := range t.trackerAnnouncers {

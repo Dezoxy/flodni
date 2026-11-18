@@ -962,6 +962,25 @@ the places they were first seen (the stale cache priorities, now dropped).
   single-seeder case after a wake is therefore not covered), and two peers
   dropping together (one address is redialed, not both). A redial the torrent
   did not take (an address it already knows) is not counted.
+- **Re-announce after the tracker's `min interval`** (engine; no switch).
+  The engine now keeps the `min interval` an HTTP tracker sends with its
+  announce interval (a UDP tracker sends none). The engine method
+  `AnnounceWhenDue` lets a torrent whose swarm is starved announce again
+  after that `min interval`, and only if the tracker sent one that is shorter
+  than its interval. It is for private torrents, whose regular announce
+  cannot be shortened (a tracker's `min interval`, the unofficial key most
+  trackers send, is the least a client must wait; its regular interval is
+  longer): with no `min interval`, or with a UDP tracker, it sends nothing
+  and returns 0. The regular announce loop and the
+  forced announce share one per-tracker record, so neither starts while the
+  other is in flight, the regular loop waits its normal interval from the
+  forced announce's end, a failed forced announce leaves the regular loop's
+  backoff alone, and at most one forced announce goes out between two regular
+  ones. A private torrent reaches only the trackers it carries: no DHT, PEX
+  or added tracker. Implemented and tested with a fake tracker in
+  `internal/anacrolix-torrent/forced_announce_test.go`; the daemon does not
+  call it yet, so a private torrent still gets nothing beyond the regular
+  loop in a running Flodni.
 - **`engine_refill_v2`** in `config.json` (default `false`, read once at
   start: a change needs a restart). Four request-refill changes adapted from
   upstream, none of them measured on a real swarm yet, so they are opt-in:
