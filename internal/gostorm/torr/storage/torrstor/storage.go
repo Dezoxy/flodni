@@ -56,30 +56,33 @@ func (s *Storage) OpenTorrent(info *metainfo.Info, infoHash metainfo.Hash) (ts.T
 
 	return ts.TorrentImpl{
 		Piece:    ch.Piece,
-		Close:    ch.Close,
+		Close:    ch.closeNoWait, // see Cache.Close
 		Capacity: &capFunc,
 	}, nil
 }
 
+// CloseHash closes and forgets the cache for hash. Cache.Close joins goroutines that take the
+// engine's client lock, and the engine calls OpenTorrent (s.mu) under that lock, so s.mu is
+// never held across the join: the cache is unhooked under s.mu and closed after it is released.
 func (s *Storage) CloseHash(hash metainfo.Hash) {
-	if s.caches == nil {
-		return
-	}
 	s.mu.Lock()
-	defer s.mu.Unlock()
-	if ch, ok := s.caches[hash]; ok {
+	ch, ok := s.caches[hash]
+	delete(s.caches, hash)
+	s.mu.Unlock()
+	if ok {
 		_ = ch.Close() // Cache.Close only returns nil
-		delete(s.caches, hash)
 	}
 }
 
+// Close closes every cache. Like CloseHash, it joins them with s.mu released.
 func (s *Storage) Close() error {
 	s.mu.Lock()
-	defer s.mu.Unlock()
-	for _, ch := range s.caches {
+	caches := s.caches
+	s.caches = make(map[metainfo.Hash]*Cache)
+	s.mu.Unlock()
+	for _, ch := range caches {
 		_ = ch.Close() // Cache.Close only returns nil
 	}
-	s.caches = make(map[metainfo.Hash]*Cache)
 	return nil
 }
 

@@ -17,7 +17,7 @@ const (
 	probeSize  = 1000 * mb
 	probeAt    = 400 * mb // 40%
 	probeStep  = 256 * 1024
-	probeFetch = 100 * time.Millisecond // engine fetch latency; a cache hit is far below half of it
+	probeFetch = 100 * time.Millisecond // engine fetch latency
 )
 
 type probeRun struct {
@@ -25,7 +25,8 @@ type probeRun struct {
 	a   *simHandle
 	b   *simHandle
 
-	aBaseline        time.Duration // slowest A read before B opened
+	aBaselineFetches int // engine fetches in A's region before B opened
+	aFetchesAfterB   int // engine fetches in A's region since B opened
 	aLastBeforeB     int64
 	pumpReadsBeforeB int
 	fetchesBeforeB   int
@@ -56,11 +57,10 @@ func runProbeScenario(t *testing.T, path string, probeFrom, probeLen int64) *pro
 	run.a = sim.open("A")
 	sim.settle() // the pump fills its lead past A
 	run.a.readRange(probeAt, 40*probeStep, probeStep)
-	for _, r := range run.a.served() {
-		run.aBaseline = max(run.aBaseline, r.took)
-	}
 	run.aLastBeforeB = probeAt + 39*probeStep
+	sim.idle()
 	run.fetchesBeforeB = len(sim.demandFetches())
+	run.aBaselineFetches = inARegion(sim.demandFetches(), probeAt, run.aLastBeforeB)
 	run.interruptsBefore = sim.interrupts()
 	sim.settle()
 	run.pumpReadsBeforeB = len(sim.pumpReads())
@@ -92,7 +92,9 @@ func runProbeScenario(t *testing.T, path string, probeFrom, probeLen int64) *pro
 	run.aAfterProbe = run.a.served()[40:]
 	run.aLastOff = aNext
 	run.pumpAfterProbe = sim.pumpReads()[run.pumpReadsBeforeB:]
+	sim.idle()
 	run.demandAfterB = sim.demandFetches()[run.fetchesBeforeB:]
+	run.aFetchesAfterB = inARegion(run.demandAfterB, probeAt, run.aLastOff)
 	run.pumpState = sim.pumpState()
 	run.a.release()
 	run.playerOffAtRelease = atomic.LoadInt64(&run.pumpState.playerOff)
@@ -106,8 +108,8 @@ func checkProbeProperties(t *testing.T, run *probeRun) {
 	budget := int64(gc().ReadAheadBudget)
 	chunk := int64(4 * mb)
 
-	if run.aBaseline >= probeFetch/2 {
-		t.Fatalf("the baseline is not a cache hit (%v): the scenario is not set up", run.aBaseline)
+	if run.aBaselineFetches != 0 {
+		t.Fatalf("A's baseline reads made %d engine fetches: the scenario is not set up", run.aBaselineFetches)
 	}
 	if run.aLastBeforeB != probeAt+39*probeStep || sim.primaryOwner() == "" {
 		t.Fatal("the scenario is not set up")
@@ -143,11 +145,9 @@ func checkProbeProperties(t *testing.T, run *probeRun) {
 			}
 		}
 	})
-	sub("A's next read is as fast as before", func(t *testing.T) {
-		for _, r := range run.aAfterProbe {
-			if r.took >= probeFetch/2 {
-				t.Errorf("A's read at %d MiB took %v after B started, baseline %v", r.off/mb, r.took, run.aBaseline)
-			}
+	sub("A's reads cause no engine fetch after B started", func(t *testing.T) {
+		if run.aFetchesAfterB != 0 {
+			t.Errorf("%d engine fetches landed in A's region [%d, %d] MiB since B opened (baseline %d)", run.aFetchesAfterB, probeAt/mb, run.aLastOff/mb, run.aBaselineFetches)
 		}
 	})
 	sub("B's reads and Release never persist a resume position", func(t *testing.T) {
@@ -174,6 +174,19 @@ func checkProbeProperties(t *testing.T, run *probeRun) {
 			}
 		}
 	})
+}
+
+// inARegion counts the fetches whose offset lies in A's read region [from, to], one chunk of
+// slack below for chunk alignment. The count is by offset, not by when a read ran: the read path
+// spawns asynchronous fetches, and B's fetches (the header and the probed region) lie far from A.
+func inARegion(offs []int64, from, to int64) int {
+	n := 0
+	for _, o := range offs {
+		if o >= from-4*mb && o <= to {
+			n++
+		}
+	}
+	return n
 }
 
 // inRange reports whether off lies in a window one of sh's own reads fetched. The probe
