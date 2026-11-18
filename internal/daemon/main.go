@@ -339,6 +339,11 @@ func Run() {
 	// Cold-start connection boost (opt-in, off by default, startup-only): read once, before
 	// the first torrent wakes.
 	torr.EngineColdBoost = gc().EngineColdBoost
+	// Tracker certificate verification (on by default): read once, before the engine builds its client.
+	torr.TrackerTLSInsecure = gc().TrackerTLSInsecure
+	if w := trackerTLSWarning(gc()); w != "" {
+		logger.Warn(w)
+	}
 	go func() {
 		logger.Info("Starting Embedded GoStorm Engine...")
 		server.Start() // Starts Web Server on 8090 and Engine

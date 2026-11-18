@@ -1080,6 +1080,35 @@ the places they were first seen (the stale cache priorities, now dropped).
   `internal/gostorm/torr/coldboost_test.go` (the engine side) and
   `internal/daemon/coldboost_handle_test.go` (when it starts).
 
+## Tracker TLS
+
+Flodni verifies the certificate of an `https` tracker. Before this change the
+engine did not: any certificate was accepted, so an attacker on the path could
+forge an announce reply or read a private tracker's passkey out of the announce
+URL.
+
+| Key in `config.json` | Default | Read | Effect |
+|---|---|---|---|
+| `tracker_tls_insecure` | `false` | once at start (a change needs a restart) | `true` skips certificate verification for every `https` tracker, the engine's own announces included. A start with it on logs `[Tracker] TLS certificate verification is OFF (tracker_tls_insecure)` at WARN. |
+
+The trade-off: a tracker with a self-signed, expired or mismatched certificate
+stops announcing until the key is set, and the torrents that depend on it find
+no peers from that tracker. `http://` and `udp://` trackers are not affected;
+neither has a certificate to check. The switch is global; there is no
+per-tracker setting. Pinned in
+`internal/anacrolix-torrent/tracker/http/tls_verify_test.go` (the client),
+`internal/anacrolix-torrent/tracker_tls_test.go` (the engine's announce),
+`internal/gostorm/torr/tracker_tls_test.go` (the client configuration) and
+`internal/config/opt_in_switches_test.go` (the key).
+
+#### Upgrading: tracker certificates are now verified
+
+If a tracker stops answering after this release, check its certificate first:
+an `https` tracker whose certificate is self-signed, expired or issued for
+another name no longer announces. Renew the certificate, or set
+`"tracker_tls_insecure": true` and restart, and accept that announces to that
+tracker are then open to forgery on the path.
+
 ## Readability record
 
 `GET /api/torrents/health` on the control port lists what Flodni has

@@ -23,6 +23,9 @@ type NewClientOpts struct {
 	DialContext    DialContextFunc
 	ServerName     string
 	AllowKeepAlive bool
+	// InsecureSkipVerify turns off verification of an https tracker's certificate. The default
+	// verifies it.
+	InsecureSkipVerify bool
 }
 
 func NewClient(url_ *url.URL, opts NewClientOpts) Client {
@@ -33,7 +36,7 @@ func NewClient(url_ *url.URL, opts NewClientOpts) Client {
 				DialContext: opts.DialContext,
 				Proxy:       opts.Proxy,
 				TLSClientConfig: &tls.Config{
-					InsecureSkipVerify: true,
+					InsecureSkipVerify: opts.InsecureSkipVerify,
 					ServerName:         opts.ServerName,
 				},
 				// This is for S3 trackers that hold connections open.

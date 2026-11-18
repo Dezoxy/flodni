@@ -43,6 +43,7 @@ type Announce struct {
 	DialContext         func(ctx context.Context, network, addr string) (net.Conn, error)
 	ListenPacket        func(network, addr string) (net.PacketConn, error)
 	ServerName          string
+	InsecureSkipVerify  bool // skip verifying an https tracker's certificate; off by default
 	UserAgent           string
 	UdpNetwork          string
 	// If the port is zero, it's assumed to be the same as the Request.Port.
@@ -62,6 +63,8 @@ func (me Announce) Do() (res AnnounceResponse, err error) {
 			Proxy:       me.HttpProxy,
 			DialContext: me.DialContext,
 			ServerName:  me.ServerName,
+
+			InsecureSkipVerify: me.InsecureSkipVerify,
 		},
 		UdpNetwork:   me.UdpNetwork,
 		Logger:       me.Logger.WithContextValue(fmt.Sprintf("tracker client for %q", me.TrackerUrl)),

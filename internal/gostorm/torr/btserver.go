@@ -47,6 +47,12 @@ type BTServer struct {
 // not read again. False is the engine's behaviour without the changes.
 var EngineRefillV2 bool
 
+// TrackerTLSInsecure turns off certificate verification for https trackers
+// (ClientConfig.TrackerInsecureSkipVerify). The daemon sets it once at start from
+// tracker_tls_insecure, before the engine builds its client; it is not read again.
+// False, the default, verifies.
+var TrackerTLSInsecure bool
+
 var privateIPBlocks []*net.IPNet
 
 // DHT Bootstrap nodes per discovery veloce
@@ -218,6 +224,7 @@ const trackerUserAgent = "qBittorrent/5.0.3"
 func (bt *BTServer) configure(ctx context.Context) {
 	bt.config = torrent.NewDefaultClientConfig()
 	bt.config.RefillV2 = EngineRefillV2
+	bt.config.TrackerInsecureSkipVerify = TrackerTLSInsecure
 
 	bt.storage = torrstor.NewStorage(settings.BTsets.CacheSize)
 	bt.config.DefaultStorage = bt.storage

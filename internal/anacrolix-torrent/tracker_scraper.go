@@ -371,6 +371,7 @@ func (me *trackerScraper) announce(ctx context.Context, event tracker.AnnounceEv
 		Request:             req,
 		HostHeader:          me.u.Host,
 		ServerName:          me.u.Hostname(),
+		InsecureSkipVerify:  me.t.cl.config.TrackerInsecureSkipVerify,
 		UdpNetwork:          me.u.Scheme,
 		ClientIp4:           krpc.NodeAddr{IP: me.t.cl.config.PublicIp4},
 		ClientIp6:           krpc.NodeAddr{IP: me.t.cl.config.PublicIp6},
