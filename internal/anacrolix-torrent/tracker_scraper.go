@@ -111,6 +111,12 @@ func (a *announceState) nextWait() (lastDone time.Time, wait time.Duration, shor
 	return a.lastDone, a.wait, a.ok
 }
 
+// earlyEligibleLocked is whether the tracker's last successful announce sent a min interval
+// below its interval, the condition an early announce needs besides timing; the caller holds mu.
+func (a *announceState) earlyEligibleLocked() bool {
+	return a.ok && a.minInterval > 0 && a.minInterval < a.interval
+}
+
 // announceWhenDue sends one announce outside Run's schedule, when the tracker allows it and
 // Run is not about to announce anyway: none in flight, the last announce of either kind
 // succeeded, no forced one has gone out since Run's last, the tracker sent a min interval
@@ -129,7 +135,7 @@ func (me *trackerScraper) announceWhenDue(ctx context.Context) bool {
 		gap = floor
 	}
 	now := time.Now()
-	if a.inFlight || a.forcedSinceRun || !a.ok || a.minInterval <= 0 || a.minInterval >= a.interval ||
+	if a.inFlight || a.forcedSinceRun || !a.earlyEligibleLocked() ||
 		now.Before(a.lastDone.Add(gap)) || !now.Before(a.lastDone.Add(a.wait)) {
 		a.mu.Unlock()
 		return false
@@ -193,6 +199,32 @@ func (t *Torrent) AnnounceWhenDue() int {
 	}
 	wg.Wait()
 	return int(sent.Load())
+}
+
+// EarlyAnnounceState reports, without announcing or changing anything, whether any tracker of
+// this torrent has answered an announce (known) and whether any has sent a min interval below
+// its interval, so that AnnounceWhenDue can ever send (eligible). It reads each tracker's
+// record under that record's own lock only.
+func (t *Torrent) EarlyAnnounceState() (known, eligible bool) {
+	t.cl.rLock()
+	scrapers := make([]*trackerScraper, 0, len(t.trackerAnnouncers))
+	for _, ta := range t.trackerAnnouncers {
+		if ts, ok := ta.(*trackerScraper); ok {
+			scrapers = append(scrapers, ts)
+		}
+	}
+	t.cl.rUnlock()
+	for _, ts := range scrapers {
+		ts.ann.mu.Lock()
+		if ts.ann.ok {
+			known = true
+		}
+		if ts.ann.earlyEligibleLocked() {
+			eligible = true
+		}
+		ts.ann.mu.Unlock()
+	}
+	return known, eligible
 }
 
 type torrentTrackerAnnouncer interface {

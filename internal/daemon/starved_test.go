@@ -155,23 +155,29 @@ func TestStarveBackoffResetsAfterRecovery(t *testing.T) {
 }
 
 // fakeStarveTarget sends nothing (returns 0, a deferral) for its first defers calls, then one
-// announce per call.
+// announce per call; private is what it reports for a sent announce.
 type fakeStarveTarget struct {
-	defers int
-	calls  int
-	panics bool
+	defers  int
+	calls   int
+	panics  bool
+	private bool
 }
 
-func (f *fakeStarveTarget) Announce(starveObs) int {
+func (f *fakeStarveTarget) Announce(starveObs) (int, bool) {
 	f.calls++
 	if f.panics {
 		panic("boom")
 	}
 	if f.calls <= f.defers {
-		return 0
+		return 0, f.private
 	}
-	return 1
+	return 1, f.private
 }
+
+// reannounceTotal is both privacy series added up.
+func reannounceTotal() int64 { return reannounces[0].Load() + reannounces[1].Load() }
+
+func resetReannounces() { reannounces[0].Store(0); reannounces[1].Store(0) }
 
 func newTestController(targets map[string]*fakeStarveTarget) *starveController {
 	return newStarveController(func(hash string) starveTarget {
@@ -185,7 +191,7 @@ func newTestController(targets map[string]*fakeStarveTarget) *starveController {
 // One announce for a starved confirmed public torrent after the window, none before, none
 // for a healthy or a not-playing one.
 func TestStarveControllerAnnouncesOnceAndOnlyTheStarved(t *testing.T) {
-	reannounces.Store(0)
+	resetReannounces()
 	pub := &fakeStarveTarget{}
 	fine := &fakeStarveTarget{}
 	idle := &fakeStarveTarget{} // in the engine but never sampled
@@ -202,8 +208,33 @@ func TestStarveControllerAnnouncesOnceAndOnlyTheStarved(t *testing.T) {
 	if pub.calls != 1 || fine.calls != 0 || idle.calls != 0 {
 		t.Errorf("announces: starved %d, healthy %d, not playing %d, want 1/0/0", pub.calls, fine.calls, idle.calls)
 	}
-	if reannounces.Load() != 1 {
-		t.Errorf("counter = %d, want 1", reannounces.Load())
+	if reannounceTotal() != 1 {
+		t.Errorf("counter = %d, want 1", reannounceTotal())
+	}
+}
+
+// A sent announce lands in the series of the target's privacy, and a deferral in neither.
+func TestStarveControllerCountsByPrivacy(t *testing.T) {
+	resetReannounces()
+	pub := &fakeStarveTarget{}
+	priv := &fakeStarveTarget{private: true}
+	deferred := &fakeStarveTarget{defers: 1 << 30, private: true}
+	c := newTestController(map[string]*fakeStarveTarget{"pub": pub, "priv": priv, "def": deferred})
+	for s := 0; s <= 120; s += 5 {
+		c.tick(at(s), []starveSample{
+			{hash: "pub", obs: starved(int64(s))},
+			{hash: "priv", obs: starved(int64(s))},
+			{hash: "def", obs: starved(int64(s))},
+		})
+	}
+	if pub.calls != 1 || priv.calls != 1 || deferred.calls == 0 {
+		t.Fatalf("calls: public %d, private %d (want 1/1), deferred %d (want > 0)", pub.calls, priv.calls, deferred.calls)
+	}
+	if got := reannounces[0].Load(); got != 1 {
+		t.Errorf("private=false = %d, want 1", got)
+	}
+	if got := reannounces[1].Load(); got != 1 {
+		t.Errorf("private=true = %d, want 1 (the deferred private torrent adds nothing)", got)
 	}
 }
 
@@ -212,7 +243,7 @@ func TestStarveControllerAnnouncesOnceAndOnlyTheStarved(t *testing.T) {
 // backoff is consumed. The announce that finally goes out is counted once and starts the
 // backoff, so the next one waits the first gap from THAT send.
 func TestStarveControllerDeferralConsumesNoBackoff(t *testing.T) {
-	reannounces.Store(0)
+	resetReannounces()
 	const defers = 10
 	priv := &fakeStarveTarget{defers: defers}
 	c := newTestController(map[string]*fakeStarveTarget{"p": priv})
@@ -223,15 +254,15 @@ func TestStarveControllerDeferralConsumesNoBackoff(t *testing.T) {
 		if priv.calls > before && priv.calls > defers {
 			if sentAt < 0 {
 				sentAt = s
-				if got := reannounces.Load(); got != 1 {
+				if got := reannounceTotal(); got != 1 {
 					t.Fatalf("counter = %d at the first send, want 1 (deferrals uncounted)", got)
 				}
 			} else if secondAt < 0 {
 				secondAt = s
 			}
 		}
-		if priv.calls <= defers && reannounces.Load() != 0 {
-			t.Fatalf("counter = %d during deferral at %d s", reannounces.Load(), s)
+		if priv.calls <= defers && reannounceTotal() != 0 {
+			t.Fatalf("counter = %d during deferral at %d s", reannounceTotal(), s)
 		}
 	}
 	// Window over at 60 s; deferred on each of the 10 ticks from 60 s, sent on the 11th.
@@ -241,22 +272,22 @@ func TestStarveControllerDeferralConsumesNoBackoff(t *testing.T) {
 	if want := sentAt + int(starvedGap/time.Second); secondAt != want {
 		t.Errorf("second send at %d s, want %d (the first gap after the send)", secondAt, want)
 	}
-	if got := priv.calls - defers; reannounces.Load() != int64(got) {
-		t.Errorf("counter = %d, want %d sends", reannounces.Load(), got)
+	if got := priv.calls - defers; reannounceTotal() != int64(got) {
+		t.Errorf("counter = %d, want %d sends", reannounceTotal(), got)
 	}
 }
 
 // A target that never sends (metadata unknown, or a tracker without a min interval) is never
 // counted, however long it is starved.
 func TestStarveControllerNeverSendingTargetIsNeverCounted(t *testing.T) {
-	reannounces.Store(0)
+	resetReannounces()
 	never := &fakeStarveTarget{defers: 1 << 30}
 	c := newTestController(map[string]*fakeStarveTarget{"n": never})
 	for s := 0; s <= 1200; s += 5 {
 		c.tick(at(s), []starveSample{{hash: "n", obs: starved(int64(s))}})
 	}
-	if never.calls == 0 || reannounces.Load() != 0 {
-		t.Errorf("calls %d (want > 0), counter %d (want 0)", never.calls, reannounces.Load())
+	if never.calls == 0 || reannounceTotal() != 0 {
+		t.Errorf("calls %d (want > 0), counter %d (want 0)", never.calls, reannounceTotal())
 	}
 }
 
@@ -356,7 +387,7 @@ func TestStarveSamplesOnlyConfirmedPlayback(t *testing.T) {
 func TestStarveTargetReadsTheEngineHandleOnce(t *testing.T) {
 	calls := 0
 	nilHandle := engineStarveTarget{under: func() *torrent.Torrent { calls++; return nil }}
-	if n := nilHandle.Announce(starved(1)); n != 0 { // must not panic
+	if n, _ := nilHandle.Announce(starved(1)); n != 0 { // must not panic
 		t.Errorf("dropped torrent announced %d", n)
 	}
 	if calls != 1 {
@@ -373,26 +404,27 @@ func TestRouteStarveAnnounce(t *testing.T) {
 		info               *metainfo.Info
 		due                int
 		want               int
+		wantPrivate        bool
 		wantDue, wantTrack int
 	}{
-		{"unknown metadata", nil, 1, 0, 0, 0},
-		{"private, due", &metainfo.Info{Private: &yes}, 2, 2, 1, 0},
-		{"private, deferred", &metainfo.Info{Private: &yes}, 0, 0, 1, 0},
-		{"public", &metainfo.Info{}, 5, 1, 0, 1},
-		{"public, flag false", &metainfo.Info{Private: &no}, 5, 1, 0, 1},
+		{"unknown metadata", nil, 1, 0, false, 0, 0},
+		{"private, due", &metainfo.Info{Private: &yes}, 2, 2, true, 1, 0},
+		{"private, deferred", &metainfo.Info{Private: &yes}, 0, 0, true, 1, 0},
+		{"public", &metainfo.Info{}, 5, 1, false, 0, 1},
+		{"public, flag false", &metainfo.Info{Private: &no}, 5, 1, false, 0, 1},
 	} {
 		var due, track int
-		got := routeStarveAnnounce(c.info, func() int { due++; return c.due }, func() { track++ })
-		if got != c.want || due != c.wantDue || track != c.wantTrack {
-			t.Errorf("%s: sent %d, due calls %d, tracked calls %d; want %d/%d/%d",
-				c.name, got, due, track, c.want, c.wantDue, c.wantTrack)
+		got, priv := routeStarveAnnounce(c.info, func() int { due++; return c.due }, func() { track++ })
+		if got != c.want || priv != c.wantPrivate || due != c.wantDue || track != c.wantTrack {
+			t.Errorf("%s: sent %d private %v, due calls %d, tracked calls %d; want %d/%v/%d/%d",
+				c.name, got, priv, due, track, c.want, c.wantPrivate, c.wantDue, c.wantTrack)
 		}
 	}
 }
 
 func TestStarveLogLineHasNoTrackerURL(t *testing.T) {
-	line := starveLogLine(starveObs{peers: 1, stalls: 4, ahead: 3 << 20, aheadOK: true})
-	for _, want := range []string{"reason=starved", "peers=1", "stalls=4"} {
+	line := starveLogLine(starveObs{peers: 1, stalls: 4, ahead: 3 << 20, aheadOK: true}, true)
+	for _, want := range []string{"reason=starved", "peers=1", "stalls=4", "private=true"} {
 		if !strings.Contains(line, want) {
 			t.Errorf("%q lacks %q", line, want)
 		}
@@ -444,5 +476,22 @@ func TestOpenSessionViewsWhereFiltersBeforeAhead(t *testing.T) {
 	}
 	if !asked["aa"] || asked["bb"] {
 		t.Error("the ahead of an unconfirmed session was computed")
+	}
+}
+
+// Only private torrents are counted: unknown before a successful announce, eligible when a
+// tracker sent a min interval below its interval, ineligible otherwise.
+func TestCountEarlyAnnounce(t *testing.T) {
+	st := func(known, eligible bool) func() (bool, bool) { return func() (bool, bool) { return known, eligible } }
+	got := countEarlyAnnounce([]earlyAnnounceTorrent{
+		{private: false, state: st(true, true)},
+		{private: true, state: st(false, false)},
+		{private: true, state: st(true, false)},
+		{private: true, state: st(true, false)},
+		{private: true, state: st(true, true)},
+		{private: true, state: nil}, // metadata or engine handle gone: not counted
+	})
+	if got != [3]int{1, 2, 1} {
+		t.Errorf("eligible/ineligible/unknown = %v, want [1 2 1]", got)
 	}
 }
