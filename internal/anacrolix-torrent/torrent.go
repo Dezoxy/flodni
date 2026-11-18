@@ -3920,37 +3920,7 @@ func (t *Torrent) AnnounceTracked(onDone func(peers, errs, total int, failures [
 		}
 	}
 	t.cl.unlock()
-	t.announceScrapers(scrapers, false, onDone)
-}
 
-// AnnounceWhenDue is AnnounceTracked for a torrent whose trackers must not be asked before
-// their own interval is over (a private torrent): only a tracker that has answered before
-// and whose announce interval has run out is announced to, and the announce counts as the
-// tracker's last one, so neither another forced announce nor the regular schedule comes
-// sooner than the interval after it. Like AnnounceTracked it reaches only the trackers the
-// torrent holds: no DHT, no PEX. It returns how many trackers it announces to (0 when none
-// is due, and then onDone does not run).
-func (t *Torrent) AnnounceWhenDue(onDone func(peers, errs, total int, failures []string)) int {
-	t.cl.lock()
-	now := time.Now()
-	scrapers := make([]*trackerScraper, 0, len(t.trackerAnnouncers))
-	for _, ta := range t.trackerAnnouncers {
-		if ts, ok := ta.(*trackerScraper); ok && ts.forcedDue(now) {
-			// Taken now, so a second caller cannot pass the same check before this
-			// announce has recorded its result.
-			ts.lastAnnounce.Completed = now
-			scrapers = append(scrapers, ts)
-		}
-	}
-	t.cl.unlock()
-	if len(scrapers) == 0 {
-		return 0
-	}
-	t.announceScrapers(scrapers, true, onDone)
-	return len(scrapers)
-}
-
-func (t *Torrent) announceScrapers(scrapers []*trackerScraper, record bool, onDone func(peers, errs, total int, failures []string)) {
 	go func() {
 		type trackedResult struct {
 			url string
@@ -3961,11 +3931,7 @@ func (t *Torrent) announceScrapers(scrapers []*trackerScraper, record bool, onDo
 		results := make(chan trackedResult, len(scrapers))
 		for _, ts := range scrapers {
 			go func(ts *trackerScraper) {
-				res := ts.announce(ctx, 0)
-				if record {
-					ts.recordForced(res)
-				}
-				results <- trackedResult{url: ts.u.String(), res: res}
+				results <- trackedResult{url: ts.u.String(), res: ts.announce(ctx, 0)}
 			}(ts)
 		}
 		var peers, errs int

@@ -224,27 +224,6 @@ func (me *trackerScraper) retryDue(now time.Time) bool {
 	return last.Err == nil || !now.Before(last.Completed.Add(last.Interval))
 }
 
-// forcedDue reports whether a forced announce that honours the tracker's interval may go to
-// this tracker now: it has answered before, and the interval it gave (or the backoff after a
-// failure) is over. Must be called with the client lock held.
-func (me *trackerScraper) forcedDue(now time.Time) bool {
-	last := me.lastAnnounce
-	return !last.Completed.IsZero() && !now.Before(last.Completed.Add(last.Interval))
-}
-
-// recordForced stores the outcome of a forced announce as the tracker's last one, with the
-// same wait floor and failure backoff the regular schedule uses, so Run waits it out too.
-func (me *trackerScraper) recordForced(ar trackerAnnounceResult) {
-	if ar.Err != nil {
-		ar.Interval = me.t.cl.config.failedAnnounceInterval(1)
-	} else if ar.Interval < time.Minute {
-		ar.Interval = time.Minute
-	}
-	me.t.cl.lock()
-	me.lastAnnounce = ar
-	me.t.cl.unlock()
-}
-
 func (me *trackerScraper) Run() {
 	defer me.announceStopped()
 
@@ -295,15 +274,6 @@ func (me *trackerScraper) Run() {
 			// Recalculate the interval.
 			goto recalculate
 		case <-time.After(time.Until(ar.Completed.Add(interval))):
-			// A forced announce (AnnounceWhenDue) may have gone out meanwhile: the
-			// tracker's interval runs from it.
-			me.t.cl.rLock()
-			last := me.lastAnnounce
-			me.t.cl.rUnlock()
-			if last.Completed.After(ar.Completed) && time.Now().Before(last.Completed.Add(last.Interval)) {
-				ar, baseInterval = last, last.Interval
-				goto recalculate
-			}
 		}
 	}
 }

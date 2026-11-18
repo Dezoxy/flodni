@@ -8,6 +8,8 @@ import (
 
 	"flodni/internal/flog"
 	"flodni/internal/gostorm/torr"
+
+	"github.com/anacrolix/torrent"
 )
 
 // Re-announce of a starved torrent during a confirmed playback.
@@ -19,27 +21,26 @@ import (
 // to its trackers once, then not again before a gap that doubles with every announce that did
 // not cure it.
 //
-// Hard rule 3: a private torrent is announced only to the trackers of its own stored record
-// (Torrent.AnnounceWhenDue: never DHT, PEX or a tracker we add), and only once a tracker's own
-// announce interval is over, on top of the gap here. A torrent whose privacy is not known yet
-// counts as private.
+// Public torrents only. A private torrent (and one whose metadata is not known yet, which
+// counts as private) is skipped (hard rule 3): the engine keeps no tracker min interval yet, so a
+// forced announce could not stay inside it. It relies on the tracker's regular interval.
 const (
 	starvedPeerFloor = 3
 	starvedWindow    = 60 * time.Second
 	// The least time between two forced announces of one torrent, doubled for each announce
-	// that did not end the starvation, up to starvedMaxGap. A private torrent waits longer.
-	starvedPublicGap  = 2 * time.Minute
-	starvedPrivateGap = 5 * time.Minute
-	starvedMaxGap     = 30 * time.Minute
+	// that did not end the starvation, up to starvedMaxGap.
+	starvedGap    = 2 * time.Minute
+	starvedMaxGap = 30 * time.Minute
+	// starvedLowWater: a shrinking ahead counts only under this many buffered bytes.
+	starvedLowWater = 32 << 20
 	// starvedRecovery is how long a torrent must stay at or over the floor to start from
 	// the shortest gap again.
 	starvedRecovery = 2 * time.Minute
 	starvedTick     = 5 * time.Second
 )
 
-// reannounces counts forced announces, index 1 for a private torrent:
-// flodni_reannounce_total{reason="starved",private=...}.
-var reannounces [2]atomic.Int64
+// reannounces counts forced announces: flodni_reannounce_total{reason="starved"}.
+var reannounces atomic.Int64
 
 // starveObs is what is known of one playing torrent at one sample.
 type starveObs struct {
@@ -47,12 +48,19 @@ type starveObs struct {
 	stalls  int64 // read stalls of its open sessions so far
 	ahead   int64 // the least ahead_bytes of its sessions; meaningful when aheadOK
 	aheadOK bool
+	// aheadMissing: bytes are missing past that ahead, i.e. it stops short of the file's end.
+	// Ahead is clamped to the end, so near it a fully buffered file's ahead shrinks without
+	// anything being wrong.
+	aheadMissing bool
+	stuck        bool  // a read has been in flight longer than the stall threshold
+	reads        int64 // served reads of its sessions so far
 }
 
 // starveState follows one torrent through the window and the backoff.
 type starveState struct {
 	since    time.Time // start of the current window; zero while at or over the floor
 	stalls0  int64
+	reads0   int64
 	ahead0   int64
 	aheadOK0 bool
 	lastFire time.Time
@@ -61,15 +69,12 @@ type starveState struct {
 }
 
 func (s *starveState) rebase(now time.Time, o starveObs) {
-	s.since, s.stalls0, s.ahead0, s.aheadOK0 = now, o.stalls, o.ahead, o.aheadOK
+	s.since, s.stalls0, s.reads0, s.ahead0, s.aheadOK0 = now, o.stalls, o.reads, o.ahead, o.aheadOK
 }
 
 // gap is the least time since the last forced announce before another.
-func (s *starveState) gap(private bool) time.Duration {
-	g := starvedPublicGap
-	if private {
-		g = starvedPrivateGap
-	}
+func (s *starveState) gap() time.Duration {
+	g := starvedGap
 	for i := 1; i < s.fires && g < starvedMaxGap; i++ {
 		g *= 2
 	}
@@ -78,7 +83,7 @@ func (s *starveState) gap(private bool) time.Duration {
 
 // step takes one sample and says whether to announce now. It changes nothing a caller
 // that finds the announce deferred cannot put back by restoring a copy.
-func (s *starveState) step(now time.Time, o starveObs, private bool) bool {
+func (s *starveState) step(now time.Time, o starveObs) bool {
 	if o.peers >= starvedPeerFloor {
 		s.since = time.Time{}
 		if s.healthy.IsZero() {
@@ -96,12 +101,19 @@ func (s *starveState) step(now time.Time, o starveObs, private bool) bool {
 	if now.Sub(s.since) < starvedWindow {
 		return false
 	}
-	evidence := o.stalls > s.stalls0 || (o.aheadOK && s.aheadOK0 && o.ahead < s.ahead0)
+	// Evidence the player feels it: a read that completed slowly, one still hanging, or a
+	// buffer that is short of the end of the file, under the low-water mark, and either
+	// shrinking or empty with no read progress. A stall is counted only when a read ends, so
+	// the hung read and the empty buffer cover the worst case.
+	lowMissing := o.aheadOK && o.aheadMissing && o.ahead < starvedLowWater
+	evidence := o.stalls > s.stalls0 || o.stuck ||
+		(lowMissing && s.aheadOK0 && o.ahead < s.ahead0) ||
+		(lowMissing && o.ahead == 0 && o.reads == s.reads0)
 	if !evidence {
 		s.rebase(now, o)
 		return false
 	}
-	if !s.lastFire.IsZero() && now.Sub(s.lastFire) < s.gap(private) {
+	if !s.lastFire.IsZero() && now.Sub(s.lastFire) < s.gap() {
 		return false
 	}
 	s.lastFire = now
@@ -112,10 +124,9 @@ func (s *starveState) step(now time.Time, o starveObs, private bool) bool {
 
 // starveTarget is the torrent a forced announce goes to.
 type starveTarget interface {
+	// Private is true for a private torrent and for one whose metadata is not known.
 	Private() bool
-	// Announce starts the announce and returns how many trackers it goes to: 0 when none is
-	// due (nothing was sent), -1 when the engine does not say.
-	Announce(o starveObs) int
+	Announce(o starveObs)
 }
 
 type starveSample struct {
@@ -134,11 +145,22 @@ func newStarveController(target func(hash string) starveTarget) *starveControlle
 	return &starveController{states: map[string]*starveState{}, target: target}
 }
 
+// safeTick is tick with a panic turned into a log line, so one bad torrent cannot stop the
+// daemon.
+func (c *starveController) safeTick(now time.Time, samples []starveSample) {
+	defer func() {
+		if r := recover(); r != nil {
+			flog.Std.Warn(fmt.Sprintf("[Starved] sampling pass recovered from a panic: %v", r), "panic", fmt.Sprint(r))
+		}
+	}()
+	c.tick(now, samples)
+}
+
 func (c *starveController) tick(now time.Time, samples []starveSample) {
 	seen := make(map[string]bool, len(samples))
 	for _, sm := range samples {
 		tg := c.target(sm.hash)
-		if tg == nil {
+		if tg == nil || tg.Private() {
 			continue
 		}
 		seen[sm.hash] = true
@@ -147,36 +169,30 @@ func (c *starveController) tick(now time.Time, samples []starveSample) {
 			st = &starveState{}
 			c.states[sm.hash] = st
 		}
-		private := tg.Private()
-		prev := *st
-		if !st.step(now, sm.obs, private) {
+		if !st.step(now, sm.obs) {
 			continue
 		}
-		n := tg.Announce(sm.obs)
-		if n == 0 {
-			// Every tracker is still inside its interval: nothing went out, so nothing is
-			// used up; ask again at the next sample.
-			*st = prev
+		reannounces.Add(1)
+		tg.Announce(sm.obs)
+	}
+	for h, st := range c.states {
+		if seen[h] {
 			continue
 		}
-		reannounces[boolIdx(private)].Add(1)
-	}
-	for h := range c.states {
-		if !seen[h] {
-			delete(c.states, h) // playback ended or the torrent closed
+		// Gone from the samples: a rebuild, an idle close or a moment without a session. The
+		// backoff is kept for as long as it still limits the next announce, so the torrent
+		// cannot fire again 60 s after it comes back; its window starts over.
+		if !st.lastFire.IsZero() && now.Sub(st.lastFire) < st.gap() {
+			st.since, st.healthy = time.Time{}, time.Time{}
+			continue
 		}
+		delete(c.states, h)
 	}
-}
-
-func boolIdx(b bool) int {
-	if b {
-		return 1
-	}
-	return 0
 }
 
 // starveSamples reduces the open sessions to one sample per torrent with a confirmed
-// playback: stalls add up, the ahead is the least of the sessions that have one.
+// playback: stalls and reads add up, a hung read in any session counts, and the ahead is that
+// of the session with the least of it.
 func starveSamples(views []sessionView, confirmed func(string) bool, peers func(string) int) []starveSample {
 	var out []starveSample
 	idx := map[string]int{}
@@ -192,76 +208,54 @@ func starveSamples(views []sessionView, confirmed func(string) bool, peers func(
 		}
 		o := &out[i].obs
 		o.stalls += v.Stalls
+		o.reads += v.Reads
+		if v.stuckFor > ttffStallDuration {
+			o.stuck = true
+		}
 		if v.AheadBytes != nil && (!o.aheadOK || *v.AheadBytes < o.ahead) {
 			o.ahead, o.aheadOK = *v.AheadBytes, true
+			o.aheadMissing = v.LastReadEnd != nil && *v.LastReadEnd+*v.AheadBytes < v.Size
 		}
 	}
 	return out
 }
 
-// announcer is the part of the engine torrent that announces.
-type announcer interface {
-	AnnounceTracked(onDone func(peers, errs, total int, failures []string))
-	AnnounceWhenDue(onDone func(peers, errs, total int, failures []string)) int
-}
-
-// forceAnnounce announces to the torrent's trackers. A private torrent goes through
-// AnnounceWhenDue only, which honours each tracker's interval; the call that does not is
-// for a public torrent.
-func forceAnnounce(a announcer, private bool, onDone func(peers, errs, total int, failures []string)) int {
-	if private {
-		return a.AnnounceWhenDue(onDone)
-	}
-	a.AnnounceTracked(onDone)
-	return -1
-}
-
-// starvePrivate is BEP 27 as the engine reads it, except that unknown metadata counts as
-// private.
-func starvePrivate(haveInfo bool, flag *bool) bool {
-	if !haveInfo {
-		return true
-	}
-	return flag != nil && *flag
-}
-
-func starveLogLine(private bool, o starveObs, trackers int) string {
-	line := fmt.Sprintf("[Starved] re-announce reason=starved private=%t peers=%d stalls=%d", private, o.peers, o.stalls)
+func starveLogLine(o starveObs) string {
+	line := fmt.Sprintf("[Starved] re-announce reason=starved peers=%d stalls=%d", o.peers, o.stalls)
 	if o.aheadOK {
 		line += fmt.Sprintf(" ahead_mb=%d", o.ahead>>20)
-	}
-	if trackers >= 0 {
-		line += fmt.Sprintf(" trackers=%d", trackers)
 	}
 	return line
 }
 
-// engineStarveTarget adapts a live engine torrent.
-type engineStarveTarget struct{ t *torr.Torrent }
+// engineStarveTarget adapts a live engine torrent. under returns the engine handle, which a
+// rebuild nils (drop) at any time: it is read once per call and the copy is used.
+type engineStarveTarget struct{ under func() *torrent.Torrent }
 
 func (e engineStarveTarget) Private() bool {
-	info := e.t.Torrent.Info()
-	if info == nil {
-		return starvePrivate(false, nil)
+	t := e.under()
+	if t == nil {
+		return true // gone: nothing to announce
 	}
-	return starvePrivate(true, info.Private)
+	info := t.Info()
+	return info == nil || (info.Private != nil && *info.Private)
 }
 
-func (e engineStarveTarget) Announce(o starveObs) int {
-	private := e.Private()
-	n := forceAnnounce(e.t.Torrent, private, nil)
-	if n != 0 {
-		flog.Std.Info(starveLogLine(private, o, n), "reason", "starved", "private", private, "peers", o.peers)
+func (e engineStarveTarget) Announce(o starveObs) {
+	t := e.under()
+	if t == nil {
+		return
 	}
-	return n
+	flog.Std.Info(starveLogLine(o), "reason", "starved", "peers", o.peers)
+	t.AnnounceTracked(nil)
 }
 
 func engineStarveTargetFor(hash string) starveTarget {
 	t := torr.PeekTorrent(hash)
-	if t == nil || t.Torrent == nil {
+	if t == nil || t.UnderlyingTorrent() == nil {
 		return nil
 	}
-	return engineStarveTarget{t}
+	return engineStarveTarget{under: t.UnderlyingTorrent}
 }
 
 // runStarvedReannounce samples the confirmed playbacks every starvedTick.
@@ -274,11 +268,14 @@ func runStarvedReannounce(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case now := <-tk.C:
-			if set, _, _ := confirmedSnapshot(); len(set) == 0 {
-				c.tick(now, nil)
-				continue
+			// Only confirmed playback is looked at, and its sessions are chosen before the
+			// ahead (an engine walk) is computed.
+			var samples []starveSample
+			if set, _, _ := confirmedSnapshot(); len(set) > 0 {
+				views := openSessionViewsWhere(now, func(s *TTFFSession) bool { return hashConfirmed(s.hash) })
+				samples = starveSamples(views, hashConfirmed, sessionActivePeers)
 			}
-			c.tick(now, starveSamples(openSessionViews(now), hashConfirmed, sessionActivePeers))
+			c.safeTick(now, samples)
 		}
 	}
 }

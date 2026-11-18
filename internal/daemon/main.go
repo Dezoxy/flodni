@@ -319,6 +319,7 @@ func Run() {
 	// closes. Set before the engine and its ticker start. The hook only counts; it
 	// changes nothing about when a torrent closes.
 	torr.OnIdleClose = countIdleClose
+	torr.ConfirmedPlayback = hashConfirmed
 	// Keep-alive (phase b): the engine asks before it closes an idle torrent. The
 	// predicate reads the playback state only and never calls into the engine.
 	torr.HoldExpiry = keepaliveHold
@@ -420,7 +421,6 @@ func Run() {
 	warmWake = nativeClient.WakeStored
 
 	go tuner.Start(context.Background())
-	torr.ConfirmedPlayback = hashConfirmed
 	go runStarvedReannounce(context.Background())
 
 	// Metadata LRU cache: capacity from config, 24h TTL.

@@ -107,6 +107,7 @@ var readInnerCall = (*MkvHandle).readInner
 // refetched; if they still cannot be produced, EIO is returned, which the kernel does not
 // cache, so the read is retried instead of a hole being made permanent.
 func (h *MkvHandle) Read(fuseCtx context.Context, dest []byte, off int64) (fuse.ReadResult, syscall.Errno) {
+	defer noteReadInFlight(h.path)()
 	res, errno := readInnerCall(h, fuseCtx, dest, off)
 	if errno == errnoBudgetRefused || errno == errnoWakeRefused {
 		return nil, syscall.EIO // before the failure accounting below: not the swarm failing
