@@ -246,6 +246,17 @@ func (s *pumpSim) demandFetches() []int64 {
 	return offs
 }
 
+// idle waits until no background prefetch is in flight: the reads spawn asynchronous fetches,
+// and one that lands after a sample is taken would be counted in the wrong window.
+func (s *pumpSim) idle() {
+	s.t.Helper()
+	waitUntil(s.t, "background prefetches to end", func() bool {
+		idle := true
+		app.inFlightPrefetches.Range(func(_, _ any) bool { idle = false; return false })
+		return idle
+	})
+}
+
 // settle waits until the pump has made no read for a while: parked at its lead limit, or
 // following a new target and done with it. The pump loop sleeps 100-200 ms between checks.
 func (s *pumpSim) settle() {
