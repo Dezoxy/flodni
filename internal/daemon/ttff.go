@@ -174,10 +174,14 @@ type TTFFSession struct {
 	lastEnd         atomic.Int64 // end of that read (offset + bytes returned); meaningful once lastOff >= 0
 	seekCount       atomic.Int64
 	stallCount      atomic.Int64
-	inflight        atomic.Int32 // reads in progress
-	inflightSince   atomic.Int64 // unixNano the first of them started; 0 when none
-	maxStallMS      atomic.Int64
-	tailOrDeep      atomic.Bool // read at off>=8MB or inside last 16MB (tail region)
+	seekStalls      atomic.Int64 // stalls whose cause was seek, a subset of stallCount
+	// seekArmedAt is when the read that last jumped began (unixNano); 0 once the cache
+	// has served a read since, or before any jump. See recordRead.
+	seekArmedAt   atomic.Int64
+	inflight      atomic.Int32 // reads in progress
+	inflightSince atomic.Int64 // unixNano the first of them started; 0 when none
+	maxStallMS    atomic.Int64
+	tailOrDeep    atomic.Bool // read at off>=8MB or inside last 16MB (tail region)
 
 	reopens atomic.Int64 // read-path wakes of a closed torrent, for /api/sessions
 	// confirmed is sticky: a webhook confirmed the path while the session was open, or
@@ -267,13 +271,20 @@ func noteReadInFlight(path string) func() {
 
 // recordRead updates session state for one served FUSE read. lastReadAt is
 // refreshed on every served read.
-func (s *TTFFSession) recordRead(src ttffSource, d time.Duration, n int, off int64) {
+//
+// It returns the cause to count a stall of this read under. A stall is a seek stall when
+// it began after a jump (the seek the session counts: shouldInterruptForSeek, or a jump
+// beyond the read-ahead budget from the header) and before the first read the read-ahead
+// cache served after that jump, and no more than seekStallWindow after the jump began.
+// The jumping read's own stall counts. Every other stall is a playback stall.
+func (s *TTFFSession) recordRead(src ttffSource, d time.Duration, n int, off int64) (cause int) {
 	if s.closed.Load() {
-		return
+		return stallCausePlayback
 	}
-	nowN := time.Now().UnixNano()
+	nowN := ttffNow().UnixNano()
 	s.lastReadAt.Store(nowN)
 	s.reads.Add(1)
+	jumped := false
 	if n > 0 {
 		s.firstDataAt.CompareAndSwap(0, nowN)
 		s.bytesRead.Add(int64(n))
@@ -305,6 +316,7 @@ func (s *TTFFSession) recordRead(src ttffSource, d time.Duration, n int, off int
 			if b := gc(); b != nil && shouldInterruptForSeek(prev, off, b.ReadAheadBudget) {
 				s.seekCount.Add(1)
 				ttffStats.seekLatency.Add(d)
+				jumped = true
 			}
 		} else if prev == 0 {
 			// Previous data read was the header at offset 0 — a served read,
@@ -314,13 +326,31 @@ func (s *TTFFSession) recordRead(src ttffSource, d time.Duration, n int, off int
 			if b := gc(); b != nil && off > b.ReadAheadBudget {
 				s.seekCount.Add(1)
 				ttffStats.seekLatency.Add(d)
+				jumped = true
 			}
 		}
 		s.lastEnd.Store(off + int64(n))
 		s.lastOff.Store(off)
 	}
+	start := nowN - d.Nanoseconds()
+	armed := s.seekArmedAt.Load()
+	if jumped {
+		armed = start
+	}
+	if d > ttffStallDuration && armed != 0 && start-armed <= int64(seekStallWindow) {
+		cause = stallCauseSeek
+	}
+	if n > 0 && src == srcRACacheHit {
+		armed = 0
+	}
+	if armed != s.seekArmedAt.Load() {
+		s.seekArmedAt.Store(armed)
+	}
 	if d > ttffStallDuration {
 		s.stallCount.Add(1)
+		if cause == stallCauseSeek {
+			s.seekStalls.Add(1)
+		}
 		ms := d.Milliseconds()
 		for {
 			cur := s.maxStallMS.Load()
@@ -329,6 +359,7 @@ func (s *TTFFSession) recordRead(src ttffSource, d time.Duration, n int, off int
 			}
 		}
 	}
+	return cause
 }
 
 // ttffIsReal decides at close time whether a session was a real playback
@@ -436,7 +467,7 @@ func (s *TTFFSession) closeSession() {
 				}
 			}
 		}
-		logger.Info(fmt.Sprintf("[TTFF] path=%s head=%d tail=%d header=%s deepread=%s seek=%d stalls=%d bytes=%d", filepath.Base(s.path), boolToInt(s.warmupHeadReady.Load()), boolToInt(s.warmupTailReady.Load()), durOrDash(s.firstDataAt.Load(), opened), durOrDash(s.firstDeepReadAt.Load(), opened), s.seekCount.Load(), s.stallCount.Load(), s.bytesRead.Load()), "file", filepath.Base(s.path))
+		logger.Info(fmt.Sprintf("[TTFF] path=%s head=%d tail=%d header=%s deepread=%s seek=%d stalls=%d bytes=%d seek_stalls=%d", filepath.Base(s.path), boolToInt(s.warmupHeadReady.Load()), boolToInt(s.warmupTailReady.Load()), durOrDash(s.firstDataAt.Load(), opened), durOrDash(s.firstDeepReadAt.Load(), opened), s.seekCount.Load(), s.stallCount.Load(), s.bytesRead.Load(), s.seekStalls.Load()), "file", filepath.Base(s.path))
 	})
 }
 
@@ -481,6 +512,13 @@ type ttffAgg struct {
 }
 
 var ttffStats ttffAgg
+
+// ttffNow is the clock of recordRead; tests replace it.
+var ttffNow = time.Now
+
+// seekStallWindow caps how long after a jump a stall still counts as a seek stall, so
+// a slow swarm after a seek is not hidden for the rest of the session.
+const seekStallWindow = 15 * time.Second
 
 // sessionOutcomes lists the outcomes a closed session can have, in the order the
 // metrics print them. The open outcome never reaches a close.
@@ -553,11 +591,12 @@ func ttffRead(path string, src ttffSource, d time.Duration, n int, off int64) {
 	case srcFetchBlock:
 		ttffStats.fetchBlock.Add(d)
 	}
-	if d > ttffStallDuration {
-		countStall(path)
-	}
+	cause := stallCausePlayback
 	if s := sessionForRead(path); s != nil {
-		s.recordRead(src, d, n, off)
+		cause = s.recordRead(src, d, n, off)
+	}
+	if d > ttffStallDuration {
+		countStall(path, cause)
 	}
 }
 

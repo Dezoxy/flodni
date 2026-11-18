@@ -121,7 +121,7 @@ func TestSessionLogContractKeys(t *testing.T) {
 	want := []string{"bytes_fetch_block", "bytes_racache_hit", "bytes_served", "bytes_warmup_head",
 		"bytes_warmup_tail", "confirmed", "duration_ms", "failed_reads", "failure_reason", "file_index",
 		"first_byte_ms", "hash", "id", "max_stall_ms", "opened_at", "outcome", "paced_ms", "path", "reads", "reopens",
-		"resumed_from", "size", "stalls", "swarm_served"}
+		"resumed_from", "size", "stalls", "stalls_after_seek", "swarm_served"}
 	// closed_at is omitted while a session is open; the log line always has it.
 	if !reflect.DeepEqual(keys, want) {
 		t.Fatalf("keys = %v, want %v", keys, want)
@@ -174,7 +174,7 @@ func TestOldSessionLinesUnchanged(t *testing.T) {
 	s.bytesRead.Store(2 << 20)
 	s.closeSession()
 	if got := linesWith(buf, "[TTFF]"); len(got) != 1 ||
-		got[0] != "[TTFF] path=x.mkv head=1 tail=0 header=250ms deepread=- seek=0 stalls=0 bytes=2097152" {
+		got[0] != "[TTFF] path=x.mkv head=1 tail=0 header=250ms deepread=- seek=0 stalls=0 bytes=2097152 seek_stalls=0" {
 		t.Fatalf("[TTFF] line = %q", got)
 	}
 

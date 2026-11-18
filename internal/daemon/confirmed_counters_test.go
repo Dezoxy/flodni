@@ -25,7 +25,9 @@ func resetKeepaliveState(t *testing.T) {
 		for i := range keepaliveCounters.idleCloses {
 			keepaliveCounters.idleCloses[i].Store(0)
 			keepaliveCounters.reopens[i].Store(0)
-			keepaliveCounters.stalls[i].Store(0)
+			for c := range keepaliveCounters.stalls[i] {
+				keepaliveCounters.stalls[i][c].Store(0)
+			}
 		}
 	}
 	reset()
@@ -116,7 +118,8 @@ func TestStallCountedByConfirmedAtTtffRead(t *testing.T) {
 	ttffRead("/m/a.mkv", srcFetchBlock, ttffStallDuration+time.Millisecond, 4096, 0)
 	ttffRead("/m/a.mkv", srcFetchBlock, ttffStallDuration, 4096, 0)
 	ttffRead("/m/nosuch.mkv", srcFetchBlock, 5*time.Second, 4096, 0)
-	if u, c := kaCounts(&keepaliveCounters.stalls); u != 2 || c != 1 {
+	st := &keepaliveCounters.stalls
+	if u, c := st[0][0].Load()+st[0][1].Load(), st[1][0].Load()+st[1][1].Load(); u != 2 || c != 1 {
 		t.Fatalf("stalls unconfirmed=%d confirmed=%d, want 2 and 1", u, c)
 	}
 }

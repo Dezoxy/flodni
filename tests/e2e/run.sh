@@ -1637,9 +1637,16 @@ run_keepalive() {
     return 1
   fi
   local s c missing=""
-  for s in flodni_torrent_idle_closes_total flodni_torrent_reopens_total flodni_read_stalls_total; do
+  for s in flodni_torrent_idle_closes_total flodni_torrent_reopens_total; do
     for c in true false; do
       [ "$(prom_value "$body" "$s{confirmed=\"$c\"}")" = absent ] && missing="$missing $s{$c}"
+    done
+  done
+  local cause
+  for c in true false; do
+    for cause in seek playback; do
+      [ "$(prom_value "$body" "flodni_read_stalls_total{confirmed=\"$c\",cause=\"$cause\"}")" = absent ] &&
+        missing="$missing flodni_read_stalls_total{$c,$cause}"
     done
   done
   for s in 'flodni_keepalive_releases_total{reason="stop"}' 'flodni_keepalive_releases_total{reason="ceiling"}' flodni_keepalive_evicted_total flodni_keepalive_held_torrents; do

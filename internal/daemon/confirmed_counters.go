@@ -13,12 +13,23 @@ import (
 var keepaliveCounters struct {
 	idleCloses [2]atomic.Int64
 	reopens    [2]atomic.Int64
-	stalls     [2]atomic.Int64
+	// stalls is [confirmed][cause]: cause is stallCausePlayback or stallCauseSeek.
+	stalls [2][2]atomic.Int64
 	// Keep-alive hold (phase b), in keepalive.go: releases by reason (0 stop, 1
 	// ceiling) and torrents that lost to the cap.
 	releases [2]atomic.Int64
 	evicted  atomic.Int64
 }
+
+// Causes of a read stall. A stall is seek when it began after a jump of the session's
+// read position and before the first cache-served read after it, within
+// seekStallWindow of the jump (see recordRead); every other stall is playback.
+const (
+	stallCausePlayback = 0
+	stallCauseSeek     = 1
+)
+
+var stallCauseNames = [2]string{stallCausePlayback: "playback", stallCauseSeek: "seek"}
 
 func confirmedIdx(confirmed bool) int {
 	if confirmed {
@@ -109,8 +120,8 @@ func countReopen(path, hash string) {
 }
 
 // countStall counts a served read over the stall threshold, labelled by the torrent
-// of the path: the session's hash, else the registry state's.
-func countStall(path string) {
+// of the path: the session's hash, else the registry state's, and by cause.
+func countStall(path string, cause int) {
 	hash := ""
 	if v, ok := sessions.Load(path); ok {
 		hash = v.(*TTFFSession).hash
@@ -122,5 +133,5 @@ func countStall(path string) {
 			}
 		}
 	}
-	keepaliveCounters.stalls[confirmedIdx(hashConfirmed(hash))].Add(1)
+	keepaliveCounters.stalls[confirmedIdx(hashConfirmed(hash))][cause].Add(1)
 }
