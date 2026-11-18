@@ -289,6 +289,55 @@ type auditReport struct {
 	// counts records with no parsable host at all (the audit cannot judge those).
 	UnparsedTrackers int `json:"unparsed_trackers"`
 	NoPrimary        int `json:"no_primary"`
+	// Endpoints lists scheme://host:port of the tracker URLs, nothing else of them.
+	Endpoints auditEndpoints `json:"endpoints"`
+}
+
+// auditEndpoints splits the endpoints by the records' privacy. Unparsed counts tracker
+// entries that gave no endpoint; they are never printed.
+type auditEndpoints struct {
+	Private  []auditEndpoint `json:"private"`
+	Public   []auditEndpoint `json:"public"`
+	Unparsed int             `json:"unparsed"`
+}
+
+// auditEndpoint is one endpoint and how many records list it (once per record).
+type auditEndpoint struct {
+	Endpoint string `json:"endpoint"`
+	Records  int    `json:"records"`
+}
+
+// trackerEndpointOf is scheme://host:port of a tracker URL with the default port made
+// explicit (http 80, https 443; udp must carry its port), or "" when the URL does not
+// parse, has another scheme, no valid host or no port. The path, query, fragment and
+// userinfo are dropped before anything is built, so no passkey can reach the output.
+func trackerEndpointOf(tr string) string {
+	tr = strings.TrimSpace(tr)
+	u, err := url.Parse(tr)
+	if err != nil {
+		return ""
+	}
+	h := trackerHostOf(tr)
+	if h == "" {
+		return ""
+	}
+	port := u.Port()
+	switch u.Scheme {
+	case "http", "https", "ws", "wss":
+		if port == "" {
+			port = "80"
+			if u.Scheme == "https" || u.Scheme == "wss" {
+				port = "443"
+			}
+		}
+	case "udp", "udp4", "udp6":
+		if port == "" {
+			return ""
+		}
+	default:
+		return ""
+	}
+	return u.Scheme + "://" + net.JoinHostPort(h, port)
 }
 
 // auditSite is one primary site (the registrable domain of a record's first tracker)
@@ -307,16 +356,32 @@ func trackersAudit(recs []trackerRecord, unreadable int, hashes, asJSON bool, ou
 	}
 	byHost := map[hostClass]*auditHost{}
 	bySite := map[string]int{}
+	epPrivate, epPublic := map[string]int{}, map[string]int{}
 	for _, r := range recs {
 		if r.private {
 			rep.Private++
 		} else {
 			rep.Public++
 		}
+		seenEp := map[string]bool{}
 		for _, tier := range r.tiers {
 			for _, tr := range tier {
 				if trackerHostOf(tr) == "" {
 					rep.UnparsedTrackers++
+				}
+				ep := trackerEndpointOf(tr)
+				if ep == "" {
+					rep.Endpoints.Unparsed++
+					continue
+				}
+				if seenEp[ep] {
+					continue
+				}
+				seenEp[ep] = true
+				if r.private {
+					epPrivate[ep]++
+				} else {
+					epPublic[ep]++
 				}
 			}
 		}
@@ -375,6 +440,7 @@ func trackersAudit(recs []trackerRecord, unreadable int, hashes, asJSON bool, ou
 		}
 		return rep.Primaries[i].Site < rep.Primaries[j].Site
 	})
+	rep.Endpoints.Private, rep.Endpoints.Public = sortedEndpoints(epPrivate), sortedEndpoints(epPublic)
 	if asJSON {
 		enc := json.NewEncoder(out)
 		if err := enc.Encode(rep); err != nil {
@@ -406,9 +472,30 @@ func trackersAudit(recs []trackerRecord, unreadable int, hashes, asJSON bool, ou
 	for _, ps := range rep.Primaries {
 		_, _ = fmt.Fprintf(out, "%s  records=%d\n", ps.Site, ps.Records)
 	}
+	_, _ = fmt.Fprintln(out, "endpoints (scheme://host:port, default ports explicit; nothing of the URL's path, query or userinfo):")
+	for _, g := range []struct {
+		name string
+		eps  []auditEndpoint
+	}{{"private", rep.Endpoints.Private}, {"public", rep.Endpoints.Public}} {
+		_, _ = fmt.Fprintf(out, " %s records:\n", g.name)
+		for _, e := range g.eps {
+			_, _ = fmt.Fprintf(out, "%s  records=%d\n", e.Endpoint, e.Records)
+		}
+	}
+	_, _ = fmt.Fprintf(out, "endpoints unparsed=%d\n", rep.Endpoints.Unparsed)
 	_, _ = fmt.Fprintf(out, "scanned=%d private=%d public=%d foreign_records=%d same_site_records=%d unparsed_trackers=%d no_primary=%d%s\n",
 		rep.Scanned, rep.Private, rep.Public, rep.ForeignRecords, rep.SameSiteRecords, rep.UnparsedTrackers, rep.NoPrimary, unreadableNote(unreadable))
 	return 0
+}
+
+// sortedEndpoints lists the endpoints sorted by name, never nil.
+func sortedEndpoints(m map[string]int) []auditEndpoint {
+	out := make([]auditEndpoint, 0, len(m))
+	for ep, n := range m {
+		out = append(out, auditEndpoint{ep, n})
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Endpoint < out[j].Endpoint })
+	return out
 }
 
 func unreadableNote(n int) string {

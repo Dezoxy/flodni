@@ -24,6 +24,7 @@ import (
 	"flodni/internal/readahead"
 	"flodni/internal/redact"
 	"flodni/internal/registry"
+	"flodni/internal/tlsverify"
 	"flodni/internal/tuner"
 	"flodni/internal/vfs"
 	"flodni/internal/warmer"
@@ -339,6 +340,12 @@ func Run() {
 	// Cold-start connection boost (opt-in, off by default, startup-only): read once, before
 	// the first torrent wakes.
 	torr.EngineColdBoost = gc().EngineColdBoost
+	// Tracker certificate verification (on by default): read once, before the engine builds its client.
+	torr.TrackerTLSInsecure = gc().TrackerTLSInsecure
+	tlsverify.Warn = func(s string) { logger.Warn(s) }
+	if w := trackerTLSWarning(gc()); w != "" {
+		logger.Warn(w)
+	}
 	go func() {
 		logger.Info("Starting Embedded GoStorm Engine...")
 		server.Start() // Starts Web Server on 8090 and Engine

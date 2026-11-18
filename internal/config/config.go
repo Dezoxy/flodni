@@ -247,6 +247,12 @@ type Config struct {
 	// Off unless the owner turns it on, and read once at start: a change needs a restart.
 	EngineColdBoost bool `json:"engine_cold_boost"`
 
+	// TrackerTLSInsecure turns off certificate verification for https trackers. Off by default:
+	// a tracker with a self-signed or expired certificate stops announcing until the owner sets
+	// it, which is the price of not letting an on-path attacker forge announce replies or read
+	// a passkey from the announce URL. Read once at start: a change needs a restart.
+	TrackerTLSInsecure bool `json:"tracker_tls_insecure"`
+
 	// PlaybackWebhookWarnDays is the window of the "no play webhook" warning
 	// (internal/daemon/webhook_status.go): it is raised when a reader session closed unconfirmed in the
 	// last N days and no play webhook matched a file in that time. 0 turns the warning

@@ -3,6 +3,7 @@ package scrape
 import (
 	"context"
 	"crypto/rand"
+	"crypto/tls"
 	"encoding/binary"
 	"errors"
 	"fmt"
@@ -12,6 +13,8 @@ import (
 	"net/url"
 	"strings"
 	"time"
+
+	"flodni/internal/tlsverify"
 )
 
 // MaxUDPHashes is BEP 15's practical limit of hashes per scrape packet.
@@ -58,7 +61,7 @@ func capInterval(sec int64) time.Duration {
 	return time.Duration(sec) * time.Second
 }
 
-func newHTTPClient(timeout time.Duration, proxy *url.URL) *http.Client {
+func newHTTPClient(timeout time.Duration, proxy *url.URL, insecureTLS bool) *http.Client {
 	var pf func(*http.Request) (*url.URL, error)
 	if proxy != nil {
 		pf = func(*http.Request) (*url.URL, error) { return proxy, nil }
@@ -68,6 +71,8 @@ func newHTTPClient(timeout time.Duration, proxy *url.URL) *http.Client {
 		Transport: &http.Transport{
 			Proxy:             pf,
 			DisableKeepAlives: true,
+			// tracker_tls_insecure; the default verifies
+			TLSClientConfig: &tls.Config{InsecureSkipVerify: insecureTLS},
 		},
 		CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
 	}
@@ -101,6 +106,9 @@ func HTTPScrape(ctx context.Context, c *http.Client, scrapeURL string, hashes []
 	req.Header.Set("User-Agent", userAgent)
 	resp, err := c.Do(req)
 	if err != nil {
+		if u, perr := url.Parse(scrapeURL); perr == nil {
+			tlsverify.Report(tlsverify.HostPort(u), "scrape", err)
+		}
 		return nil, 0, classify(err)
 	}
 	defer func() { _ = resp.Body.Close() }()

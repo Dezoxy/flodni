@@ -36,6 +36,7 @@
   "redial_dropped_peer": false,
   "engine_refill_v2": false,
   "engine_cold_boost": false,
+  "tracker_tls_insecure": false,
   "playback_webhook_warn_days": 7,
   "playback_keepalive_minutes": 15,
   "playback_keepalive_max_torrents": 4,
