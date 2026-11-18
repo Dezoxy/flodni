@@ -524,6 +524,7 @@ func Run() {
 
 	globalCleanupManager = NewCleanupManager(logger, metaCache, nativeBridge)
 	globalCleanupManager.Start()
+	startPumpWatchdog(backgroundStopChan)
 
 	globalTorrentRemover = NewTorrentRemover(logger)
 

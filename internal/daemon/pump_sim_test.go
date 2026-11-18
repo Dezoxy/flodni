@@ -121,7 +121,10 @@ func (s *pumpSim) pumpGone() bool {
 	}
 	for _, sh := range s.handles {
 		// A creator clears hasSlot from the pump's last defer; an attached handle never does.
-		if !sh.h.isWatching && sh.h.hasSlot.Load() {
+		sh.h.mu.Lock()
+		watching := sh.h.isWatching
+		sh.h.mu.Unlock()
+		if !watching && sh.h.hasSlot.Load() {
 			return false
 		}
 	}
