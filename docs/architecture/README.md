@@ -30,6 +30,7 @@ to a media server.
 - [0003 Make the file lifecycle explicit in the library API](decisions/0003-file-lifecycle-api.md) (accepted)
 - [0004 Scope the API tokens and the panel sign-in](decisions/0004-scoped-authentication.md) (accepted)
 - [0005 FUSE timeouts, splice, readahead](decisions/0005-fuse-timeouts-splice-readahead.md) (accepted)
+- [0006 Calendar versioning (vYYYY.M.N)](decisions/0006-calendar-versioning.md) (accepted)
 
 New ADR: copy [templates/adr.md](templates/adr.md) to
 `decisions/NNNN-short-title.md`. Keep this index up to date; there is
