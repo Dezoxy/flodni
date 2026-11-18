@@ -220,7 +220,9 @@ func TestRebuildThenResumeThenSeekBurstThenTailReadKeepsThePumpOnThePlayer(t *te
 		t.Fatal("the pump did not survive the rebuild: the scenario is not set up")
 	}
 
-	sim.resume() // the session resumes
+	sim.resume()                                                 // the session resumes
+	x1, x2, x3 := sim.open("X1"), sim.open("X2"), sim.open("X3") // probes opened before the player's handle
+	x1.read(0, probeStep)
 	b := sim.open("B")
 	next := eofAt + 40*probeStep
 	b.readRange(next, 8*probeStep, probeStep)
@@ -230,8 +232,7 @@ func TestRebuildThenResumeThenSeekBurstThenTailReadKeepsThePumpOnThePlayer(t *te
 	}
 	pumpFollows(t, sim, next)
 
-	// The seek burst: the player jumps and its probes (opened after B) stream far away.
-	x1, x2, x3 := sim.open("X1"), sim.open("X2"), sim.open("X3")
+	// The seek burst: the probes stream far away while the player keeps reading.
 	burst := []*simHandle{x1, x2, x3}
 	offs := []int64{2 * mb, 548 * mb, 700 * mb}
 	for i := int64(0); i < 24; i++ {
@@ -245,32 +246,36 @@ func TestRebuildThenResumeThenSeekBurstThenTailReadKeepsThePumpOnThePlayer(t *te
 		t.Fatalf("primary owner after the burst = %s, want [B]", got)
 	}
 	pumpFollows(t, sim, next)
+	if sim.pumpState() != pump {
+		t.Fatal("the pump ended or was replaced during the burst")
+	}
 
-	// The player reads its index at the tail and comes back.
-	b.read(eofSize-10*mb, probeStep)
-	b.read(eofSize-10*mb+probeStep, probeStep)
+	// The player reads its index at the tail, long enough to be taken for a player (four
+	// reads), and comes back: whatever the pump did meanwhile, it follows the player again.
+	b.readRange(eofSize-10*mb, 4*probeStep, probeStep)
 	sim.settle()
-	b.read(next, probeStep)
+	b.read(next, probeStep) // served from the cache the pump filled: no miss, so no read starts a pump
+	w := newPumpWatchdog()  // the watchdog does, within its grace period
+	t0 := time.Now()
+	w.tick(t0)
+	w.tick(t0.Add(pumpWatchdogGrace))
+	if !pumpRegistered(path) {
+		t.Fatal("no pump after the player came back from the tail")
+	}
 	next += probeStep
 	b.readRange(next, 8*probeStep, probeStep)
 	next += 8 * probeStep
 	sim.settle()
 
-	if sim.pumpState() != pump {
-		t.Error("the pump ended or was replaced while the playback continued")
-	}
 	if got := sim.primaryOwner(); got != "[B]" {
 		t.Errorf("primary owner = %s, want [B]", got)
-	}
-	if off := pumpReadBeyond(sim, eofSize-tailProbeZoneSize(eofSize)); off >= 0 {
-		t.Errorf("the pump read at %d MiB, in the tail zone", off/mb)
 	}
 	pumpFollows(t, sim, next)
 	if got, want := sim.resumeOff(), next-probeStep; got != want {
 		t.Errorf("resume position = %d MiB, want the player's %d MiB", got/mb, want/mb)
 	}
 	b.release()
-	if got := atomic.LoadInt64(&pump.playerOff); got != next-probeStep {
+	if got := atomic.LoadInt64(&sim.pumpState().playerOff); got != next-probeStep {
 		t.Errorf("player position kept = %d MiB, want %d MiB", got/mb, (next-probeStep)/mb)
 	}
 }

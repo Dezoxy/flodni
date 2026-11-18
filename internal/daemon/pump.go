@@ -35,10 +35,17 @@ type NativePumpState struct {
 // the same handle would otherwise both attach, and Release could never bring refCount back
 // to zero, pinning the pump and its slot until the reader idle timeout.
 func (h *MkvHandle) attachToExistingPump(ps *NativePumpState) bool {
+	_, ok := h.attachRef(ps)
+	return ok
+}
+
+// attachRef is attachToExistingPump returning the pump's reference count after the attach. A
+// handle that has taken its slot already, or was released, attaches to nothing.
+func (h *MkvHandle) attachRef(ps *NativePumpState) (int32, bool) {
 	h.mu.Lock()
-	if h.hasSlot.Load() {
+	if h.hasSlot.Load() || h.released.Load() {
 		h.mu.Unlock()
-		return false
+		return 0, false
 	}
 	h.hasSlot.Store(true)
 	h.refDropped.Store(false)
@@ -47,9 +54,24 @@ func (h *MkvHandle) attachToExistingPump(ps *NativePumpState) bool {
 	h.nativeReader = ps.reader
 	h.pumpCancel = ps.cancel
 	h.mu.Unlock()
-	atomic.AddInt32(&ps.refCount, 1)
-	globalOpenTracker.Inc(h.hash, h.path)
-	return true
+	newRefs := atomic.AddInt32(&ps.refCount, 1)
+	h.countOpen()
+	return newRefs, true
+}
+
+// countOpen and uncountOpen pair the open tracker's count with this handle: one Inc while
+// the handle holds a pump reference, whatever the number of pumps it went through, and one
+// Dec when it gives the reference up (Release, the sweep, a pump that is gone).
+func (h *MkvHandle) countOpen() {
+	if h.openCounted.CompareAndSwap(false, true) {
+		globalOpenTracker.Inc(h.hash, h.path)
+	}
+}
+
+func (h *MkvHandle) uncountOpen() {
+	if h.openCounted.CompareAndSwap(true, false) {
+		globalOpenTracker.Dec(h.hash, h.path)
+	}
 }
 
 // terminateOrphanPump cancels and forgets any pump registered for path. The cleanup sweep
@@ -125,25 +147,17 @@ func (h *MkvHandle) startNativePump(finalHash string, fileIdx int) {
 
 	if val, ok := app.activePumps.Load(h.path); ok {
 		ps := val.(*NativePumpState)
-		newRefs := atomic.AddInt32(&ps.refCount, 1)
-		h.mu.Lock()
-		h.hasSlot.Store(true)
-		h.refDropped.Store(false)
-		h.pumpState = ps
-		h.isWatching = true
-		h.nativeReader = ps.reader
-		h.pumpCancel = ps.cancel
-		h.mu.Unlock()
-		globalOpenTracker.Inc(h.hash, h.path)
-		// Primary reconnect (refCount 0→1): inherit player position.
-		// Secondary handles (Plex probes at arbitrary offsets): no inheritance.
-		if newRefs == 1 && !h.shadowsActivePlayer() {
-			becomePrimary(h)
-			if curPos := atomic.LoadInt64(&ps.playerOff); curPos > 0 {
-				atomic.StoreInt64(&h.lastOff, curPos)
+		if newRefs, attached := h.attachRef(ps); attached {
+			// Primary reconnect (refCount 0→1): inherit player position.
+			// Secondary handles (Plex probes at arbitrary offsets): no inheritance.
+			if newRefs == 1 && !h.shadowsActivePlayer() {
+				becomePrimary(h)
+				if curPos := atomic.LoadInt64(&ps.playerOff); curPos > 0 {
+					atomic.StoreInt64(&h.lastOff, curPos)
+				}
 			}
+			logger.Info(fmt.Sprintf("[V264] Attached to existing pump (Refs: %d, primary=%v): %s", newRefs, h.isPrimaryHandle.Load(), filepath.Base(h.path)), "new_refs", newRefs, "file", filepath.Base(h.path))
 		}
-		logger.Info(fmt.Sprintf("[V264] Attached to existing pump (Refs: %d, primary=%v): %s", newRefs, h.isPrimaryHandle.Load(), filepath.Base(h.path)), "new_refs", newRefs, "file", filepath.Base(h.path))
 		pumpCreationMu.Unlock()
 		return
 	}
@@ -158,17 +172,7 @@ func (h *MkvHandle) startNativePump(finalHash string, fileIdx int) {
 		if val, ok := app.activePumps.Load(h.path); ok {
 			<-masterDataSemaphore
 			ps := val.(*NativePumpState)
-			newRefs := atomic.AddInt32(&ps.refCount, 1)
-			h.mu.Lock()
-			h.hasSlot.Store(true)
-			h.refDropped.Store(false)
-			h.pumpState = ps
-			h.isWatching = true
-			h.nativeReader = ps.reader
-			h.pumpCancel = ps.cancel
-			h.mu.Unlock()
-			globalOpenTracker.Inc(h.hash, h.path)
-			if newRefs == 1 && !h.shadowsActivePlayer() {
+			if newRefs, attached := h.attachRef(ps); attached && newRefs == 1 && !h.shadowsActivePlayer() {
 				becomePrimary(h)
 				if curPos := atomic.LoadInt64(&ps.playerOff); curPos > 0 {
 					atomic.StoreInt64(&h.lastOff, curPos)
@@ -177,9 +181,16 @@ func (h *MkvHandle) startNativePump(finalHash string, fileIdx int) {
 			pumpCreationMu.Unlock()
 			return
 		}
+		if h.released.Load() { // a Release came in: a pump on this handle would have no one to end it
+			<-masterDataSemaphore
+			pumpCreationMu.Unlock()
+			return
+		}
 
+		h.mu.Lock()
 		h.hasSlot.Store(true)
 		h.refDropped.Store(false)
+		h.mu.Unlock()
 		// The pump's creator is its primary, unless a player is watching through another handle
 		// (a probe that opens while no pump is registered must not take the primary this way).
 		if !h.shadowsActivePlayer() {
@@ -189,7 +200,9 @@ func (h *MkvHandle) startNativePump(finalHash string, fileIdx int) {
 		// inside the goroutine raced with Release setting it to nil, and the resulting early
 		// return (before the teardown defer) leaked the master slot.
 		pumpReader := nativeBridge.NewStreamReader(finalHash, fileIdx, h.size)
+		h.mu.Lock()
 		h.nativeReader = pumpReader
+		h.mu.Unlock()
 		if tr := torr.PeekTorrent(finalHash); tr != nil && tr.Torrent != nil {
 			if info := tr.Torrent.Info(); info != nil && info.PieceLength > 0 {
 				pl := int64(info.PieceLength)
@@ -200,7 +213,6 @@ func (h *MkvHandle) startNativePump(finalHash string, fileIdx int) {
 
 		// Register in activePumps BEFORE releasing lock, but BEFORE doing I/O
 		pumpCtx, pumpCancel := context.WithCancel(context.Background())
-		h.pumpCancel = pumpCancel
 		sharedState := &NativePumpState{
 			cancel:   pumpCancel,
 			reader:   pumpReader,
@@ -208,8 +220,11 @@ func (h *MkvHandle) startNativePump(finalHash string, fileIdx int) {
 			refCount: 1,
 		}
 		app.activePumps.Store(h.path, sharedState)
+		h.mu.Lock()
+		h.pumpCancel = pumpCancel
 		h.pumpState = sharedState
-		globalOpenTracker.Inc(h.hash, h.path)
+		h.mu.Unlock()
+		h.countOpen()
 		pumpCreationMu.Unlock() // SUCCESS: Shared state registered, global lock released
 
 		logger.Info(fmt.Sprintf("[V264] Native Pump Started (Slot Acquired): %s", filepath.Base(h.path)), "file", filepath.Base(h.path))
@@ -291,7 +306,9 @@ func (h *MkvHandle) startNativePump(finalHash string, fileIdx int) {
 			}
 		}
 
-		if resumeOffset > 0 {
+		// Only a handle with no position yet takes the pump's start as its own: a started pump
+		// (the watchdog starts one from its own goroutine) leaves a player's position alone.
+		if resumeOffset > 0 && atomic.LoadInt64(&h.lastOff) <= 0 {
 			atomic.StoreInt64(&h.lastOff, resumeOffset)
 		}
 
@@ -545,6 +562,9 @@ func (h *MkvHandle) nativePump(ctx context.Context, pumpReader streamReader, sta
 				sharedState.interruptPending.Store(false)
 				continue
 			}
+			if pumpEOFHook != nil {
+				pumpEOFHook()
+			}
 			// The primary is still far from the end (it went to the tail for its index and came
 			// back, say): the pump goes with it rather than end behind it.
 			if to, ok := eofReanchor(primaryFollowOffset(h.path), h.size, pumpLeadLimit(gc().ReadAheadBudget, chunkSize), chunkSize); ok {
@@ -564,6 +584,10 @@ func (h *MkvHandle) nativePump(ctx context.Context, pumpReader streamReader, sta
 		sharedState.pumpOff.Store(offset)
 	}
 }
+
+// pumpEOFHook is a test seam: it runs where a pump that read to the end of the file decides
+// between ending and re-anchoring, with the player free to have moved since the loop's last look.
+var pumpEOFHook func()
 
 // primaryFollowOffset is where the primary handles of path are playing: the offset the pump
 // follows (the largest of them, 0 when there is none).
@@ -588,6 +612,17 @@ func (h *MkvHandle) followOff() int64 {
 		return hold
 	}
 	return atomic.LoadInt64(&h.lastOff)
+}
+
+// playbackIsLive reports whether the file has a confirmed or inferred playback: a scan's
+// pump follows its reads wherever they go, as it always did.
+func (h *MkvHandle) playbackIsLive() bool {
+	if val, ok := app.playbackRegistry.Load(h.path); ok {
+		if ps, ok := val.(*PlaybackState); ok {
+			return ps.GetStatus() || ps.IsInferredPlayback()
+		}
+	}
+	return false
 }
 
 // noteTailHold keeps the pump with the player while the player's handle reads the file's
@@ -620,38 +655,64 @@ func (h *MkvHandle) noteTailHold(prevOff, off int64, readLen int) {
 		}
 		return
 	}
-	if prevOff > 0 && prevOff < tailStart && (off < prevOff || off-prevOff > int64(readLen)+cfg.SequentialTolerance) {
+	if prevOff > 0 && prevOff < tailStart && (off < prevOff || off-prevOff > int64(readLen)+cfg.SequentialTolerance) && h.playbackIsLive() {
 		h.tailRun.Store(0)
 		h.tailHold.Store(prevOff)
 	}
 }
 
+// chunkWithinLead is the pump's hard limit: the chunk at offset may be read while it starts
+// no more than lead past the player.
+func chunkWithinLead(offset, playerOff, lead int64) bool {
+	return offset-playerOff <= lead
+}
+
+// pumpAtEnd reports whether the player is where the pump may read the file's last chunk: the
+// end of the file is then where the pump belongs, and a pump that ended there ended for good.
+// It is the hard limit applied to the last chunk, so the pump, eofReanchor and the watchdog
+// share one boundary.
+func pumpAtEnd(playerOff, size, lead, chunkSize int64) bool {
+	if size <= 0 || chunkSize <= 0 {
+		return true
+	}
+	return chunkWithinLead(((size-1)/chunkSize)*chunkSize, playerOff, lead)
+}
+
 // eofReanchor decides what a pump that reached the end of the file does: when the player is
-// more than one lead away from the end the pump has left it behind, and restarts at the
-// player's chunk; within one lead the end of the file is where the pump belongs.
+// short of the end (not pumpAtEnd) the pump has left it behind and restarts at the player's
+// chunk; otherwise the end of the file is where the pump belongs.
 func eofReanchor(playerOff, size, lead, chunkSize int64) (int64, bool) {
-	if playerOff <= 0 || chunkSize <= 0 || playerOff >= size-lead {
+	if playerOff <= 0 || chunkSize <= 0 || pumpAtEnd(playerOff, size, lead, chunkSize) {
 		return 0, false
 	}
 	return (playerOff / chunkSize) * chunkSize, true
 }
 
-// dropOrphanedPumpRef frees the pump reference of a handle that attached to a pump which has
-// since ended (the end of the file, an idle timeout): such a handle kept hasSlot, so no read
-// path ever started another pump and the player ran on demand fetches until some other handle
-// opened. Only an attached handle (isWatching) owns no master slot; a creator returns its
-// own when its pump ends. The next steps of Read then attach or start a pump as for any handle.
+// dropOrphanedPumpRef frees the pump reference of a handle that attached to a pump which is
+// no longer the registered one (it ended, or another handle started its successor): such a
+// handle kept hasSlot and the dead pump's reader, so no read path ever started or joined a
+// pump and the player ran on demand fetches, its seeks interrupting a reader nobody pumps
+// with. Only an attached handle (isWatching) owns no master slot; a creator returns its own
+// when its pump ends. The next steps of Read then attach or start a pump as for any handle.
 func (h *MkvHandle) dropOrphanedPumpRef() {
-	if _, live := app.activePumps.Load(h.path); live {
+	registered := func() *NativePumpState {
+		val, ok := app.activePumps.Load(h.path)
+		if !ok {
+			return nil
+		}
+		ps, _ := val.(*NativePumpState)
+		return ps
+	}
+	h.mu.Lock()
+	own := h.pumpState
+	h.mu.Unlock()
+	if cur := registered(); cur != nil && cur == own {
 		return
 	}
 	pumpCreationMu.Lock() // a creator registers its pump under this lock, after taking hasSlot
 	defer pumpCreationMu.Unlock()
-	if _, live := app.activePumps.Load(h.path); live {
-		return
-	}
 	h.mu.Lock()
-	if !h.isWatching || !h.hasSlot.Load() {
+	if !h.isWatching || !h.hasSlot.Load() || (registered() != nil && registered() == h.pumpState) {
 		h.mu.Unlock()
 		return
 	}
@@ -660,11 +721,9 @@ func (h *MkvHandle) dropOrphanedPumpRef() {
 	h.pumpState = nil
 	h.nativeReader = nil
 	h.pumpCancel = nil
-	dec := h.refDropped.CompareAndSwap(false, true)
+	h.refDropped.Store(true)
 	h.mu.Unlock()
-	if dec {
-		globalOpenTracker.Dec(h.hash, h.path)
-	}
+	h.uncountOpen()
 	logger.Info(fmt.Sprintf("[V264] Pump gone: handle drops its stale pump reference: %s", filepath.Base(h.path)), "file", filepath.Base(h.path))
 }
 
@@ -705,7 +764,7 @@ func (h *MkvHandle) nativePumpChunk(r streamReader, offset, chunkSize, playerOff
 	leadLimit := pumpLeadLimit(budget, chunkSize)
 	diff := offset - playerOff
 
-	if diff > leadLimit {
+	if !chunkWithinLead(offset, playerOff, leadLimit) {
 		// Hard limit reached: Wait for player to advance.
 		time.Sleep(100 * time.Millisecond)
 		return false, offset
@@ -1072,7 +1131,6 @@ func becomePrimary(h *MkvHandle) bool {
 	if !h.isPrimaryHandle.CompareAndSwap(false, true) {
 		return false
 	}
-	h.wasPrimary.Store(true)
 	app.activeHandles.Range(func(key, _ interface{}) bool {
 		other, ok := key.(*MkvHandle)
 		if ok && other != h && other.path == h.path && other.isPrimaryHandle.CompareAndSwap(true, false) {

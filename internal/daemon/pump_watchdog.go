@@ -28,7 +28,7 @@ const (
 var pumpWatchdogRestarts atomic.Int64
 
 // playingWithoutPump lists, per file path, the handle that would start the pump of every
-// confirmed playback that has a live handle and no registered pump. A confirmed playback
+// confirmed playback that has a live primary handle and no registered pump, short of the end. A confirmed playback
 // without a handle (restored at start, or between a stop and a reopen) is not playing.
 func playingWithoutPump() map[string]*MkvHandle {
 	out := map[string]*MkvHandle{}
@@ -41,18 +41,21 @@ func playingWithoutPump() map[string]*MkvHandle {
 		if _, live := app.activePumps.Load(path); live {
 			return true
 		}
-		var best *MkvHandle
+		var best *MkvHandle // the primary: a probe is never made the player's handle
 		app.activeHandles.Range(func(key, _ interface{}) bool {
 			h, ok := key.(*MkvHandle)
-			if !ok || h.path != path || h.released.Load() {
+			if !ok || h.path != path || h.released.Load() || !h.isPrimaryHandle.Load() {
 				return true
 			}
-			if best == nil || (h.isPrimaryHandle.Load() && !best.isPrimaryHandle.Load()) ||
-				(h.isPrimaryHandle.Load() == best.isPrimaryHandle.Load() && h.lastRead.Load() > best.lastRead.Load()) {
+			if best == nil || h.lastRead.Load() > best.lastRead.Load() {
 				best = h
 			}
 			return true
 		})
+		// A player in the last lead has its pump ended for good (pumpAtEnd): nothing is missing.
+		if best != nil && pumpAtEnd(best.followOff(), best.size, pumpLeadLimit(gc().ReadAheadBudget, raCache.ChunkSize(path)), raCache.ChunkSize(path)) {
+			best = nil
+		}
 		if best != nil {
 			out[path] = best
 		}
@@ -88,7 +91,7 @@ func (w *pumpWatchdog) tick(now time.Time) {
 		}
 		w.since[path] = now // a refused slot is tried again after another grace period
 		logger.Warn(fmt.Sprintf("[Pump] watchdog: no pump for %s during playback for %ds; restarting", filepath.Base(path), int(now.Sub(first).Seconds())), "file", filepath.Base(path))
-		if h.hash == "" {
+		if h.hash == "" || h.released.Load() {
 			continue
 		}
 		h.dropOrphanedPumpRef()
@@ -102,7 +105,7 @@ func (w *pumpWatchdog) tick(now time.Time) {
 // startPumpWatchdog runs the watchdog every pumpWatchdogInterval until stop closes.
 func startPumpWatchdog(stop <-chan struct{}) {
 	w := newPumpWatchdog()
-	go func() {
+	safeGo(func() {
 		t := time.NewTicker(pumpWatchdogInterval)
 		defer t.Stop()
 		for {
@@ -113,12 +116,12 @@ func startPumpWatchdog(stop <-chan struct{}) {
 				return
 			}
 		}
-	}()
+	})
 }
 
 func collectPumpWatchdogProm(w *promtext.Writer) {
 	w.Gauge("flodni_playing_sessions_without_pump",
-		"Confirmed playbacks with an open handle and no read-ahead pump right now. Alert when it stays above 0 for a few minutes: the watchdog restarts a missing pump after 10 s, so a lasting value means it cannot.",
+		"Confirmed playbacks with an open primary handle and no read-ahead pump right now, the player not in the last lead of the file (a pump that ended there ended for good). Alert when it stays above 0 for a few minutes: the watchdog restarts a missing pump after 10 s, so a lasting value means it cannot.",
 		promSample(int64(len(playingWithoutPump()))))
 	w.Counter("flodni_pump_watchdog_restarts_total",
 		"Pumps the watchdog started for a confirmed playback that had none for 10 s.",
