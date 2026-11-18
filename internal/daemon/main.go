@@ -319,6 +319,7 @@ func Run() {
 	// closes. Set before the engine and its ticker start. The hook only counts; it
 	// changes nothing about when a torrent closes.
 	torr.OnIdleClose = countIdleClose
+	torr.ConfirmedPlayback = hashConfirmed
 	// The engine refuses a restart under playback; only the daemon knows what plays.
 	torr.SetPlaybackProbe(confirmedPlayingSessions)
 	// Keep-alive (phase b): the engine asks before it closes an idle torrent. The
@@ -422,6 +423,7 @@ func Run() {
 	warmWake = nativeClient.WakeStored
 
 	go tuner.Start(context.Background())
+	go runStarvedReannounce(context.Background())
 
 	// Metadata LRU cache: capacity from config, 24h TTL.
 	metaCache = cache.NewLRUCache(gc().MetadataCacheSize, 24*time.Hour)
@@ -524,6 +526,7 @@ func Run() {
 
 	globalCleanupManager = NewCleanupManager(logger, metaCache, nativeBridge)
 	globalCleanupManager.Start()
+	startPumpWatchdog(backgroundStopChan)
 
 	globalTorrentRemover = NewTorrentRemover(logger)
 

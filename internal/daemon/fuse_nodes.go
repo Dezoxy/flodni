@@ -465,8 +465,11 @@ func forceCloseVirtualFile(fullPath string) {
 	app.activeHandles.Range(func(key, value interface{}) bool {
 		h := key.(*MkvHandle)
 		if h.path == fullPath {
-			if h.nativeReader != nil {
-				_ = h.nativeReader.Close() // force-closing a read handle; nothing to recover
+			h.mu.Lock()
+			reader := h.nativeReader
+			h.mu.Unlock()
+			if reader != nil {
+				_ = reader.Close() // force-closing a read handle; nothing to recover
 			}
 			app.activeHandles.Delete(h)
 			logger.Info(fmt.Sprintf("UNLINK: force-closed handle for %s", filepath.Base(fullPath)), "file", filepath.Base(fullPath))
