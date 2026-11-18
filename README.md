@@ -310,6 +310,11 @@ mode) and only the control port reads the cookie, never the engine's.
   same-origin`. `Strict-Transport-Security: max-age=31536000` is added only when the
   request is known to be https: it came over TLS, the first `X-Forwarded-Proto` is
   `https`, or `auth_panel_https` is true. The engine port is unchanged.
+- File bytes the engine streams (`/stream`, `/play`) come from the swarm, so a browser
+  never renders them. Only video and audio keep their real type. Everything else,
+  images and SVG included, is `application/octet-stream` with
+  `Content-Disposition: attachment`, and every streamed response carries
+  `X-Content-Type-Options: nosniff` and `Content-Security-Policy: sandbox`.
 
 #### Upgrading from v0.2.x to v0.3.0
 
