@@ -140,6 +140,7 @@ func TestHandlePrometheus(t *testing.T) {
 		"flodni_engine_hedge_triggers_total", "flodni_engine_peer_ejects_total", "flodni_engine_peer_churn_drops_total",
 		"flodni_engine_gradient2_backoff_samples_total", "flodni_readahead_evictions_total", "flodni_warmup_head_fill_duration_seconds",
 		"flodni_readahead_refetched_bytes_total", "flodni_readahead_stranded_partial_bytes",
+		"flodni_playing_pumps", "flodni_pump_lead_limit_bytes",
 		"go_goroutines", "go_memstats_heap_inuse_bytes", "go_memstats_sys_bytes", "go_gc_cycles_total",
 	} {
 		if !strings.Contains(body, "# TYPE "+fam+" ") {
@@ -212,6 +213,8 @@ func TestHandlePrometheus(t *testing.T) {
 		`flodni_readahead_evictions_total`,
 		`flodni_readahead_refetched_bytes_total`,
 		`flodni_readahead_stranded_partial_bytes`,
+		`flodni_playing_pumps`,
+		`flodni_pump_lead_limit_bytes`,
 		`flodni_warmup_head_fill_duration_seconds_sum`,
 		`flodni_warmup_head_fill_duration_seconds_count`,
 		`flodni_warmup_head_fill_duration_seconds_bucket{le="120"}`,
