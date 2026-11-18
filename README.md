@@ -50,6 +50,22 @@ docker build -f docker/Dockerfile -t flodni:dev .
 `FLODNI_TEST_SESSION_IDLE_CLOSE` and `FLODNI_TEST_SESSION_TICK` exist for that
 test only; they are not configuration.
 
+## Releases
+
+A release is a git tag `vYYYY.M.N`: the year, the month with no leading zero,
+and the count of releases in that month from 0 (`v2026.11.0`, `v2026.11.1`,
+`v2026.12.0`). A tag publishes the image `ghcr.io/dezoxy/flodni` with the same
+tag. Tags are never moved or deleted.
+
+The number says when a build was made, not whether an upgrade breaks. Every
+release's notes carry a `Breaking:` line (`Breaking: none` when nothing
+does), and this README gains an upgrade section when an upgrade needs steps. Do
+not automerge Flodni updates on the strength of a patch or minor bump.
+
+Versions up to `v0.3.12` were semver; `v2026.11.0` is the first calendar
+version and sorts above them. The reasons are in
+[ADR 0006](docs/architecture/decisions/0006-calendar-versioning.md).
+
 ## Running
 
 The image mounts the FUSE view at `/mnt/flodni-virtual`, reads library
