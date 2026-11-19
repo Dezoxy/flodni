@@ -14,5 +14,19 @@ container flodni "Containers" "What runs, and which stores does it own?" {
 
 component flodni.daemon "Daemon" "What are the parts of the single process, and how does a read reach the swarm?" {
     include *
+    exclude flodni.daemon.authGate
+    exclude flodni.tokenFile
+    exclude idProxy
+    autoLayout tb 300 150
+}
+
+component flodni.daemon "Authentication" "Who may call the control API and the engine, and where is that checked?" {
+    include flodni.daemon.control
+    include flodni.daemon.engine
+    include flodni.daemon.authGate
+    include flodni.tokenFile
+    include operator
+    include automation
+    include idProxy
     autoLayout tb 300 150
 }
