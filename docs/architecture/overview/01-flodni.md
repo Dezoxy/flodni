@@ -38,10 +38,28 @@ besides the mount.
 
 ![Component view: the parts of the daemon](embed:Daemon)
 
+### Who may call it
+
+One auth gate wraps both HTTP servers, the control API and the engine's
+server on port 8090. Every request is checked against one route-to-scope
+table, and a route with no registered scope is refused. Callers hold named
+tokens, kept as hashes in a token file that is read at start. A token carries
+only the scopes its caller needs, and `admin` implies all of them. The panel
+signs in with a login cookie, which is CSRF-checked on writes, or, optionally,
+through an identity-aware proxy that signs a JWT assertion for each panel
+user. The static panel page and the health and liveness probes are open, and
+only the two webhook routes accept `?token=`. With no token configured the
+gate is open and applies only the open-port refusals, which is meant for a
+trusted network; a single legacy `api_token` still works as one token with
+every scope. The details are in
+[ADR 0004](../decisions/0004-scoped-authentication.md).
+
+![Component view: the auth gate, the token file and who calls the control API](embed:Authentication)
+
 ### Status
 
-Implemented, inherited from Tiramisu and running. The control API and the
-engine's server on port 8090 take an opt-in bearer token (`api_token`); with
-none set they are open and meant to be reachable only from the host and a
-trusted network. Planned changes are in the repository's `docs/roadmap.md`;
+Implemented, inherited from Tiramisu and running. Authentication is opt-in
+and scoped (see "Who may call it"); with no token configured the control API
+and the engine's server are open and meant to be reachable only from the host
+and a trusted network. Planned changes are in the repository's `docs/roadmap.md`;
 ideas not yet planned are in `docs/ideas.md`.

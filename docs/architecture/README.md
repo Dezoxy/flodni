@@ -22,6 +22,7 @@ to a media server.
 | SystemContext | What does Flodni depend on, and who depends on it? |
 | Containers | What runs, and which stores does it own? |
 | Daemon | What are the parts of the single process? |
+| Authentication | Who may call the control API and the engine, and where is that checked? |
 
 ## Key decisions
 

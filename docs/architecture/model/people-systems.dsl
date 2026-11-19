@@ -9,3 +9,4 @@ automation = softwareSystem "Library Automation" "Scripts and services that deci
 swarm = softwareSystem "BitTorrent Swarm" "Peers and trackers that hold the pieces of each torrent." "External"
 
 viewer -> mediaServer "Watches titles on" "HTTPS"
+idProxy = softwareSystem "Identity-Aware Proxy" "Optional. Signs in a panel user and forwards each panel request with a signed JWT assertion that the auth gate verifies against its keys and an allowed e-mail list." "External"
