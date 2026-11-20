@@ -20,7 +20,10 @@ type Reader struct {
 	// rangeEnd is the exclusive end of the bounded HTTP range this reader serves, 0 when
 	// open-ended (the pump). Read-ahead never reaches past it (Dezoxy fork).
 	rangeEnd int64
-	file     *torrent.File
+	// bounded is set by SetBounded for a reader serving a bounded HTTP range, whether or not
+	// BoundedReadahead clamps it. Only the metrics read it (metrics.go).
+	bounded atomic.Bool
+	file    *torrent.File
 
 	cache    *Cache
 	isClosed bool
@@ -67,6 +70,7 @@ func (r *Reader) attach(cache *Cache) {
 	cache.muReaders.Lock()
 	if cache.readers != nil {
 		cache.readers[r] = struct{}{}
+		cache.nOpenEnded.Add(1)
 	}
 	cache.muReaders.Unlock()
 }
@@ -183,6 +187,24 @@ func (r *Reader) SetReadahead(length int64) {
 // BoundedReadahead stops a bounded range's read-ahead at the range end. Set at startup
 // with pump_on_open off (Dezoxy fork); upstream reads ahead the full window.
 var BoundedReadahead bool
+
+// SetBounded marks the reader as serving a bounded range, for the eviction and refetch
+// metrics. It changes nothing else, and does it once: a reader starts open-ended. Call it right
+// after the reader is created, before it is closed.
+func (r *Reader) SetBounded() {
+	c := r.cache
+	// Under the write lock, like CloseReader, so a close cannot fall between the flag and the
+	// counters and leave them off by one.
+	c.muReaders.Lock()
+	defer c.muReaders.Unlock()
+	if !r.bounded.CompareAndSwap(false, true) {
+		return
+	}
+	if _, registered := c.readers[r]; registered {
+		c.nOpenEnded.Add(-1)
+		c.nBounded.Add(1)
+	}
+}
 
 // SetRangeEnd bounds the reader to a request ending at end (exclusive, file offset): a
 // scanner's 64 KB probe then fetches only the pieces it touches, not the read-ahead the

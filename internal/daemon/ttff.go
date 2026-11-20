@@ -36,9 +36,11 @@ func (s ttffSource) String() string {
 }
 
 // Fixed logarithmic bucket upper bounds, milliseconds. Bucket i covers
-// (buckets[i-1], buckets[i]]; the final implicit bucket is (10000,∞). A sample is placed by
-// its duration in microseconds, so 1.5 ms is in the 5 ms bucket, not the 1 ms one.
-var ttffBucketsMS = [...]int64{1, 5, 10, 25, 50, 100, 250, 500, 1000, 3000, 10000}
+// (buckets[i-1], buckets[i]]; the final implicit bucket is (120000,∞). A sample is placed by
+// its duration in microseconds, so 1.5 ms is in the 5 ms bucket, not the 1 ms one. Every
+// histogram on these bounds has the three above 10 s: the first deep read of a cold title
+// takes longer than the old last bound.
+var ttffBucketsMS = [...]int64{1, 5, 10, 25, 50, 100, 250, 500, 1000, 3000, 10000, 30000, 60000, 120000}
 
 // TTFFHistogram is a fixed-bucket latency histogram with zero allocations.
 // Percentiles are computed on demand by a cumulative scan (O(len(buckets))).
@@ -230,6 +232,12 @@ type TTFFSession struct {
 
 	closeOnce sync.Once
 	closed    atomic.Bool
+
+	// blockedNS is the sum of the durations of the session's served reads from open up to and
+	// including the first deep read (reads after it add nothing); deepConfirmed is the
+	// confirmed label (hashConfirmed, as for the stalls) at that read.
+	blockedNS     atomic.Int64
+	deepConfirmed atomic.Bool
 }
 
 // readBegin and readEnd bracket a read, so one that hangs shows (a stall is counted only when
@@ -284,6 +292,9 @@ func (s *TTFFSession) recordRead(src ttffSource, d time.Duration, n int, off int
 	nowN := ttffNow().UnixNano()
 	s.lastReadAt.Store(nowN)
 	s.reads.Add(1)
+	if s.firstDeepReadAt.Load() == 0 {
+		s.blockedNS.Add(max(d.Nanoseconds(), 0))
+	}
 	jumped := false
 	if n > 0 {
 		s.firstDataAt.CompareAndSwap(0, nowN)
@@ -310,7 +321,9 @@ func (s *TTFFSession) recordRead(src ttffSource, d time.Duration, n int, off int
 		}
 		if off >= ttffDeepReadOff || (s.size > 0 && off >= warmup.TailStart(s.size)) {
 			s.tailOrDeep.Store(true)
-			s.firstDeepReadAt.CompareAndSwap(0, nowN)
+			if s.firstDeepReadAt.CompareAndSwap(0, nowN) {
+				s.deepConfirmed.Store(hashConfirmed(s.hash))
+			}
 		}
 		if prev := s.lastOff.Load(); prev > 0 {
 			if b := gc(); b != nil && shouldInterruptForSeek(prev, off, b.ReadAheadBudget) {
@@ -455,6 +468,9 @@ func (s *TTFFSession) closeSession() {
 		}
 		if dr := s.firstDeepReadAt.Load(); dr > 0 {
 			ttffStats.openToDeepRead.Add(time.Duration(dr - opened))
+			i := confirmedIdx(s.deepConfirmed.Load())
+			ttffStats.openToDeepReadBy[i].Add(time.Duration(dr - opened))
+			ttffStats.deepReadBlocked[i].Add(time.Duration(s.blockedNS.Load()))
 		}
 		if sc := s.stallCount.Load(); sc > 0 {
 			ttffStats.stallCount.Add(sc)
@@ -509,6 +525,11 @@ type ttffAgg struct {
 	// (indexed by ttffSource). Unlike the per-session byte fields it also counts reads
 	// after a session closed and reads with no session, so it can exceed their sum.
 	readBytes [srcFetchBlock + 1]atomic.Int64
+
+	// openToDeepRead by confirmed (index 1 is confirmed), and the time the session's reads kept
+	// the player waiting up to that read (TTFFSession.blockedNS).
+	openToDeepReadBy [2]TTFFHistogram
+	deepReadBlocked  [2]TTFFHistogram
 }
 
 var ttffStats ttffAgg
@@ -596,7 +617,7 @@ func ttffRead(path string, src ttffSource, d time.Duration, n int, off int64) {
 		cause = s.recordRead(src, d, n, off)
 	}
 	if d > ttffStallDuration {
-		countStall(path, cause)
+		countStall(path, cause, off, n, d)
 	}
 }
 

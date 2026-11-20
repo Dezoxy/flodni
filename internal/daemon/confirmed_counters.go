@@ -13,8 +13,10 @@ import (
 var keepaliveCounters struct {
 	idleCloses [2]atomic.Int64
 	reopens    [2]atomic.Int64
-	// stalls is [confirmed][cause]: cause is stallCausePlayback or stallCauseSeek.
-	stalls [2][2]atomic.Int64
+	// stalls is [confirmed][cause][origin]: cause is stallCausePlayback or stallCauseSeek,
+	// origin one of the stallOrigin constants. Summed over origin it is the count the pair
+	// had before the origin label.
+	stalls [2][2][numStallOrigins]atomic.Int64
 	// Keep-alive hold (phase b), in keepalive.go: releases by reason (0 stop, 1
 	// ceiling) and torrents that lost to the cap.
 	releases [2]atomic.Int64
@@ -30,6 +32,29 @@ const (
 )
 
 var stallCauseNames = [2]string{stallCausePlayback: "playback", stallCauseSeek: "seek"}
+
+// Origins of a read stall: what the engine was doing when a served read took over a second.
+// Checked in this order, so a stall has exactly one.
+const (
+	// stallOriginEvicted: a piece of the read's span completed again while the read ran, so it
+	// had been evicted from the in-memory cache and the swarm delivered it twice.
+	stallOriginEvicted = iota
+	// stallOriginPumpBehind: a pump exists for the session and its fill offset is at or below
+	// the read offset, so the read overtook what the pump had fetched.
+	stallOriginPumpBehind
+	// stallOriginNoPump: no pump exists for the session.
+	stallOriginNoPump
+	// stallOriginSwarm: everything else, a pump ahead of the read and a swarm that was slow.
+	stallOriginSwarm
+	numStallOrigins
+)
+
+var stallOriginNames = [numStallOrigins]string{
+	stallOriginEvicted:    "evicted",
+	stallOriginPumpBehind: "pump_behind",
+	stallOriginNoPump:     "no_pump",
+	stallOriginSwarm:      "swarm",
+}
 
 func confirmedIdx(confirmed bool) int {
 	if confirmed {
@@ -120,11 +145,13 @@ func countReopen(path, hash string) {
 }
 
 // countStall counts a served read over the stall threshold, labelled by the torrent
-// of the path: the session's hash, else the registry state's, and by cause.
-func countStall(path string, cause int) {
-	hash := ""
+// of the path: the session's hash, else the registry state's, by cause and by origin. off and
+// n are the read's offset and returned bytes, d how long it took.
+func countStall(path string, cause int, off int64, n int, d time.Duration) {
+	hash, fileIdx := "", 0
 	if v, ok := sessions.Load(path); ok {
-		hash = v.(*TTFFSession).hash
+		s := v.(*TTFFSession)
+		hash, fileIdx = s.hash, s.fileIndex
 	}
 	if hash == "" {
 		if v, ok := app.playbackRegistry.Load(path); ok {
@@ -133,5 +160,6 @@ func countStall(path string, cause int) {
 			}
 		}
 	}
-	keepaliveCounters.stalls[confirmedIdx(hashConfirmed(hash))][cause].Add(1)
+	origin := stallOriginOf(path, hash, fileIdx, off, n, d)
+	keepaliveCounters.stalls[confirmedIdx(hashConfirmed(hash))][cause][origin].Add(1)
 }

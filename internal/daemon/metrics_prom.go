@@ -79,8 +79,13 @@ func collectProm(w *promtext.Writer) {
 		"Open to the first byte served, per session classed as real playback..",
 		promHistogram(&ttffStats.openToHeader))
 	w.Histogram("flodni_session_first_deep_read_seconds",
-		"Open to the first read at 8 MiB or later or in the tail, per session classed as real playback..",
-		promHistogram(&ttffStats.openToDeepRead))
+		"Open to the first read at 8 MiB or later or in the tail, per session classed as real playback. confirmed is whether a file of the torrent had a webhook-confirmed playback when that read happened (as in flodni_torrent_idle_closes_total). Sums over confirmed to what it was before the label.",
+		promHistogram(&ttffStats.openToDeepReadBy[1], lbl("confirmed", "true")),
+		promHistogram(&ttffStats.openToDeepReadBy[0], lbl("confirmed", "false")))
+	w.Histogram("flodni_session_first_deep_read_blocked_seconds",
+		"The sum of the durations of a session's served reads from open up to and including its first deep read (8 MiB or later, or in the tail), per session classed as real playback: how long the reads kept the player waiting before it got there, where flodni_session_first_deep_read_seconds is the wall time. Reads that overlap each add their own time. confirmed as in flodni_session_first_deep_read_seconds.",
+		promHistogram(&ttffStats.deepReadBlocked[1], lbl("confirmed", "true")),
+		promHistogram(&ttffStats.deepReadBlocked[0], lbl("confirmed", "false")))
 	w.Histogram("flodni_seek_read_duration_seconds",
 		"Duration of the read that followed a seek..",
 		promHistogram(&ttffStats.seekLatency))
@@ -297,15 +302,17 @@ func collectPlaybackProm(w *promtext.Writer) {
 	w.Counter("flodni_wake_refused_total",
 		"Wakes the engine refused because it keeps no record of the torrent: one per handle at a read, one per open. Not a failed read and not a dead swarm; 0 from start.",
 		promSample(wakeRefusedCount.Load()))
-	stalls := make([]promtext.Sample, 0, 4)
+	stalls := make([]promtext.Sample, 0, 2*len(stallCauseNames)*numStallOrigins)
 	for _, conf := range []string{"true", "false"} {
 		for cause, name := range stallCauseNames {
-			stalls = append(stalls, promSample(keepaliveCounters.stalls[confirmedIdx(conf == "true")][cause].Load(),
-				lbl("confirmed", conf), lbl("cause", name)))
+			for origin, oname := range stallOriginNames {
+				stalls = append(stalls, promSample(keepaliveCounters.stalls[confirmedIdx(conf == "true")][cause][origin].Load(),
+					lbl("confirmed", conf), lbl("cause", name), lbl("origin", oname)))
+			}
 		}
 	}
 	w.Counter("flodni_read_stalls_total",
-		"Served reads that took longer than one second. Failed reads are not counted. confirmed as in flodni_torrent_idle_closes_total. cause is seek when the stall began after a non-sequential jump of the session's read position (the same jump the session seek count uses) and before the first read the read-ahead cache served after it, no more than 15 s after the jump; playback for every other stall. Present from 0 for all four label pairs.",
+		"Served reads that took longer than one second. Failed reads are not counted. confirmed as in flodni_torrent_idle_closes_total. cause is seek when the stall began after a non-sequential jump of the session's read position (the same jump the session seek count uses) and before the first read the read-ahead cache served after it, no more than 15 s after the jump; playback for every other stall. origin is what the engine was doing, checked in this order: evicted when a piece of the read's span completed again while the read ran (it had been evicted from the in-memory piece cache and came twice), pump_behind when a pump exists for the session and its fill offset is at or below the read offset, no_pump when the session has no pump, swarm for everything else (a pump ahead of the read, a slow swarm). A read of a file the session has no file index for is never evicted. Present from 0 for every confirmed, cause and origin combination; summed over origin it is the count the pair had before origin.",
 		stalls...)
 	w.Counter("flodni_reannounce_total",
 		"Tracker re-announces actually sent for a torrent with a confirmed playback whose swarm starved (fewer than 3 connected peers for 60 s with a read stall, a hung read or a short, shrinking buffer), by reason (starved) and private (true for a private torrent, sent only when its tracker's min interval allowed it). Present from 0.",
@@ -454,6 +461,32 @@ func collectEngineReadsProm(w *promtext.Writer) {
 	w.Counter("flodni_readahead_refetched_bytes_total",
 		"Bytes the engine fetched again for a piece that had completed and been evicted from the in-memory piece cache. Baseline for deciding whether eviction is costing downloads; nothing acts on it.",
 		promSample(torrstor.RefetchedBytes()))
+	refetched := torrstor.RefetchedBytesByReader()
+	refetchSamples := make([]promtext.Sample, 0, len(refetched))
+	for i, n := range refetched {
+		refetchSamples = append(refetchSamples, promSample(n, lbl("reader", torrstor.RefetchReaderNames[i])))
+	}
+	w.Counter("flodni_engine_refetched_bytes_total",
+		"flodni_readahead_refetched_bytes_total split by the readers the torrent's cache had open when the bytes were written. The peer that writes a piece is not a reader, so this is not the reader that asked for it: open_ended when any open-ended reader (the pump's stream) was open on that cache at that moment, else bounded when any bounded-range reader was, else none. Present from 0; sums over reader to the unsplit total.",
+		refetchSamples...)
+	evicted := torrstor.EvictionCounts()
+	evictSamples := make([]promtext.Sample, 0, len(evicted)*len(evicted[0]))
+	for z, byReaders := range evicted {
+		for b, n := range byReaders {
+			evictSamples = append(evictSamples, promSample(n, lbl("zone", torrstor.EvictionZoneNames[z]), lbl("readers", torrstor.EvictionReaderBuckets[b])))
+		}
+	}
+	w.Counter("flodni_engine_cache_evictions_total",
+		"Completed pieces the in-memory piece cache evicted, by where the piece lay against the readers open on that cache at that moment and by how many were open (0, 1, 2+). zone is behind (the piece lies wholly before every open reader's current offset), ahead_unread (the piece lies at or after some open-ended reader's current offset; unread means at or after the reader's current offset, not that the reader never read it) or no_reader (no reader open, or the piece lies outside every reader in any other way, for example after a bounded-range reader only). The zone is measured from the reader offsets as the eviction scan saw them. Present from 0 for every combination.",
+		evictSamples...)
+	ends := torr.StreamEndCounts()
+	endSamples := make([]promtext.Sample, 0, len(ends))
+	for i, n := range ends {
+		endSamples = append(endSamples, promSample(n, lbl("reason", torr.StreamEndNames[i])))
+	}
+	w.Counter("flodni_engine_stream_ends_total",
+		"Open-ended engine streams (the pump's, a GET with no closed byte range) that ended, by reason: eof (served to the end of the file), timeout (the stream timeout ran out), read_error (the engine could not read) or cancel (the client went away or cancelled). Bounded-range fetches are not counted. Present from 0.",
+		endSamples...)
 	w.Gauge("flodni_readahead_stranded_partial_bytes",
 		"Bytes held by partially written pieces outside every reader's protected window, summed over open torrents. Such a piece is never evicted, so after a seek these stay until that piece is fetched to the end. Sampled at scrape under each cache's reader read lock only, never the engine's client lock.",
 		promSample(torrstor.StrandedPartialBytes()))
