@@ -64,6 +64,10 @@ type Cache struct {
 	muReaders sync.RWMutex
 
 	activeReaders atomic.Int32
+	// nOpenEnded and nBounded count the registered readers by kind: a reader is open-ended until
+	// SetBounded. Atomics, so the write path can read them without muReaders (metrics.go).
+	nOpenEnded atomic.Int32
+	nBounded   atomic.Int32
 
 	isRemove     atomic.Bool
 	isClosed     atomic.Bool
@@ -234,6 +238,29 @@ func (c *Cache) LastDelivery(first, last int) (unix int64, pieces int) {
 	return unix, pieces
 }
 
+// RefetchedSince reports whether a piece first..last inclusive completed again, after an
+// eviction, at or after since (Unix seconds). A stalled read asks it with the second it began
+// in: a piece the read waited on that had completed before and came a second time is a piece
+// the cache evicted. A first completion is not a refetch, and checking the pieces after the
+// read could not tell the two apart (every piece it waited on is complete by then). It reads
+// the pieces' atomics under the reader read lock, like LastDelivery, and reports false for a
+// nil or closed cache.
+func (c *Cache) RefetchedSince(first, last int, since int64) bool {
+	if c == nil {
+		return false
+	}
+	c.muReaders.RLock()
+	defer c.muReaders.RUnlock()
+	for i := first; i <= last; i++ {
+		if p := c.pieces[i]; p != nil {
+			if at := p.refetchedAt.Load(); at > 0 && at >= since {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 func (c *Cache) SetTorrent(torr *torrent.Torrent) {
 	if c == nil {
 		return
@@ -331,10 +358,13 @@ func (c *Cache) closeNoWait() error {
 	return nil
 }
 
-func (c *Cache) removePiece(piece *Piece) {
-	if !c.isClosed.Load() {
-		piece.Release()
+// removePiece releases a piece, reporting whether it did (a closed cache releases nothing).
+func (c *Cache) removePiece(piece *Piece) bool {
+	if c.isClosed.Load() {
+		return false
 	}
+	piece.Release()
+	return true
 }
 
 func (c *Cache) AdjustRA(readahead int64) {
@@ -492,7 +522,7 @@ func (c *Cache) evictOverCapacity(now time.Time) {
 		c.muRemove.Unlock()
 	}()
 
-	remPieces := c.getRemPieces()
+	remPieces, view := c.scanEvictable()
 	filled := atomic.LoadInt64(&c.filled)
 	if filled > c.capacity {
 		rems := (filled-c.capacity)/c.pieceLength + 1
@@ -513,7 +543,9 @@ func (c *Cache) evictOverCapacity(now time.Time) {
 				"filled(MB):", filled>>20, "capacity(MB):", c.capacity>>20)
 		}
 		for _, p := range remPieces {
-			c.removePiece(p)
+			if c.removePiece(p) {
+				countEviction(view, p.Id)
+			}
 			rems--
 			if rems <= 0 {
 				// V244-Fix: Removed FreeOSMemGC() - Stop-The-World latency killer!
@@ -526,14 +558,23 @@ func (c *Cache) evictOverCapacity(now time.Time) {
 }
 
 func (c *Cache) getRemPieces() []*Piece {
+	pieces, _ := c.scanEvictable()
+	return pieces
+}
+
+// scanEvictable is getRemPieces plus the view of the readers it saw, which classifies the
+// evictions that follow (evictView). The view comes from the loop over the readers that scan
+// already runs under the reader read lock; nothing new is locked.
+func (c *Cache) scanEvictable() ([]*Piece, evictView) {
 	piecesRemove := make([]*Piece, 0)
+	view := newEvictView()
 	fill := int64(0)
 
 	ranges := make([]Range, 0)
 	c.muReaders.RLock()
 	if c.isClosed.Load() || c.pieces == nil || c.readers == nil {
 		c.muReaders.RUnlock()
-		return nil
+		return nil, view
 	}
 	// Capture the map under the lock: the scan below runs unlocked, and Close nils the field
 	// while holding the write lock. The captured map stays valid on its own - a concurrent
@@ -544,6 +585,7 @@ func (c *Cache) getRemPieces() []*Piece {
 		if r.isUse {
 			ranges = append(ranges, r.getPiecesRange())
 		}
+		view.add(r.getReaderPiece(), !r.bounded.Load())
 	}
 	c.muReaders.RUnlock()
 	ranges = mergeRange(ranges)
@@ -574,7 +616,7 @@ func (c *Cache) getRemPieces() []*Piece {
 	})
 
 	atomic.StoreInt64(&c.filled, fill)
-	return piecesRemove
+	return piecesRemove, view
 }
 
 func (c *Cache) setLoadPriority(ranges []Range) {
@@ -796,6 +838,13 @@ func (c *Cache) CloseReader(r *Reader) {
 		return
 	}
 	r.Close()
+	if _, ok := c.readers[r]; ok {
+		if r.bounded.Load() {
+			c.nBounded.Add(-1)
+		} else {
+			c.nOpenEnded.Add(-1)
+		}
+	}
 	delete(c.readers, r)
 	c.muReaders.Unlock()
 	c.goBG(func() {

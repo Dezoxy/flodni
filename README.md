@@ -2769,7 +2769,8 @@ scraper on the same host or Docker network.
 | `flodni_build_info` | gauge | `version` | Always 1. |
 | `process_start_time_seconds` | gauge | none | Start of the process. |
 | `flodni_session_first_byte_seconds` | histogram | none | Open to the first byte served, per real playback. |
-| `flodni_session_first_deep_read_seconds` | histogram | none | Open to the first read at 8 MiB or later or in the tail, per real playback. |
+| `flodni_session_first_deep_read_seconds` | histogram | `confirmed` | Open to the first read at 8 MiB or later or in the tail, per real playback. `confirmed` is read when that read happens, as above. |
+| `flodni_session_first_deep_read_blocked_seconds` | histogram | `confirmed` | The sum of the durations of a session's served reads from open up to and including its first deep read: how long the reads kept the player waiting, where the series above is wall time. Overlapping reads each add their own time. |
 | `flodni_seek_read_duration_seconds` | histogram | none | Duration of the read that followed a seek. |
 | `flodni_read_duration_seconds` | histogram | `source` | Duration of each served read. Its `_count` is the number of reads each path answered. |
 | `flodni_read_bytes_total` | counter | `source` | Bytes handed to the kernel. |
@@ -2793,7 +2794,7 @@ scraper on the same host or Docker network.
 | `flodni_torrent_idle_closes_total` | counter | `confirmed` | Torrents the engine closed because no reader had them for the idle timeout. `confirmed` is `true` when a file of the torrent had a webhook-confirmed playback; the label is refreshed once a second. Both values present from 0. With the keep-alive on, a torrent it holds is not counted; see Keep-alive. |
 | `flodni_torrent_reopens_total` | counter | `confirmed` | Closed torrents a read on an open handle woke again; the wake at open is not counted. `confirmed` as above. |
 | `flodni_wake_refused_total` | counter | none | Wakes the engine refused because it keeps no record of the torrent: one per handle at a read, one per open. Not a failed read and not a dead swarm. 0 from start. See "A stub the engine does not store". |
-| `flodni_read_stalls_total` | counter | `confirmed`, `cause` | Served reads that took over one second; failed reads are not counted. `confirmed` as above. `cause` is `seek` or `playback`, all four pairs present from 0; see "Stall cause" below. Independent of sessions. |
+| `flodni_read_stalls_total` | counter | `confirmed`, `cause`, `origin` | Served reads that took over one second; failed reads are not counted. `confirmed` as above. `cause` is `seek` or `playback`; `origin` is `evicted`, `pump_behind`, `no_pump` or `swarm`. All sixteen combinations present from 0; see "Stall cause" and "Stall origin" below. Independent of sessions. |
 | `flodni_reannounce_total` | counter | `reason`, `private` | Tracker re-announces actually sent for a torrent with a confirmed playback whose swarm starved; `reason` is `starved`, `private` is `true` for a private torrent (counted only when its tracker's min interval allowed the announce) and `false` for a public one. Both series present from 0. See "Starved-torrent re-announce". |
 | `flodni_private_torrents_early_announce` | gauge | `state` | Loaded private torrents by whether any of their trackers allows an early (starved) re-announce: `eligible` when a tracker's last successful announce sent a min interval below its interval, `ineligible` when none did, `unknown` before a successful announce. Passive: read from regular announces, no extra tracker request. All three present from 0. See "Starved-torrent re-announce". |
 | `flodni_keepalive_releases_total` | counter | `reason` | Holds that ended: `stop` (a stop webhook, or the playback state dropped) or `ceiling` (`playback_keepalive_minutes` after the last activity). The torrent then closes at its next idle check. Both values present from 0. See Keep-alive. |
@@ -2846,6 +2847,9 @@ scraper on the same host or Docker network.
 | `flodni_engine_short_reads_total` | counter | `path` | Engine reads that ended short and were reported as success: `stream` (the sequential reader) or `fetch` (the stateless block fetch behind the FUSE fallback). 0 from start. |
 | `flodni_engine_short_read_repairs_total` | counter | `result` | Outcome of the stream reader's refill loop, per read that needed it: `repaired` after a reconnect, `unfilled` when a gap stayed. |
 | `flodni_readahead_refetched_bytes_total` | counter | none | Bytes the engine fetched again for a piece that had completed and been evicted from the in-memory piece cache (kept per torrent while it is open). Counted, not acted on: the baseline for judging eviction. 0 from start. |
+| `flodni_engine_refetched_bytes_total` | counter | `reader` | The refetched bytes above, split by the readers the torrent's cache had open when they were written: `open_ended` if any open-ended reader (the pump's stream) was open, else `bounded` if any bounded-range reader was, else `none`. The writing peer is not a reader, so this is the cache's state, not who asked. Sums over `reader` to the total above. |
+| `flodni_engine_cache_evictions_total` | counter | `zone`, `readers` | Completed pieces the in-memory cache evicted. `zone`: `behind` (wholly before every open reader's current offset), `ahead_unread` (at or after some open-ended reader's current offset; "unread" means at or after that offset, not never read) or `no_reader` (no reader open, or outside every reader otherwise). `readers` is how many were open on that cache: `0`, `1`, `2+`. All nine combinations present from 0. |
+| `flodni_engine_stream_ends_total` | counter | `reason` | Open-ended engine streams (the pump's) that ended: `eof`, `timeout` (the stream timeout ran out), `read_error` or `cancel` (client gone). Bounded-range fetches are not counted. |
 | `flodni_readahead_stranded_partial_bytes` | gauge | none | Bytes held by partially written pieces outside every reader's protected window, over open torrents. Eviction only takes complete pieces, so after a seek these bytes stay until the cache frees them, on its clean pass or its own 5 s timer (at most every 5 s), for a piece untouched for 20 s that the engine no longer wants and has nothing in flight for (it forgets the chunks first, so a later read downloads them again). Sampled at scrape under each cache's reader read lock; no engine lock. Alert on a value that stays high with no one playing. |
 | `flodni_engine_peer_redials_total` | counter | none | Peers the opt-in redial (`redial_dropped_peer`) added back to a private torrent after its only connected peer dropped. 0 with the switch off. See Engine stall gaps. |
 | `flodni_tracker_tls_verify_failures_total` | counter | `reason` | Announces and scrapes to an `https` tracker that failed certificate verification, by `reason`: `unknown_authority`, `hostname`, `expired` (also not yet valid) or `other`. No host label. All four present from 0. See Tracker TLS. |
@@ -2865,7 +2869,7 @@ scraper on the same host or Docker network.
 
 `source` is `warmup_head`, `warmup_tail`, `racache_hit` or `fetch_block`.
 Every label value is exported at 0 from the start. Durations are in seconds
-and the buckets are fixed (1 ms to 10 s). Series names and labels are meant
+and the buckets are fixed (1 ms to 120 s). Series names and labels are meant
 to be stable; buckets and help text are not.
 
 - Counters reset when Flodni restarts; use `rate()` or `increase()`.
@@ -2924,11 +2928,24 @@ the pump behave as before. For a stall alert, use
 `flodni_read_stalls_total{cause="playback"}`; the seek series show how often
 viewers seek.
 
+**Stall origin.** `origin` says what the engine was doing, checked in this
+order. `evicted`: a piece of the read's span completed again while the read
+ran, so the in-memory cache had evicted it and the swarm delivered it twice
+(a first completion is not counted; a session whose stub carries no file
+index is never `evicted`). `pump_behind`: a pump exists for the session and
+its fill offset is at or below the read offset. `no_pump`: the session has no
+pump. `swarm`: everything else. Summed over `origin`, a pair is what it was
+before the label. Accounting only.
+
 **Breaking:** the series gained a label, so each old series became two. A
 query, recording rule or alert that selects `{confirmed="true"}` now also sums
 both causes (so a seek-heavy viewer still trips it), and one that matches on
 the exact label set `{confirmed}` finds nothing. `sum by (confirmed)` is
 unaffected. Add `cause="playback"` to an alert that should ignore seeks.
+The `origin` label split each pair again, four ways, and
+`flodni_session_first_deep_read_seconds` gained `confirmed`: a query that
+aggregates (`sum`, `sum by (le)`) is unaffected, one that matches an exact
+label set is not.
 
 ## Viewing the model
 

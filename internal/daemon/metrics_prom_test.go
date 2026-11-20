@@ -79,13 +79,13 @@ func TestPromBucketBoundsUnchanged(t *testing.T) {
 	var h TTFFHistogram
 	w.Histogram("t_seconds", "t", promHistogram(&h))
 	out := string(w.Bytes())
-	for _, le := range []string{"0.001", "0.005", "0.01", "0.025", "0.05", "0.1", "0.25", "0.5", "1", "3", "10", "+Inf"} {
+	for _, le := range []string{"0.001", "0.005", "0.01", "0.025", "0.05", "0.1", "0.25", "0.5", "1", "3", "10", "30", "60", "120", "+Inf"} {
 		if !strings.Contains(out, `t_seconds_bucket{le="`+le+`"} 0`) {
 			t.Errorf("bucket le=%s missing:\n%s", le, out)
 		}
 	}
-	if n := strings.Count(out, "_bucket{"); n != 12 {
-		t.Errorf("%d buckets, want 12", n)
+	if n := strings.Count(out, "_bucket{"); n != 15 {
+		t.Errorf("%d buckets, want 15", n)
 	}
 	var wh promtext.Writer
 	wh.Histogram("h_seconds", "h", promtext.Histogram{Bounds: warmup.WarmupDurationBoundsSeconds, Counts: make([]int64, 8)})
@@ -163,9 +163,9 @@ func TestHandlePrometheus(t *testing.T) {
 		`flodni_torrent_idle_closes_total{confirmed="false"}`,
 		`flodni_torrent_reopens_total{confirmed="true"}`,
 		`flodni_torrent_reopens_total{confirmed="false"}`,
-		`flodni_read_stalls_total{confirmed="true",cause="seek"}`,
-		`flodni_read_stalls_total{confirmed="true",cause="playback"}`,
-		`flodni_read_stalls_total{confirmed="false",cause="seek"}`,
+		`flodni_read_stalls_total{confirmed="true",cause="seek",origin="evicted"}`,
+		`flodni_read_stalls_total{confirmed="true",cause="playback",origin="evicted"}`,
+		`flodni_read_stalls_total{confirmed="false",cause="seek",origin="evicted"}`,
 		`flodni_keepalive_releases_total{reason="stop"}`,
 		`flodni_keepalive_releases_total{reason="ceiling"}`,
 		`flodni_keepalive_evicted_total`,
@@ -182,7 +182,7 @@ func TestHandlePrometheus(t *testing.T) {
 		`flodni_engine_db_write_errors_total{op="rem"}`,
 		`flodni_engine_db_write_errors_total{op="clear"}`,
 		`flodni_keepalive_held_torrents`,
-		`flodni_read_stalls_total{confirmed="false",cause="playback"}`,
+		`flodni_read_stalls_total{confirmed="false",cause="playback",origin="evicted"}`,
 		`flodni_unconfirmed_read_bytes_total`,
 		`flodni_unconfirmed_read_sessions_total{outcome="unconfirmed"}`,
 		`flodni_unconfirmed_read_sessions_total{outcome="confirmed_late"}`,

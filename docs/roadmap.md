@@ -960,8 +960,8 @@ next tick, eviction takes the oldest `Accessed` first so unread read-ahead
 goes before pieces just read, and a pump reconnect or a per-read probe stream
 briefly leaves the window unprotected. Measurement comes before each change.
 
-1. **Say why a piece was evicted, a stream ended and a read stalled.** No
-   behaviour change. Add `flodni_engine_cache_evictions_total{zone,readers}`
+1. **Say why a piece was evicted, a stream ended and a read stalled.**
+   [FINISHED] No behaviour change. Add `flodni_engine_cache_evictions_total{zone,readers}`
    (zone `behind`, `ahead_unread` or `no_reader`; readers `0`, `1`, `2+`),
    `flodni_engine_stream_ends_total{reason}` (`eof`, `timeout`, `read_error`,
    `cancel`), split the refetched bytes by an open-ended or bounded reader, add
@@ -970,6 +970,8 @@ briefly leaves the window unprotected. Measurement comes before each change.
    give `flodni_session_first_deep_read_seconds` a `confirmed` label, buckets
    at 30, 60 and 120 s, and a sibling histogram of the time actually blocked
    in reads before the first deep read. Read-only atomics, no engine lock.
+   Built (#275): `evicted` means a piece in the read's span completed a second
+   time since the read began.
 2. **Keep a playing stream's unread read-ahead in the engine cache.** Count
    only open-ended readers in the protected-window divisor (a bounded reader
    protects its own range), evict by class before age (behind a reader or

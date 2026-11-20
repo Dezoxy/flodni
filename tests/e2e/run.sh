@@ -1645,8 +1645,10 @@ run_keepalive() {
   local cause
   for c in true false; do
     for cause in seek playback; do
-      [ "$(prom_value "$body" "flodni_read_stalls_total{confirmed=\"$c\",cause=\"$cause\"}")" = absent ] &&
-        missing="$missing flodni_read_stalls_total{$c,$cause}"
+      for origin in evicted pump_behind no_pump swarm; do
+        [ "$(prom_value "$body" "flodni_read_stalls_total{confirmed=\"$c\",cause=\"$cause\",origin=\"$origin\"}")" = absent ] &&
+          missing="$missing flodni_read_stalls_total{$c,$cause,$origin}"
+      done
     done
   done
   for s in 'flodni_keepalive_releases_total{reason="stop"}' 'flodni_keepalive_releases_total{reason="ceiling"}' flodni_keepalive_evicted_total flodni_keepalive_held_torrents; do

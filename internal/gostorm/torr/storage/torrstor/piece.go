@@ -74,6 +74,10 @@ type Piece struct {
 	// it is gone when the torrent closes. Feeds RefetchedBytes.
 	everComplete atomic.Bool `json:"-"`
 
+	// refetchedAt is the Unix time MarkComplete last ran for a piece that had completed before
+	// (Dezoxy fork), 0 if it never did: the moment an evicted piece came a second time.
+	refetchedAt atomic.Int64 `json:"-"`
+
 	mPiece *MemPiece `json:"-"`
 
 	cache *Cache `json:"-"`
@@ -106,8 +110,11 @@ func (p *Piece) MarkComplete() error {
 	// tracker announce, a minute away. Eviction runs before Complete is set so the piece that is
 	// completing is not a candidate: an incomplete piece is never evictable.
 	runRecovered("evictNow", p.cache.evictNow)
-	p.completedAt.Store(time.Now().Unix())
-	p.everComplete.Store(true)
+	now := time.Now().Unix()
+	p.completedAt.Store(now)
+	if p.everComplete.Swap(true) {
+		p.refetchedAt.Store(now)
+	}
 	p.Complete.Store(true)
 	p.cache.dropPriority(p.Id)
 	return nil
