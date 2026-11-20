@@ -265,7 +265,7 @@ func (t *Torrent) Stream(fileID int, req *http.Request, resp http.ResponseWriter
 	// asks for an open-ended one and keeps the full window (Dezoxy fork).
 	end, bounded := boundedRangeEnd(req.Header.Get("Range"), file.Length())
 	if bounded {
-		reader.SetBounded() // for the metrics, with the read-ahead clamp on or off
+		reader.SetBounded(end) // metrics and protection, with the read-ahead clamp on or off
 	}
 	if torrstor.BoundedReadahead && bounded {
 		reader.SetRangeEnd(end)

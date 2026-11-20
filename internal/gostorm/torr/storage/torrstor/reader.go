@@ -23,7 +23,11 @@ type Reader struct {
 	// bounded is set by SetBounded for a reader serving a bounded HTTP range, whether or not
 	// BoundedReadahead clamps it. Only the metrics read it (metrics.go).
 	bounded atomic.Bool
-	file    *torrent.File
+	// protectEnd is the exclusive file offset where a bounded reader's protected range stops
+	// (SetBounded), 0 when unknown. It protects only: SetRangeEnd, which clamps the engine
+	// read-ahead, stays tied to BoundedReadahead.
+	protectEnd atomic.Int64
+	file       *torrent.File
 
 	cache    *Cache
 	isClosed bool
@@ -56,7 +60,8 @@ func newReader(file *torrent.File, cache *Cache) *Reader {
 // SetReadahead: it returns early without them, and the anacrolix reader kept its default
 // 48 MiB read-ahead until the next stats tick (about 1 s), enough with a second reader to
 // overrun the cache. The initial value is what that tick would set: the cache read-ahead
-// split across the active readers.
+// split across the open-ended readers (this one included, it starts open-ended), so it is
+// computed after the reader is registered.
 func (r *Reader) attach(cache *Cache) {
 	// V231: Activate Aggressive mode immediately on reader creation
 	// to boost initial buffering before the Plex webhook triggers.
@@ -64,8 +69,7 @@ func (r *Reader) attach(cache *Cache) {
 
 	r.cache = cache
 	r.isUse = true
-	n := cache.activeReaders.Add(1)
-	r.SetReadahead(perReaderReadahead(cache.Readahead(), int(n)))
+	cache.activeReaders.Add(1)
 
 	cache.muReaders.Lock()
 	if cache.readers != nil {
@@ -73,6 +77,7 @@ func (r *Reader) attach(cache *Cache) {
 		cache.nOpenEnded.Add(1)
 	}
 	cache.muReaders.Unlock()
+	r.SetReadahead(perReaderReadahead(cache.Readahead(), cache.windowDivisor()))
 }
 
 func (r *Reader) Seek(offset int64, whence int) (n int64, err error) {
@@ -188,10 +193,12 @@ func (r *Reader) SetReadahead(length int64) {
 // with pump_on_open off (Dezoxy fork); upstream reads ahead the full window.
 var BoundedReadahead bool
 
-// SetBounded marks the reader as serving a bounded range, for the eviction and refetch
-// metrics. It changes nothing else, and does it once: a reader starts open-ended. Call it right
-// after the reader is created, before it is closed.
-func (r *Reader) SetBounded() {
+// SetBounded marks the reader as serving a bounded range ending at end (exclusive file
+// offset, 0 when unknown). The reader then no longer counts in the protected-window divisor and
+// protects only its own range, current offset to end (getOffsetRange). It never changes the
+// engine read-ahead (SetRangeEnd does, when BoundedReadahead is on). It marks once: a reader
+// starts open-ended. Call it right after the reader is created, before it is closed.
+func (r *Reader) SetBounded(end int64) {
 	c := r.cache
 	// Under the write lock, like CloseReader, so a close cannot fall between the flag and the
 	// counters and leave them off by one.
@@ -200,6 +207,7 @@ func (r *Reader) SetBounded() {
 	if !r.bounded.CompareAndSwap(false, true) {
 		return
 	}
+	r.protectEnd.Store(max(end, 0))
 	if _, registered := c.readers[r]; registered {
 		c.nOpenEnded.Add(-1)
 		c.nBounded.Add(1)
@@ -287,10 +295,6 @@ func (r *Reader) getPieceNum(offset int64) int {
 
 func (r *Reader) getOffsetRange() (int64, int64) {
 	prc := int64(settings.BTsets.ReaderReadAHead)
-	readers := int64(r.getUseReaders())
-	if readers == 0 {
-		readers = 1
-	}
 
 	r.mu.Lock()
 	currentOffset := r.offset
@@ -301,8 +305,23 @@ func (r *Reader) getOffsetRange() (int64, int64) {
 	// when cache is full, leading to deadlock/OOM.
 	safetyFactor := float64(protectedSafetyPct) / 100
 
-	protected := int64(float64(r.cache.capacity/readers) * safetyFactor)
-	beginOffset, endOffset := protectedWindow(currentOffset, protected, prc, atomic.LoadInt64(&r.readahead))
+	// The share is split across the open-ended readers only: a bounded reader (FetchBlock,
+	// FetchAhead, a probe) must not shrink the window of the stream that is playing.
+	protected := int64(float64(r.cache.capacity/int64(r.cache.windowDivisor())) * safetyFactor)
+
+	var beginOffset, endOffset int64
+	if r.bounded.Load() {
+		// A bounded reader protects its own request, from where it is to the end of its range,
+		// and never more than one open-ended reader's share. The last byte is end-1: the end is
+		// exclusive. Without a known end it protects the piece under its offset.
+		beginOffset = currentOffset
+		endOffset = currentOffset
+		if end := r.protectEnd.Load(); end > 0 {
+			endOffset = max(min(end, currentOffset+protected)-1, currentOffset)
+		}
+	} else {
+		beginOffset, endOffset = protectedWindow(currentOffset, protected, prc, atomic.LoadInt64(&r.readahead))
+	}
 
 	if beginOffset < 0 {
 		beginOffset = 0
@@ -383,11 +402,4 @@ func (r *Reader) readerOff() {
 			_, _ = r.Reader.Seek(0, io.SeekStart) // a non-negative absolute seek cannot fail
 		}
 	}
-}
-
-func (r *Reader) getUseReaders() int {
-	if r.cache != nil {
-		return int(r.cache.activeReaders.Load())
-	}
-	return 0
 }

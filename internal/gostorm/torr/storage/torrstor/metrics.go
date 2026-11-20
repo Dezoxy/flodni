@@ -122,6 +122,27 @@ func (v evictView) zone(id int) int {
 	return zoneNoReader
 }
 
+// Eviction order classes (class): lower goes first.
+const (
+	classBehind    = iota // behind every reader, or no reader near it
+	classAheadSome        // ahead of some reader, but of no open-ended one
+	classUnread           // at or after an open-ended reader's current offset
+)
+
+// class is the eviction order of a candidate piece, which is already outside every window. The
+// unread read-ahead of an open-ended reader goes last: it is what that stream reads next.
+func (v evictView) class(id int) int {
+	switch {
+	case v.readers == 0:
+		return classBehind
+	case id >= v.minOpen:
+		return classUnread
+	case id >= v.minPiece:
+		return classAheadSome
+	}
+	return classBehind
+}
+
 func countEviction(v evictView, id int) {
 	evictions[v.zone(id)][readerBucket(v.readers)].Add(1)
 }

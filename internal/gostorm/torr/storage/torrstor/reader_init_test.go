@@ -23,7 +23,7 @@ func (f *raRecorder) SetReadaheadFunc(fn torrent.ReadaheadFunc) {
 }
 
 // A new reader must hand the engine the read-ahead the stats tick would set (the cache
-// read-ahead split across the active readers) at once, not leave the engine's 48 MiB
+// read-ahead split across the open-ended readers) at once, not leave the engine's 48 MiB
 // default in place until the first tick.
 func TestNewReaderSetsEngineReadaheadImmediately(t *testing.T) {
 	oldSets, oldBounded := settings.BTsets, BoundedReadahead
@@ -46,7 +46,7 @@ func TestNewReaderSetsEngineReadaheadImmediately(t *testing.T) {
 			BoundedReadahead = bounded
 			fake := &raRecorder{}
 			cache := &Cache{readers: map[*Reader]struct{}{}, openSize: 128 * mib}
-			cache.activeReaders.Store(tc.existing)
+			cache.nOpenEnded.Store(tc.existing)
 			r := &Reader{Reader: fake}
 			r.attach(cache)
 
