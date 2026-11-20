@@ -68,6 +68,17 @@ type Cache struct {
 	// SetBounded. Atomics, so the write path can read them without muReaders (metrics.go).
 	nOpenEnded atomic.Int32
 	nBounded   atomic.Int32
+	// nActiveOpen counts the registered open-ended readers in use: the divisor of the protected
+	// window (windowDivisor). Reader.syncActive keeps it.
+	nActiveOpen atomic.Int32
+	// grace holds the windows of open-ended readers that closed in the last reconnectGrace
+	// (keep.go). Written under muReaders for writing, read under it for reading: no lock of its
+	// own. clock replaces time.Now for tests.
+	grace []graceRange
+	// graceUntil is the latest end (UnixNano) of an entry in grace, 0 when none counts: the
+	// cleaner's tick clears priorities once it has passed (clearIfGraceOver).
+	graceUntil atomic.Int64
+	clock      func() time.Time
 
 	isRemove     atomic.Bool
 	isClosed     atomic.Bool
@@ -184,6 +195,7 @@ func NewCache(capacity int64, storage *Storage) *Cache {
 				runRecovered("cleanPieces", ret.cleanPieces)
 			case <-tick.C:
 				runRecovered("sweepStranded", ret.sweepIfStranded)
+				runRecovered("clearIfGraceOver", ret.clearIfGraceOver)
 			}
 		}
 	})
@@ -344,6 +356,8 @@ func (c *Cache) closeNoWait() error {
 
 	c.readers = nil
 	c.pieces = nil
+	c.grace = nil
+	c.graceUntil.Store(0)
 	c.muReaders.Unlock()
 
 	if settings.BTsets.RemoveCacheOnDrop {
@@ -373,9 +387,13 @@ func (c *Cache) AdjustRA(readahead int64) {
 	}
 	if c.Readers() > 0 {
 		// Split by the same divisor getOffsetRange uses, or the readahead outruns the window.
-		perReader := perReaderReadahead(readahead, int(c.activeReaders.Load()))
+		perReader := perReaderReadahead(readahead, c.windowDivisor())
 		c.muReaders.RLock()
 		for r := range c.readers {
+			if r.bounded.Load() {
+				r.SetReadahead(r.clampBounded(perReader))
+				continue
+			}
 			r.SetReadahead(perReader)
 		}
 		c.muReaders.RUnlock()
@@ -532,12 +550,9 @@ func (c *Cache) evictOverCapacity(now time.Time) {
 		// lines per second during playback.
 		if len(remPieces) == 0 && time.Since(c.lastEvictLog) > time.Minute {
 			c.lastEvictLog = time.Now()
-			readers := int64(c.activeReaders.Load())
-			if readers == 0 {
-				readers = 1
-			}
+			readers := int64(c.windowDivisor())
 			// protected/reader is derived from the capacity (getOffsetRange's 0.85
-			// safety factor split across readers), not measured off the reader.
+			// safety factor split across open-ended readers), not measured off the reader.
 			log.TLogln("[CacheEvict] nothing evictable — readers:", readers,
 				"protected/reader(MB):", c.capacity/readers*85/100>>20,
 				"filled(MB):", filled>>20, "capacity(MB):", c.capacity>>20)
@@ -582,10 +597,17 @@ func (c *Cache) scanEvictable() ([]*Piece, evictView) {
 	pieces := c.pieces
 	for r := range c.readers {
 		r.checkReader()
-		if r.isUse {
+		if r.inUse() {
 			ranges = append(ranges, r.getPiecesRange())
 		}
 		view.add(r.getReaderPiece(), !r.bounded.Load())
+	}
+	// A reader that closed a moment ago still protects its window, and still counts as an
+	// open-ended reader for the eviction order; the metrics view keeps to the readers that exist.
+	order := view
+	for _, g := range c.liveGraceLocked(c.now()) {
+		ranges = append(ranges, g.rng)
+		order.add(g.pos, true)
 	}
 	c.muReaders.RUnlock()
 	ranges = mergeRange(ranges)
@@ -611,7 +633,14 @@ func (c *Cache) scanEvictable() ([]*Piece, evictView) {
 	c.clearPriority()
 	c.setLoadPriority(ranges)
 
+	// By class first, then by age: what no open-ended reader is about to read goes before the
+	// unread read-ahead of one, however old. Only an order: when capacity needs it, the last
+	// class is evicted too.
 	sort.Slice(piecesRemove, func(i, j int) bool {
+		ci, cj := order.class(piecesRemove[i].Id), order.class(piecesRemove[j].Id)
+		if ci != cj {
+			return ci < cj
+		}
 		return atomic.LoadInt64(&piecesRemove[i].Accessed) < atomic.LoadInt64(&piecesRemove[j].Accessed)
 	})
 
@@ -837,8 +866,15 @@ func (c *Cache) CloseReader(r *Reader) {
 		c.muReaders.Unlock()
 		return
 	}
+	if _, ok := c.readers[r]; ok {
+		c.rememberClosed(r) // before Close, which parks the reader
+	}
 	r.Close()
 	if _, ok := c.readers[r]; ok {
+		r.mu.Lock()
+		r.registered = false
+		r.syncActive()
+		r.mu.Unlock()
 		if r.bounded.Load() {
 			c.nBounded.Add(-1)
 		} else {
@@ -862,9 +898,13 @@ func (c *Cache) clearPriority() {
 	ranges := make([]Range, 0)
 	for r := range c.readers {
 		r.checkReader()
-		if r.isUse {
+		if r.inUse() {
 			ranges = append(ranges, r.getPiecesRange())
 		}
+	}
+	// A reader closed within reconnectGrace keeps its priorities: its replacement is on the way.
+	for _, g := range c.liveGraceLocked(c.now()) {
+		ranges = append(ranges, g.rng)
 	}
 
 	c.muReaders.RUnlock()

@@ -122,7 +122,7 @@ func TestEvictionCountedAheadUnreadAndBounded(t *testing.T) {
 			r := c.NewReader(tor.Files()[0])
 			t.Cleanup(func() { c.CloseReader(r) })
 			if tc.bounded {
-				r.SetBounded()
+				r.SetBounded(0)
 			}
 			if _, err := r.Seek(1*mib, 0); err != nil {
 				t.Fatal(err)
@@ -179,7 +179,7 @@ func TestRefetchedBytesByReader(t *testing.T) {
 				r := c.NewReader(tor.Files()[0])
 				t.Cleanup(func() { c.CloseReader(r) })
 				if tc.readers == "bounded" {
-					r.SetBounded()
+					r.SetBounded(0)
 				}
 				if _, err := r.Seek(20*mib, 0); err != nil {
 					t.Fatal(err)
@@ -214,8 +214,8 @@ func TestReaderKindCounts(t *testing.T) {
 	if o, b := c.nOpenEnded.Load(), c.nBounded.Load(); o != 2 || b != 0 {
 		t.Fatalf("after attach open=%d bounded=%d, want 2 and 0", o, b)
 	}
-	r2.SetBounded()
-	r2.SetBounded() // idempotent
+	r2.SetBounded(0)
+	r2.SetBounded(0) // idempotent
 	if o, b := c.nOpenEnded.Load(), c.nBounded.Load(); o != 1 || b != 1 {
 		t.Fatalf("after SetBounded open=%d bounded=%d, want 1 and 1", o, b)
 	}
