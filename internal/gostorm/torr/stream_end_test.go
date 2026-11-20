@@ -137,3 +137,126 @@ func TestRefetchedRangeSinceNilTorrent(t *testing.T) {
 		t.Fatal("a missing torrent reported a completed piece")
 	}
 }
+
+// trickleContent hands out one byte every gap until total has passed since the first read, then
+// ends (EOF) or, with stall set, blocks until the context ends. With gap 0 it blocks from the start.
+// Seek claims a file far larger than any test streams.
+type trickleContent struct {
+	ctx   context.Context
+	gap   time.Duration
+	total time.Duration
+	stall bool
+	start time.Time
+}
+
+func (c *trickleContent) Read(p []byte) (int, error) {
+	if c.start.IsZero() {
+		c.start = time.Now()
+	}
+	if c.gap == 0 || time.Since(c.start) >= c.total {
+		if c.gap != 0 && !c.stall {
+			return 0, io.EOF
+		}
+		<-c.ctx.Done()
+		return 0, c.ctx.Err()
+	}
+	select {
+	case <-time.After(c.gap):
+		p[0] = 'x'
+		return 1, nil
+	case <-c.ctx.Done():
+		return 0, c.ctx.Err()
+	}
+}
+
+func (c *trickleContent) Seek(off int64, whence int) (int64, error) {
+	if whence == io.SeekEnd {
+		return 1 << 30, nil
+	}
+	return off, nil
+}
+
+// serveWithTimeout runs the stream path of Torrent.Stream (context, progress, recorder, count)
+// over content and returns how it ended and how long it took.
+func serveWithTimeout(t *testing.T, d time.Duration, idle bool, mk func(context.Context) *trickleContent) (int, time.Duration) {
+	t.Helper()
+	ctx, dl, stop := newStreamContext(context.Background(), d, idle)
+	defer stop()
+	rec := &endRecorder{}
+	req := httptest.NewRequest(http.MethodGet, "/stream", nil).WithContext(ctx)
+	begin := time.Now()
+	serveFileContent(&contextResponseWriter{ResponseWriter: httptest.NewRecorder(), ctx: ctx}, req, "a.mkv", time.Unix(0, 0),
+		&recordingContent{ReadSeeker: &progressContent{ReadSeeker: mk(ctx), dl: dl}, rec: rec})
+	took := time.Since(begin)
+	return rec.reason(context.Cause(ctx)), took
+}
+
+// An open-ended stream that keeps delivering bytes is not cut at the timeout.
+func TestIdleStreamSurvivesProgress(t *testing.T) {
+	reason, took := serveWithTimeout(t, 100*time.Millisecond, true, func(ctx context.Context) *trickleContent {
+		return &trickleContent{ctx: ctx, gap: 30 * time.Millisecond, total: 400 * time.Millisecond}
+	})
+	if reason != streamEndEOF {
+		t.Errorf("reason = %s, want eof", StreamEndNames[reason])
+	}
+	if took < 400*time.Millisecond {
+		t.Errorf("stream ended after %v, want at least 400ms", took)
+	}
+}
+
+// An open-ended stream that delivers nothing ends after about the timeout, counted as timeout,
+// also after it made progress first.
+func TestIdleStreamEndsWithoutProgress(t *testing.T) {
+	for name, mk := range map[string]func(context.Context) *trickleContent{
+		"never any bytes": func(ctx context.Context) *trickleContent { return &trickleContent{ctx: ctx} },
+		"stalls after progress": func(ctx context.Context) *trickleContent {
+			return &trickleContent{ctx: ctx, gap: 30 * time.Millisecond, total: 150 * time.Millisecond, stall: true}
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			reason, took := serveWithTimeout(t, 100*time.Millisecond, true, mk)
+			if reason != streamEndTimeout {
+				t.Errorf("reason = %s, want timeout", StreamEndNames[reason])
+			}
+			if took < 90*time.Millisecond || took > 2*time.Second {
+				t.Errorf("ended after %v, want about the timeout", took)
+			}
+		})
+	}
+}
+
+// A bounded range (idle false) keeps the absolute deadline, even while bytes keep coming.
+func TestBoundedStreamKeepsAbsoluteDeadline(t *testing.T) {
+	reason, took := serveWithTimeout(t, 100*time.Millisecond, false, func(ctx context.Context) *trickleContent {
+		return &trickleContent{ctx: ctx, gap: 30 * time.Millisecond, total: time.Hour}
+	})
+	if reason != streamEndTimeout {
+		t.Errorf("reason = %s, want timeout", StreamEndNames[reason])
+	}
+	if took < 90*time.Millisecond || took > 400*time.Millisecond {
+		t.Errorf("ended after %v, want about 100ms", took)
+	}
+}
+
+// A client that goes away ends an idle stream as cancel, not timeout.
+func TestIdleStreamClientGone(t *testing.T) {
+	parent, gone := context.WithCancel(context.Background())
+	ctx, dl, stop := newStreamContext(parent, time.Hour, true)
+	defer stop()
+	time.AfterFunc(30*time.Millisecond, gone)
+	rec := &endRecorder{}
+	req := httptest.NewRequest(http.MethodGet, "/stream", nil).WithContext(ctx)
+	serveFileContent(&contextResponseWriter{ResponseWriter: httptest.NewRecorder(), ctx: ctx}, req, "a.mkv", time.Unix(0, 0),
+		&recordingContent{ReadSeeker: &progressContent{ReadSeeker: &trickleContent{ctx: ctx}, dl: dl}, rec: rec})
+	if got := rec.reason(context.Cause(ctx)); got != streamEndCancel {
+		t.Errorf("reason = %s, want cancel", StreamEndNames[got])
+	}
+}
+
+func TestStreamEndReasonIdleCause(t *testing.T) {
+	// the read saw context.Canceled, the stream's cause is the idle deadline
+	e := &endRecorder{readErr: context.Canceled}
+	if got := e.reason(context.DeadlineExceeded); got != streamEndTimeout {
+		t.Errorf("reason = %s, want timeout", StreamEndNames[got])
+	}
+}

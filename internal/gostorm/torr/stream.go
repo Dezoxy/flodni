@@ -82,10 +82,10 @@ func (e *endRecorder) noteRead(err error) {
 	}
 }
 
-// reason names how the stream ended. An engine read error that is not the context's is a
-// read_error whatever the context did after; a context that ended with nothing recorded cut the
-// stream short (it is only cancelled when the handler returns, after this runs), a client that
-// went away included. Everything else ran to its end.
+// reason names how the stream ended; ctxErr is context.Cause of the stream's context. An engine
+// read error that is not the context's is a read_error whatever the context did after; a context
+// that ended with nothing recorded cut the stream short (it is only cancelled when the handler
+// returns, after this runs), a client that went away included. Everything else ran to its end.
 func (e *endRecorder) reason(ctxErr error) int {
 	byCtx := func(err error) int {
 		if errors.Is(err, context.DeadlineExceeded) {
@@ -100,6 +100,10 @@ func (e *endRecorder) reason(ctxErr error) int {
 	case e.readErr != nil && !isCtx(e.readErr):
 		return streamEndReadError
 	case e.readErr != nil:
+		// A read that met the idle deadline sees context.Canceled; the context's cause says why.
+		if errors.Is(ctxErr, context.DeadlineExceeded) {
+			return streamEndTimeout
+		}
 		return byCtx(e.readErr)
 	case ctxErr != nil:
 		return byCtx(ctxErr)
@@ -141,6 +145,59 @@ func countStreamEnd(openEnded bool, method string, rec *endRecorder, ctxErr erro
 		return
 	}
 	streamEnds[rec.reason(ctxErr)].Add(1)
+}
+
+// streamDeadline is the idle deadline of an open-ended stream: a timer that cancels the stream's
+// context once no byte has been read for d, and that every read of n > 0 pushes back.
+type streamDeadline struct {
+	timer *time.Timer
+	d     time.Duration
+}
+
+// progress pushes the deadline back. A nil deadline (a bounded stream) does nothing. Reset on a
+// running or fired AfterFunc timer is safe from any goroutine; a late fire only cancels again.
+func (s *streamDeadline) progress() {
+	if s != nil {
+		s.timer.Reset(s.d)
+	}
+}
+
+// newStreamContext bounds a stream by d; d <= 0 means unbounded. An
+// idle stream (the pump's open-ended GET) ends d after the last byte read from the engine; any
+// other stream ends d after it started. Both cancel with the cause context.DeadlineExceeded, so
+// countStreamEnd reads context.Cause and counts them as timeout. stop releases the timer and
+// the context, and must run when the handler returns.
+func newStreamContext(parent context.Context, d time.Duration, idle bool) (context.Context, *streamDeadline, func()) {
+	if d <= 0 {
+		ctx, cancel := context.WithCancel(parent)
+		return ctx, nil, cancel
+	}
+	if !idle {
+		ctx, cancel := context.WithTimeout(parent, d)
+		return ctx, nil, cancel
+	}
+	ctx, cancel := context.WithCancelCause(parent)
+	dl := &streamDeadline{d: d}
+	dl.timer = time.AfterFunc(d, func() { cancel(context.DeadlineExceeded) })
+	return ctx, dl, func() {
+		dl.timer.Stop()
+		cancel(context.Canceled)
+	}
+}
+
+// progressContent resets the idle deadline on every read that returned bytes. It wraps the
+// engine reader, below any buffer, so the deadline follows what the engine delivered.
+type progressContent struct {
+	io.ReadSeeker
+	dl *streamDeadline
+}
+
+func (c *progressContent) Read(p []byte) (int, error) {
+	n, err := c.ReadSeeker.Read(p)
+	if n > 0 {
+		c.dl.progress()
+	}
+	return n, err
 }
 
 // ctxReader binds a context to torrstor.Reader's blocking Read, so http.ServeContent's internal
@@ -302,13 +359,11 @@ func (t *Torrent) Stream(fileID int, req *http.Request, resp http.ResponseWriter
 	if req.Header.Get("Range") != "" {
 		resp.Header().Set("Accept-Ranges", "bytes")
 	}
-	// Create a context with timeout if configured
-	ctx := req.Context()
-	if streamTimeout > 0 {
-		var cancel context.CancelFunc
-		ctx, cancel = context.WithTimeout(ctx, time.Duration(streamTimeout)*time.Second)
-		defer cancel()
-	}
+	// An open-ended GET (the pump's stream) ends when the engine delivers nothing for the stream
+	// timeout; a bounded range or a HEAD ends that long after it started.
+	ctx, idle, stop := newStreamContext(req.Context(), time.Duration(streamTimeout)*time.Second,
+		!bounded && req.Method == http.MethodGet)
+	defer stop()
 	// Update request with new context
 	req = req.WithContext(ctx)
 	// Handle client disconnections better
@@ -318,8 +373,8 @@ func (t *Torrent) Stream(fileID int, req *http.Request, resp http.ResponseWriter
 		ctx:            ctx,
 	}
 	serveFileContent(wrappedResp, req, file.Path(), time.Unix(t.Timestamp, 0),
-		streamContent(&recordingContent{ReadSeeker: &ctxReader{Reader: reader, ctx: ctx}, rec: rec}, req.Header.Get("Range")))
-	countStreamEnd(!bounded, req.Method, rec, ctx.Err())
+		streamContent(&recordingContent{ReadSeeker: &progressContent{ReadSeeker: &ctxReader{Reader: reader, ctx: ctx}, dl: idle}, rec: rec}, req.Header.Get("Range")))
+	countStreamEnd(!bounded, req.Method, rec, context.Cause(ctx))
 
 	if sets.BTsets.EnableDebug {
 		if clerr != nil {
