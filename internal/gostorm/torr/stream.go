@@ -34,21 +34,16 @@ var activeStreams int32
 type contextResponseWriter struct {
 	http.ResponseWriter
 	ctx context.Context
-	rec *endRecorder // nil when the end is not recorded
 }
 
 func (w *contextResponseWriter) Write(p []byte) (n int, err error) {
 	// Check context before each write
 	select {
 	case <-w.ctx.Done():
-		err = w.ctx.Err()
+		return 0, w.ctx.Err()
 	default:
-		n, err = w.ResponseWriter.Write(p)
+		return w.ResponseWriter.Write(p)
 	}
-	if err != nil {
-		w.rec.noteWrite(err)
-	}
-	return n, err
 }
 
 // How an open-ended engine stream ended (flodni_engine_stream_ends_total). The pump's stream is
@@ -75,10 +70,11 @@ func StreamEndCounts() (out [numStreamEnds]int64) {
 	return out
 }
 
-// endRecorder keeps the first error each side of a stream saw. http.ServeContent drops the
-// errors of its copy once the header is out, so the wrappers below are the only place they show.
-// One goroutine serves a stream, so there is no lock.
-type endRecorder struct{ readErr, writeErr error }
+// endRecorder keeps the first read error a stream saw. http.ServeContent drops the errors of its
+// copy once the header is out, so the content wrapper below is the only place they show. A client
+// that went away shows as the request's context, cancelled by the server. One goroutine serves a
+// stream, so there is no lock.
+type endRecorder struct{ readErr error }
 
 func (e *endRecorder) noteRead(err error) {
 	if e != nil && err != nil && err != io.EOF && e.readErr == nil {
@@ -86,16 +82,10 @@ func (e *endRecorder) noteRead(err error) {
 	}
 }
 
-func (e *endRecorder) noteWrite(err error) {
-	if e != nil && e.writeErr == nil {
-		e.writeErr = err
-	}
-}
-
 // reason names how the stream ended. An engine read error that is not the context's is a
-// read_error whatever the context did after; a failed write with no deadline means the client
-// is gone; a context that ended with nothing recorded cut the stream short (it is only
-// cancelled when the handler returns, after this runs). Everything else ran to its end.
+// read_error whatever the context did after; a context that ended with nothing recorded cut the
+// stream short (it is only cancelled when the handler returns, after this runs), a client that
+// went away included. Everything else ran to its end.
 func (e *endRecorder) reason(ctxErr error) int {
 	byCtx := func(err error) int {
 		if errors.Is(err, context.DeadlineExceeded) {
@@ -111,8 +101,6 @@ func (e *endRecorder) reason(ctxErr error) int {
 		return streamEndReadError
 	case e.readErr != nil:
 		return byCtx(e.readErr)
-	case e.writeErr != nil:
-		return byCtx(e.writeErr)
 	case ctxErr != nil:
 		return byCtx(ctxErr)
 	}
@@ -328,7 +316,6 @@ func (t *Torrent) Stream(fileID int, req *http.Request, resp http.ResponseWriter
 	wrappedResp := &contextResponseWriter{
 		ResponseWriter: resp,
 		ctx:            ctx,
-		rec:            rec,
 	}
 	serveFileContent(wrappedResp, req, file.Path(), time.Unix(t.Timestamp, 0),
 		streamContent(&recordingContent{ReadSeeker: &ctxReader{Reader: reader, ctx: ctx}, rec: rec}, req.Header.Get("Range")))

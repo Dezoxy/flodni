@@ -14,26 +14,23 @@ import (
 func TestStreamEndReason(t *testing.T) {
 	boom := errors.New("boom")
 	for _, tc := range []struct {
-		name  string
-		read  error
-		write error
-		ctx   error
-		want  int
+		name string
+		read error
+		ctx  error
+		want int
 	}{
-		{"clean", nil, nil, nil, streamEndEOF},
-		{"deadline in a read", context.DeadlineExceeded, nil, context.DeadlineExceeded, streamEndTimeout},
-		{"deadline wrapped", errors.Join(boom, context.DeadlineExceeded), nil, nil, streamEndTimeout},
-		{"canceled in a read", context.Canceled, nil, context.Canceled, streamEndCancel},
-		{"engine error", boom, nil, nil, streamEndReadError},
-		{"engine error beats a late cancel", boom, nil, context.Canceled, streamEndReadError},
-		{"unexpected eof is an error", io.ErrUnexpectedEOF, nil, nil, streamEndReadError},
-		{"client gone on write", nil, io.ErrClosedPipe, nil, streamEndCancel},
-		{"deadline on write", nil, context.DeadlineExceeded, context.DeadlineExceeded, streamEndTimeout},
-		{"context ended with nothing recorded: timeout", nil, nil, context.DeadlineExceeded, streamEndTimeout},
-		{"context ended with nothing recorded: cancel", nil, nil, context.Canceled, streamEndCancel},
+		{"clean", nil, nil, streamEndEOF},
+		{"deadline in a read", context.DeadlineExceeded, context.DeadlineExceeded, streamEndTimeout},
+		{"deadline wrapped", errors.Join(boom, context.DeadlineExceeded), nil, streamEndTimeout},
+		{"canceled in a read", context.Canceled, context.Canceled, streamEndCancel},
+		{"engine error", boom, nil, streamEndReadError},
+		{"engine error beats a late cancel", boom, context.Canceled, streamEndReadError},
+		{"unexpected eof is an error", io.ErrUnexpectedEOF, nil, streamEndReadError},
+		{"context ended with nothing recorded: timeout", nil, context.DeadlineExceeded, streamEndTimeout},
+		{"client gone: the request context is cancelled", nil, context.Canceled, streamEndCancel},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			e := &endRecorder{readErr: tc.read, writeErr: tc.write}
+			e := &endRecorder{readErr: tc.read}
 			if got := e.reason(tc.ctx); got != tc.want {
 				t.Errorf("reason = %s, want %s", StreamEndNames[got], StreamEndNames[tc.want])
 			}
@@ -70,16 +67,11 @@ func (f *failingReader) Seek(off int64, whence int) (int64, error) {
 	return int64(f.pos), nil
 }
 
-// failingWriter is a response writer whose client has gone.
-type failingWriter struct{ http.ResponseWriter }
-
-func (failingWriter) Write([]byte) (int, error) { return 0, io.ErrClosedPipe }
-
 func serveRecorded(t *testing.T, content io.ReadSeeker, w http.ResponseWriter, ctx context.Context) *endRecorder {
 	t.Helper()
 	rec := &endRecorder{}
 	req := httptest.NewRequest(http.MethodGet, "/stream", nil).WithContext(ctx)
-	serveFileContent(&contextResponseWriter{ResponseWriter: w, ctx: ctx, rec: rec}, req, "a.mkv", time.Unix(0, 0),
+	serveFileContent(&contextResponseWriter{ResponseWriter: w, ctx: ctx}, req, "a.mkv", time.Unix(0, 0),
 		&recordingContent{ReadSeeker: content, rec: rec})
 	return rec
 }
@@ -104,12 +96,6 @@ func TestStreamEndRecordedThroughServe(t *testing.T) {
 		rec := serveRecorded(t, &failingReader{data: data, err: context.DeadlineExceeded}, httptest.NewRecorder(), context.Background())
 		if got := rec.reason(nil); got != streamEndTimeout {
 			t.Errorf("reason = %s, want timeout", StreamEndNames[got])
-		}
-	})
-	t.Run("client gone", func(t *testing.T) {
-		rec := serveRecorded(t, bytes.NewReader(data), failingWriter{httptest.NewRecorder()}, context.Background())
-		if got := rec.reason(nil); got != streamEndCancel {
-			t.Errorf("reason = %s, want cancel", StreamEndNames[got])
 		}
 	})
 }
