@@ -1,6 +1,10 @@
 package torrstor
 
-import "time"
+import (
+	"time"
+
+	"github.com/anacrolix/torrent"
+)
 
 // What keeps a playing stream's unread read-ahead in the cache (Dezoxy fork): the protected
 // window is split across open-ended readers only (Reader.getOffsetRange), eviction prefers
@@ -33,10 +37,17 @@ func (c *Cache) now() time.Time {
 }
 
 // windowDivisor is what the cache is split by for each reader's protected window and
-// read-ahead: the open-ended readers, at least one. Bounded readers protect their own range
-// and take no share.
+// read-ahead: the open-ended readers in use, at least one. Bounded readers protect their own
+// range (boundedShare) and a parked reader holds no window, so neither takes a share.
 func (c *Cache) windowDivisor() int {
-	return max(1, int(c.nOpenEnded.Load()))
+	return max(1, int(c.nActiveOpen.Load()))
+}
+
+// boundedShare is what one bounded reader may protect: the slack the open-ended windows leave
+// (100 - protectedSafetyPct of the cache) split across the bounded readers. Open-ended windows
+// plus bounded ranges then never exceed the cache, however many long ranges are open.
+func (c *Cache) boundedShare() int64 {
+	return c.capacity * (100 - protectedSafetyPct) / 100 / int64(max(1, int(c.nBounded.Load())))
 }
 
 // rememberClosed records the window of an open-ended reader that is closing. The caller holds
@@ -64,7 +75,52 @@ func (c *Cache) rememberClosed(r *Reader) {
 	if len(keep) >= graceMax {
 		keep = keep[len(keep)-graceMax+1:]
 	}
-	c.grace = append(keep, graceRange{rng: r.getPiecesRange(), pos: r.getReaderPiece(), until: now.Add(reconnectGrace)})
+	until := now.Add(reconnectGrace)
+	c.grace = append(keep, graceRange{rng: r.getPiecesRange(), pos: r.getReaderPiece(), until: until})
+	c.graceUntil.Store(max(c.graceUntil.Load(), until.UnixNano()))
+}
+
+// endGrace drops the grace entries of a file whose reader has come back to read: the window is
+// the new reader's now, or the player seeked and the old one must go. The priorities follow in
+// the background, as after a close. A read-lock-free check first: most reads find no grace.
+func (c *Cache) endGrace(file *torrent.File) {
+	if u := c.graceUntil.Load(); u == 0 || c.now().UnixNano() >= u {
+		return
+	}
+	c.muReaders.Lock()
+	if c.readers == nil {
+		c.muReaders.Unlock()
+		return
+	}
+	keep := make([]graceRange, 0, len(c.grace))
+	latest := int64(0)
+	for _, g := range c.grace {
+		if g.rng.File == file {
+			continue
+		}
+		keep = append(keep, g)
+		latest = max(latest, g.until.UnixNano())
+	}
+	changed := len(keep) != len(c.grace)
+	c.grace = keep
+	c.graceUntil.Store(latest)
+	c.muReaders.Unlock()
+	if changed {
+		c.goBG(c.clearPriority)
+	}
+}
+
+// clearIfGraceOver is the cleaner tick's step: once the last grace has passed it drops the
+// priorities it kept, which on a silent swarm nothing else would (no piece completes, so no
+// clean pass runs). It takes the locks clearPriority always takes, none of its own.
+func (c *Cache) clearIfGraceOver() {
+	u := c.graceUntil.Load()
+	if u == 0 || c.now().UnixNano() < u {
+		return
+	}
+	if c.graceUntil.CompareAndSwap(u, 0) {
+		c.clearPriority()
+	}
 }
 
 // liveGraceLocked returns the grace entries still counting at now. The caller holds muReaders

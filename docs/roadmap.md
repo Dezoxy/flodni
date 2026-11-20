@@ -972,7 +972,8 @@ briefly leaves the window unprotected. Measurement comes before each change.
    in reads before the first deep read. Read-only atomics, no engine lock.
    Built (#275): `evicted` means a piece in the read's span completed a second
    time since the read began.
-2. **Keep a playing stream's unread read-ahead in the engine cache.** Count
+2. **Keep a playing stream's unread read-ahead in the engine cache.**
+   [FINISHED] Count
    only open-ended readers in the protected-window divisor (a bounded reader
    protects its own range), evict by class before age (behind a reader or
    unrelated first, an open-ended reader's unread read-ahead last), and keep a
@@ -980,7 +981,11 @@ briefly leaves the window unprotected. Measurement comes before each change.
    ordering preference, not hard protection, so a full cache can still evict;
    RAM only; lock order unchanged. A test evicts while a second reader
    attaches. Judged on step 1: `zone="ahead_unread"` near 0 and refetch under
-   5 % of pump fill.
+   5 % of pump fill. Built (#277), with review fixes: bounded readers share
+   only the 15 % slack, a parked reader takes no share, a bounded reader's
+   engine read-ahead is clamped to its range, a new reader's first read ends
+   the grace (so a seek frees the old window at once), and the cleaner tick
+   drops priorities a grace kept on a silent swarm.
 3. **End a pump stream on idleness, not age.** The open-ended stream's
    timeout counts from the stream's start; make it reset on progress so a
    long play does not reconnect (and drop its window) on a timer. Extends the

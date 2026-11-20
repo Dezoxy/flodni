@@ -27,7 +27,10 @@ type Reader struct {
 	// (SetBounded), 0 when unknown. It protects only: SetRangeEnd, which clamps the engine
 	// read-ahead, stays tied to BoundedReadahead.
 	protectEnd atomic.Int64
-	file       *torrent.File
+	// read is set by the first Read of an open-ended reader: it ends the grace of the reader it
+	// replaces (Cache.endGrace).
+	read atomic.Bool
+	file *torrent.File
 
 	cache    *Cache
 	isClosed bool
@@ -35,6 +38,10 @@ type Reader struct {
 	///Preload
 	lastAccess int64
 	isUse      bool
+	// registered (in cache.readers) and counted (in cache.nActiveOpen) are guarded by mu; see
+	// syncActive.
+	registered bool
+	counted    bool
 	// inFlight counts reads and seeks inside the underlying reader; guarded by mu. readerOff
 	// must not park a reader while one is in flight: the park seeks the anacrolix reader to the
 	// head, which moves the read itself. Backported from TorrServer 9b3ceff0.
@@ -75,6 +82,10 @@ func (r *Reader) attach(cache *Cache) {
 	if cache.readers != nil {
 		cache.readers[r] = struct{}{}
 		cache.nOpenEnded.Add(1)
+		r.mu.Lock() // after muReaders, as everywhere
+		r.registered = true
+		r.syncActive()
+		r.mu.Unlock()
 	}
 	cache.muReaders.Unlock()
 	r.SetReadahead(perReaderReadahead(cache.Readahead(), cache.windowDivisor()))
@@ -117,6 +128,7 @@ func (r *Reader) Read(p []byte) (n int, err error) {
 		return
 	}
 	r.mu.Unlock()
+	r.noteFirstRead()
 
 	if r.file.Torrent() != nil && r.file.Torrent().Info() != nil {
 		r.beginIO()
@@ -134,6 +146,17 @@ func (r *Reader) Read(p []byte) (n int, err error) {
 	return
 }
 
+// noteFirstRead ends the grace of the reader this one replaces, once, on the first read of an
+// open-ended reader: a seek closes a reader and opens another much as a reconnect does, and
+// only a read tells them apart. A reconnect at the same offset protects the window itself from
+// here on.
+func (r *Reader) noteFirstRead() {
+	if r.bounded.Load() || !r.read.CompareAndSwap(false, true) {
+		return
+	}
+	r.cache.endGrace(r.file)
+}
+
 // ReadContext behaves like Read but is bounded by ctx: if the underlying torrent read blocks
 // waiting on a piece that never arrives (stalled swarm, no seeders for that range), it returns
 // ctx.Err() instead of hanging until the whole torrent is closed. Mirrors Read's bookkeeping.
@@ -145,6 +168,7 @@ func (r *Reader) ReadContext(ctx context.Context, p []byte) (n int, err error) {
 		return
 	}
 	r.mu.Unlock()
+	r.noteFirstRead()
 
 	if r.file.Torrent() != nil && r.file.Torrent().Info() != nil {
 		r.beginIO()
@@ -203,8 +227,8 @@ func (r *Reader) SetBounded(end int64) {
 	// Under the write lock, like CloseReader, so a close cannot fall between the flag and the
 	// counters and leave them off by one.
 	c.muReaders.Lock()
-	defer c.muReaders.Unlock()
 	if !r.bounded.CompareAndSwap(false, true) {
+		c.muReaders.Unlock()
 		return
 	}
 	r.protectEnd.Store(max(end, 0))
@@ -212,6 +236,57 @@ func (r *Reader) SetBounded(end int64) {
 		c.nOpenEnded.Add(-1)
 		c.nBounded.Add(1)
 	}
+	r.mu.Lock()
+	r.syncActive() // a bounded reader takes no share
+	r.mu.Unlock()
+	c.muReaders.Unlock()
+	// What attach set was the open-ended share: cut it to the range this reader protects.
+	r.SetReadahead(r.clampBounded(r.Readahead()))
+}
+
+// boundedEnd is the exclusive end of a bounded reader's protected range from cur: its request
+// range cut to the share of the slack the open-ended windows leave (the safety margin, split
+// across the bounded readers), so that all windows together stay inside the cache. cur when the
+// end is unknown.
+func (r *Reader) boundedEnd(cur int64) int64 {
+	end := r.protectEnd.Load()
+	if end <= 0 {
+		return cur
+	}
+	return min(end, cur+r.cache.boundedShare())
+}
+
+// clampBounded limits a bounded reader's engine read-ahead to what it protects: the rest sits
+// outside its window and is evicted before it is read. The 8 MiB floor applies as for the
+// open-ended share.
+func (r *Reader) clampBounded(ra int64) int64 {
+	r.mu.Lock()
+	cur := r.offset
+	r.mu.Unlock()
+	return min(ra, max(r.boundedEnd(cur)-cur, minPerReaderReadahead))
+}
+
+// syncActive keeps cache.nActiveOpen, the divisor of the protected window, equal to the number
+// of registered open-ended readers in use. A parked reader holds no window, so it takes no
+// share. The caller holds mu; every change of isUse, bounded or registered ends here.
+func (r *Reader) syncActive() {
+	want := r.isUse && r.registered && !r.bounded.Load()
+	if want == r.counted {
+		return
+	}
+	r.counted = want
+	if want {
+		r.cache.nActiveOpen.Add(1)
+	} else {
+		r.cache.nActiveOpen.Add(-1)
+	}
+}
+
+// inUse reports isUse under mu (the window scans read it with only muReaders held).
+func (r *Reader) inUse() bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.isUse
 }
 
 // SetRangeEnd bounds the reader to a request ending at end (exclusive, file offset): a
@@ -311,13 +386,13 @@ func (r *Reader) getOffsetRange() (int64, int64) {
 
 	var beginOffset, endOffset int64
 	if r.bounded.Load() {
-		// A bounded reader protects its own request, from where it is to the end of its range,
-		// and never more than one open-ended reader's share. The last byte is end-1: the end is
-		// exclusive. Without a known end it protects the piece under its offset.
+		// A bounded reader protects its own request, from where it is to the end of its range
+		// (the last byte is end-1: the end is exclusive), within its share of the slack
+		// (boundedEnd). Without a known end it protects the piece under its offset.
 		beginOffset = currentOffset
 		endOffset = currentOffset
-		if end := r.protectEnd.Load(); end > 0 {
-			endOffset = max(min(end, currentOffset+protected)-1, currentOffset)
+		if end := r.boundedEnd(currentOffset); end > currentOffset {
+			endOffset = end - 1
 		}
 	} else {
 		beginOffset, endOffset = protectedWindow(currentOffset, protected, prc, atomic.LoadInt64(&r.readahead))
@@ -379,6 +454,7 @@ func (r *Reader) resume() {
 		// Mark in use before restoring readahead: SetReadahead only propagates while in use, so
 		// restoring it in the other order leaves the underlying reader parked at zero.
 		r.isUse = true
+		r.syncActive()
 		r.SetReadahead(atomic.LoadInt64(&r.readahead))
 		r.cache.activeReaders.Add(1)
 	}
@@ -397,6 +473,7 @@ func (r *Reader) readerOff() {
 		// zero r.readahead too, and resume would then restore nothing.
 		r.Reader.SetReadahead(0)
 		r.isUse = false
+		r.syncActive()
 		r.cache.activeReaders.Add(-1)
 		if r.offset > 0 {
 			_, _ = r.Reader.Seek(0, io.SeekStart) // a non-negative absolute seek cannot fail

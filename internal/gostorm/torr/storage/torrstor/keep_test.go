@@ -1,6 +1,7 @@
 package torrstor
 
 import (
+	"context"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -102,11 +103,12 @@ func TestBoundedReaderDoesNotShrinkOpenEndedWindow(t *testing.T) {
 		t.Errorf("bounded range = pieces %d..%d, want 10..13 (offset to range end)", r.Start, r.End)
 	}
 
-	// Past the share, the range is cut: a huge range cannot pin the cache.
+	// Past the slack, the range is cut: a huge range cannot pin the cache. Two bounded readers
+	// split the 15% the open-ended windows leave: 6 pieces / 2 = 3 each.
 	capped := keepReader(c, tor, 10, 8)
 	capped.SetBounded(90 * keepPieceLen)
-	if r := capped.getPiecesRange(); r.Start != 10 || r.End != 43 {
-		t.Errorf("capped bounded range = pieces %d..%d, want 10..43 (34 pieces)", r.Start, r.End)
+	if r := capped.getPiecesRange(); r.Start != 10 || r.End != 12 {
+		t.Errorf("capped bounded range = pieces %d..%d, want 10..12 (3 pieces)", r.Start, r.End)
 	}
 
 	// The other side of the rule: an open-ended reader does take a share.
@@ -311,4 +313,141 @@ func contains(s []int, v int) bool {
 		}
 	}
 	return false
+}
+
+// Bounded readers share only what the open-ended windows leave (15% of the cache), however long
+// their ranges: one open-ended reader and two bounded readers asking for the rest of the file
+// must not protect more than the cache holds, or nothing is evictable.
+func TestBoundedReadersShareOnlySlack(t *testing.T) {
+	tor, c := newKeepCache(t, 40)
+	open := keepReader(c, tor, 50, 8)
+	var total int64
+	b, e := open.getOffsetRange()
+	total += e - b // protectedWindow is [begin, begin+protected]: exclusive end
+	for _, pos := range []int64{10, 70} {
+		r := keepReader(c, tor, pos, 8)
+		r.SetBounded(100 * keepPieceLen) // bytes=N-<size-1>
+	}
+	for r := range c.readers {
+		if r.bounded.Load() {
+			b, e := r.getOffsetRange()
+			total += e - b + 1
+		}
+	}
+	if total > c.capacity {
+		t.Errorf("protected bytes = %d (%d pieces), capacity %d (%d pieces)", total, total/keepPieceLen, c.capacity, c.capacity/keepPieceLen)
+	}
+	for id := 8; id <= 92; id++ {
+		complete(t, c, id, int64(id))
+	}
+	if len(evictable(c)) == 0 {
+		t.Error("nothing evictable with one open-ended and two long bounded readers")
+	}
+}
+
+// A seek is also close-then-open, so the grace ends at the new reader's first Read: a read at
+// a far offset frees the old window and its priorities at once, a read at the same offset
+// re-protects the window itself, and a bounded reader's read (a probe) ends nothing.
+func TestFirstReadEndsGrace(t *testing.T) {
+	cancelled, cancel := context.WithCancel(context.Background())
+	cancel()
+	read := func(r *Reader) { _, _ = r.ReadContext(cancelled, make([]byte, 1)) }
+
+	t.Run("far offset", func(t *testing.T) {
+		tor, c, _ := graceSetup(t)
+		c.CloseReader(keepReader(c, tor, 50, 8))
+		if contains(ids(evictable(c)), 30) {
+			t.Fatal("setup: window not protected by the grace")
+		}
+		read(keepReader(c, tor, 90, 2)) // the seek's new reader, far from the old window
+		if !contains(ids(evictable(c)), 30) {
+			t.Error("old window still protected after the new reader's first read")
+		}
+		deadline := time.Now().Add(2 * time.Second)
+		for tor.PieceState(45).Priority != torrent.PiecePriorityNone && time.Now().Before(deadline) {
+			time.Sleep(5 * time.Millisecond)
+		}
+		if got := tor.PieceState(45).Priority; got != torrent.PiecePriorityNone {
+			t.Errorf("old priority after the new reader's first read = %v, want None", got)
+		}
+	})
+	t.Run("same offset", func(t *testing.T) {
+		tor, c, _ := graceSetup(t)
+		c.CloseReader(keepReader(c, tor, 50, 8))
+		read(keepReader(c, tor, 50, 8))
+		c.evictNow()
+		if !windowIntact(c) {
+			t.Error("a reconnect at the same offset lost its window")
+		}
+	})
+	t.Run("bounded read", func(t *testing.T) {
+		tor, c, _ := graceSetup(t)
+		c.CloseReader(keepReader(c, tor, 50, 8))
+		b := keepReader(c, tor, 90, 2)
+		b.SetBounded(91 * keepPieceLen)
+		read(b)
+		if contains(ids(evictable(c)), 30) {
+			t.Error("a bounded reader's read ended the grace")
+		}
+	})
+}
+
+// A parked open-ended reader holds no window, so it takes no share of the cache.
+func TestParkedReaderTakesNoShare(t *testing.T) {
+	tor, c := newKeepCache(t, 40)
+	a := keepReader(c, tor, 50, 8)
+	b := keepReader(c, tor, 20, 8)
+	if x, y := a.getOffsetRange(); y-x != 17*keepPieceLen {
+		t.Fatalf("setup: window %d, want 17 pieces", y-x)
+	}
+	b.readerOff()
+	if x, y := a.getOffsetRange(); y-x != 34*keepPieceLen {
+		t.Errorf("window with the other reader parked = %d pieces, want 34", (y-x)/keepPieceLen)
+	}
+	b.readerOn()
+	if x, y := a.getOffsetRange(); y-x != 17*keepPieceLen {
+		t.Errorf("window after it resumed = %d pieces, want 17", (y-x)/keepPieceLen)
+	}
+	c.CloseReader(b)
+	if x, y := a.getOffsetRange(); y-x != 34*keepPieceLen {
+		t.Errorf("window after it closed = %d pieces, want 34", (y-x)/keepPieceLen)
+	}
+}
+
+// A bounded reader's engine read-ahead is cut to its remaining protected range (8 MiB floor), so
+// the stats tick does not hand it the open-ended share to fetch and evict.
+func TestBoundedReadaheadClampedToProtectedRange(t *testing.T) {
+	tor, c := newKeepCache(t, 200) // slack = 30 pieces
+	settings.BTsets.CacheSize = 200 * keepPieceLen
+	open := keepReader(c, tor, 50, 8)
+	b := keepReader(c, tor, 10, 8)
+	b.SetBounded(90 * keepPieceLen)
+	small := keepReader(c, tor, 10, 8)
+	small.SetBounded(12 * keepPieceLen)
+	c.AdjustRA(200 * keepPieceLen)
+	if got, want := b.Readahead(), 15*keepPieceLen; got != want { // 30 pieces / 2 bounded readers
+		t.Errorf("long bounded read-ahead = %d MiB, want %d", got>>20, want>>20)
+	}
+	if got, want := small.Readahead(), int64(minPerReaderReadahead); got != want {
+		t.Errorf("short bounded read-ahead = %d MiB, want the %d MiB floor", got>>20, want>>20)
+	}
+	if got := open.Readahead(); got != perReaderReadahead(200*keepPieceLen, 1) {
+		t.Errorf("open-ended read-ahead = %d, want the undivided share", got)
+	}
+}
+
+// The cleaner's tick drops the priorities of a window whose grace passed with no read to
+// trigger a clean pass, and not before.
+func TestGraceTickClearsPriorities(t *testing.T) {
+	tor, c, clk := graceSetup(t)
+	c.CloseReader(keepReader(c, tor, 50, 8))
+	c.clearIfGraceOver()
+	if got := tor.PieceState(45).Priority; got != torrent.PiecePriorityNormal {
+		t.Fatalf("priority dropped inside the grace: %v", got)
+	}
+	clk.advance(reconnectGrace)
+	c.clearIfGraceOver()
+	if got := tor.PieceState(45).Priority; got != torrent.PiecePriorityNone {
+		t.Errorf("priority after the grace and a tick = %v, want None", got)
+	}
 }

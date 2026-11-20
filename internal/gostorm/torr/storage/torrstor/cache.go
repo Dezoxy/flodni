@@ -68,11 +68,17 @@ type Cache struct {
 	// SetBounded. Atomics, so the write path can read them without muReaders (metrics.go).
 	nOpenEnded atomic.Int32
 	nBounded   atomic.Int32
+	// nActiveOpen counts the registered open-ended readers in use: the divisor of the protected
+	// window (windowDivisor). Reader.syncActive keeps it.
+	nActiveOpen atomic.Int32
 	// grace holds the windows of open-ended readers that closed in the last reconnectGrace
 	// (keep.go). Written under muReaders for writing, read under it for reading: no lock of its
 	// own. clock replaces time.Now for tests.
 	grace []graceRange
-	clock func() time.Time
+	// graceUntil is the latest end (UnixNano) of an entry in grace, 0 when none counts: the
+	// cleaner's tick clears priorities once it has passed (clearIfGraceOver).
+	graceUntil atomic.Int64
+	clock      func() time.Time
 
 	isRemove     atomic.Bool
 	isClosed     atomic.Bool
@@ -189,6 +195,7 @@ func NewCache(capacity int64, storage *Storage) *Cache {
 				runRecovered("cleanPieces", ret.cleanPieces)
 			case <-tick.C:
 				runRecovered("sweepStranded", ret.sweepIfStranded)
+				runRecovered("clearIfGraceOver", ret.clearIfGraceOver)
 			}
 		}
 	})
@@ -350,6 +357,7 @@ func (c *Cache) closeNoWait() error {
 	c.readers = nil
 	c.pieces = nil
 	c.grace = nil
+	c.graceUntil.Store(0)
 	c.muReaders.Unlock()
 
 	if settings.BTsets.RemoveCacheOnDrop {
@@ -382,6 +390,10 @@ func (c *Cache) AdjustRA(readahead int64) {
 		perReader := perReaderReadahead(readahead, c.windowDivisor())
 		c.muReaders.RLock()
 		for r := range c.readers {
+			if r.bounded.Load() {
+				r.SetReadahead(r.clampBounded(perReader))
+				continue
+			}
 			r.SetReadahead(perReader)
 		}
 		c.muReaders.RUnlock()
@@ -585,7 +597,7 @@ func (c *Cache) scanEvictable() ([]*Piece, evictView) {
 	pieces := c.pieces
 	for r := range c.readers {
 		r.checkReader()
-		if r.isUse {
+		if r.inUse() {
 			ranges = append(ranges, r.getPiecesRange())
 		}
 		view.add(r.getReaderPiece(), !r.bounded.Load())
@@ -859,6 +871,10 @@ func (c *Cache) CloseReader(r *Reader) {
 	}
 	r.Close()
 	if _, ok := c.readers[r]; ok {
+		r.mu.Lock()
+		r.registered = false
+		r.syncActive()
+		r.mu.Unlock()
 		if r.bounded.Load() {
 			c.nBounded.Add(-1)
 		} else {
@@ -882,7 +898,7 @@ func (c *Cache) clearPriority() {
 	ranges := make([]Range, 0)
 	for r := range c.readers {
 		r.checkReader()
-		if r.isUse {
+		if r.inUse() {
 			ranges = append(ranges, r.getPiecesRange())
 		}
 	}
