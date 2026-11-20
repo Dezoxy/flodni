@@ -939,6 +939,70 @@ Not needed: upstream's season-pack name parsing (Flodni's), its shield and
 sign-in changes (Flodni has both, broader), and the commits for parts Flodni
 removed (UI, themes, macOS, music).
 
+## Where it hurts (after v2026.11.1)
+
+From two days of production metrics on one host and a code review of the
+read path. CPU is not the problem (0.06 cores on average). What hurts:
+
+- Confirmed playback stalls, about 70 a day. They cluster in the busy
+  evening hours, when the engine re-downloads pieces it had completed and
+  evicted (`flodni_readahead_refetched_bytes_total`: up to 27 GiB in one
+  hour, 20 to 160 MiB per pump stream reconnect).
+- Heap peaks of 5 to 8 GiB against about 3 GiB of configured caches.
+- Slow starts cannot be judged yet: about 98 % of the sessions in
+  `flodni_session_first_deep_read_seconds` are scans or analysis, and the
+  histogram stops at 10 s.
+
+The mechanism behind the refetch is in the code (designed, not yet
+measured): each open reader shrinks every reader's protected window at once
+(`capacity / readers`) while the engine's read-ahead is corrected only on the
+next tick, eviction takes the oldest `Accessed` first so unread read-ahead
+goes before pieces just read, and a pump reconnect or a per-read probe stream
+briefly leaves the window unprotected. Measurement comes before each change.
+
+1. **Say why a piece was evicted, a stream ended and a read stalled.** No
+   behaviour change. Add `flodni_engine_cache_evictions_total{zone,readers}`
+   (zone `behind`, `ahead_unread` or `no_reader`; readers `0`, `1`, `2+`),
+   `flodni_engine_stream_ends_total{reason}` (`eof`, `timeout`, `read_error`,
+   `cancel`), split the refetched bytes by an open-ended or bounded reader, add
+   an `origin` label to `flodni_read_stalls_total` (`evicted`: a piece in the
+   read span had completed before; `pump_behind`; `no_pump`; `swarm`), and
+   give `flodni_session_first_deep_read_seconds` a `confirmed` label, buckets
+   at 30, 60 and 120 s, and a sibling histogram of the time actually blocked
+   in reads before the first deep read. Read-only atomics, no engine lock.
+2. **Keep a playing stream's unread read-ahead in the engine cache.** Count
+   only open-ended readers in the protected-window divisor (a bounded reader
+   protects its own range), evict by class before age (behind a reader or
+   unrelated first, an open-ended reader's unread read-ahead last), and keep a
+   closed reader's window for about 2 s so a reconnect inherits it. An
+   ordering preference, not hard protection, so a full cache can still evict;
+   RAM only; lock order unchanged. A test evicts while a second reader
+   attaches. Judged on step 1: `zone="ahead_unread"` near 0 and refetch under
+   5 % of pump fill.
+3. **End a pump stream on idleness, not age.** The open-ended stream's
+   timeout counts from the stream's start; make it reset on progress so a
+   long play does not reconnect (and drop its window) on a timer. Extends the
+   idle-close tests; no tracker or wake change. Judged on
+   `flodni_engine_stream_ends_total{reason="timeout"}`.
+4. **Count what the engine cache really holds.** A partial piece allocates a
+   whole piece buffer on its first chunk but counts only written bytes toward
+   capacity, so a probe storm leaves many partial pieces outside eviction until
+   the stranded sweep. Count a partial piece at its full length, cap the
+   read-ahead cache's idle buffer pool at a quarter of its budget, and add a
+   gauge of allocated piece-buffer bytes. Judged on the heap peak. The
+   deployment side (a lower `GOGC`, a `GOMEMLIMIT` near the real need) goes in
+   the README's tuning notes, not in code.
+
+Needs the owner's decision, not ordered yet:
+
+- A second reader on a playing file (another viewer, or a probe) gets one
+  engine stream per FUSE read today. Is a second viewer first-class, with its
+  own lead, or kept as a probe with one reused reader?
+- Warm the first 16 MiB instead of 4 MiB for next episodes and recent adds,
+  if step 1 shows confirmed starts waiting past the warm head. Costs warmup
+  quota.
+- A smaller engine cache for an unconfirmed open (scans and probes).
+
 ## Done
 
 - 2026-11-11, trim step 1: telemetry, the update check, the MCP server and
