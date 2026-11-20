@@ -12,7 +12,7 @@ replace (
 require (
 	github.com/anacrolix/dht/v2 v2.24.0
 	github.com/anacrolix/log v0.17.1-0.20260908045853-8c4d2cc1c9e2
-	github.com/anacrolix/missinggo/v2 v2.11.0
+	github.com/anacrolix/missinggo/v2 v2.12.0
 	github.com/anacrolix/publicip v0.3.1
 	github.com/anacrolix/torrent v1.55.0
 	github.com/cespare/xxhash/v2 v2.3.0
@@ -21,7 +21,7 @@ require (
 	github.com/pkg/errors v0.9.1
 	github.com/wlynxg/anet v0.0.5
 	go.etcd.io/bbolt v1.5.0
-	golang.org/x/exp v0.0.0-20261113113407-e3970619a1a4
+	golang.org/x/exp v0.0.0-20261120182113-8801fbdfac81
 	golang.org/x/sys v0.50.0
 	golang.org/x/time v0.16.0
 	modernc.org/sqlite v1.62.0
