@@ -981,11 +981,14 @@ briefly leaves the window unprotected. Measurement comes before each change.
    RAM only; lock order unchanged. A test evicts while a second reader
    attaches. Judged on step 1: `zone="ahead_unread"` near 0 and refetch under
    5 % of pump fill.
-3. **End a pump stream on idleness, not age.** The open-ended stream's
+3. **End a pump stream on idleness, not age.** [FINISHED] The open-ended
+   stream's
    timeout counts from the stream's start; make it reset on progress so a
    long play does not reconnect (and drop its window) on a timer. Extends the
    idle-close tests; no tracker or wake change. Judged on
-   `flodni_engine_stream_ends_total{reason="timeout"}`.
+   `flodni_engine_stream_ends_total{reason="timeout"}`. Built (#276): one
+   timer per open-ended GET, reset on every engine read that returned bytes;
+   bounded ranges and HEAD keep the absolute deadline.
 4. **Count what the engine cache really holds.** A partial piece allocates a
    whole piece buffer on its first chunk but counts only written bytes toward
    capacity, so a probe storm leaves many partial pieces outside eviction until

@@ -185,6 +185,23 @@ func newStreamContext(parent context.Context, d time.Duration, idle bool) (conte
 	}
 }
 
+// serveStream serves the content of engine under the stream's deadline and counts how an
+// open-ended GET ended. An open-ended GET (the pump's stream) ends when the engine delivers
+// nothing for timeout; a bounded range or a HEAD ends that long after it started. engine builds
+// the context-bound engine reader; its context is the one the deadline cancels.
+func serveStream(resp http.ResponseWriter, req *http.Request, filePath string, modTime time.Time,
+	timeout time.Duration, bounded bool, engine func(context.Context) io.ReadSeeker) {
+	openEnded := !bounded
+	ctx, idle, stop := newStreamContext(req.Context(), timeout, openEnded && req.Method == http.MethodGet)
+	defer stop()
+	req = req.WithContext(ctx)
+	rec := &endRecorder{}
+	wrappedResp := &contextResponseWriter{ResponseWriter: resp, ctx: ctx}
+	content := &recordingContent{ReadSeeker: &progressContent{ReadSeeker: engine(ctx), dl: idle}, rec: rec}
+	serveFileContent(wrappedResp, req, filePath, modTime, streamContent(content, req.Header.Get("Range")))
+	countStreamEnd(openEnded, req.Method, rec, context.Cause(ctx))
+}
+
 // progressContent resets the idle deadline on every read that returned bytes. It wraps the
 // engine reader, below any buffer, so the deadline follows what the engine delivered.
 type progressContent struct {
@@ -359,22 +376,9 @@ func (t *Torrent) Stream(fileID int, req *http.Request, resp http.ResponseWriter
 	if req.Header.Get("Range") != "" {
 		resp.Header().Set("Accept-Ranges", "bytes")
 	}
-	// An open-ended GET (the pump's stream) ends when the engine delivers nothing for the stream
-	// timeout; a bounded range or a HEAD ends that long after it started.
-	ctx, idle, stop := newStreamContext(req.Context(), time.Duration(streamTimeout)*time.Second,
-		!bounded && req.Method == http.MethodGet)
-	defer stop()
-	// Update request with new context
-	req = req.WithContext(ctx)
-	// Handle client disconnections better
-	rec := &endRecorder{}
-	wrappedResp := &contextResponseWriter{
-		ResponseWriter: resp,
-		ctx:            ctx,
-	}
-	serveFileContent(wrappedResp, req, file.Path(), time.Unix(t.Timestamp, 0),
-		streamContent(&recordingContent{ReadSeeker: &progressContent{ReadSeeker: &ctxReader{Reader: reader, ctx: ctx}, dl: idle}, rec: rec}, req.Header.Get("Range")))
-	countStreamEnd(!bounded, req.Method, rec, context.Cause(ctx))
+	serveStream(resp, req, file.Path(), time.Unix(t.Timestamp, 0),
+		time.Duration(streamTimeout)*time.Second, bounded,
+		func(ctx context.Context) io.ReadSeeker { return &ctxReader{Reader: reader, ctx: ctx} })
 
 	if sets.BTsets.EnableDebug {
 		if clerr != nil {
