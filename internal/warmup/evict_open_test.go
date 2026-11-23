@@ -312,3 +312,26 @@ func TestEvictToIgnoresTheOpenHook(t *testing.T) {
 		t.Fatalf("EvictTo = %+v: the oldest file should go whether open or not", res)
 	}
 }
+
+// Open files hold their space, so they must not also let new heads grow the cache past
+// the quota: with no evictable file left, a new head is not created.
+func TestNewHeadRespectsTheQuotaWhenOpenFilesHoldIt(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		open func(FileKey) bool
+		want bool
+	}{
+		{"every file open", func(FileKey) bool { return true }, false},
+		{"one file open, the others evictable", func(k FileKey) bool { return k.Hash == "a" }, true},
+		{"no hook", nil, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			d := openEnv(t)
+			setIsOpen(t, tc.open)
+			d.processWrite("n", 1, make([]byte, 4096), 0)
+			if got := exists(d.filePath("n", 1)); got != tc.want {
+				t.Fatalf("new head exists = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}

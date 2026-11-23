@@ -791,11 +791,19 @@ func (d *DiskWarmupCache) processWrite(hash string, fileID int, data []byte, off
 	// whether eviction ran, never the accounting.
 	// Only a chunk at offset 0 can create the file, so only it may make room for it.
 	if _, err := os.Stat(path); off == 0 && os.IsNotExist(err) {
+		var openSkipped bool
 		d.mu.Lock()
-		evicted, _ := d.enforceQuotaLocked(FileSize, evictOpts{
-			exclude: FileKey{hash, fileID}, trigger: TriggerHeadCreate})
+		evicted, room := d.enforceQuotaLocked(FileSize, evictOpts{
+			exclude: FileKey{hash, fileID}, trigger: TriggerHeadCreate, openSkipped: &openSkipped})
 		d.mu.Unlock()
 		reportEvictions(evicted) // after the locks: it may write to a database
+		// Open files cannot be evicted, so a new head must not grow the cache past the
+		// quota beside them. Later chunks find no file and are dropped; the reader is
+		// served from the engine.
+		if !room && openSkipped {
+			logf.Info(fmt.Sprintf("[DiskWarmup] head not cached: open files hold the quota (file %d)", fileID), "hash", hash, "file", fileID)
+			return
+		}
 	}
 
 	started, completed := d.writeHeadLocked(path, off, data)

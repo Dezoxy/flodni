@@ -118,6 +118,8 @@ type evictOpts struct {
 	// and walks the disk even when the running total looks low.
 	request bool
 	limit   int64
+	// Set when the check skipped a file because a handle holds it open.
+	openSkipped *bool
 }
 
 // evictLog writes one JSON line per evicted file. The prefix is stable so a log
@@ -298,6 +300,9 @@ func (d *DiskWarmupCache) enforceQuotaLocked(needed int64, opts evictOpts) (evic
 		// the check ends over the quota, as it does when every candidate is protected.
 		// A request (EvictTo) is the operator's call and does not ask.
 		if !opts.request && IsOpen != nil && u.key.FileIdx >= 0 && IsOpen(u.key) {
+			if opts.openSkipped != nil {
+				*opts.openSkipped = true
+			}
 			continue
 		}
 		u.played = IsPlayed != nil && u.key.FileIdx >= 0 && IsPlayed(u.key)
