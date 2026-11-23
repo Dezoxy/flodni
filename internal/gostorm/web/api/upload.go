@@ -67,6 +67,7 @@ func torrentUpload(c *gin.Context) {
 		data = form.Value["data"][0]
 	}
 	var tor *torr.Torrent
+	var addErr error
 	for name, file := range form.File {
 		log.TLogln("add .torrent", name)
 
@@ -86,6 +87,7 @@ func torrentUpload(c *gin.Context) {
 		tor, err = addTorrentToEngine(spec, title, poster, data, category)
 		if err != nil {
 			log.TLogln("error upload torrent:", err)
+			addErr = err
 			continue
 		}
 
@@ -112,6 +114,14 @@ func torrentUpload(c *gin.Context) {
 		}()
 
 		break
+	}
+	if tor == nil {
+		if addErr != nil {
+			c.AbortWithError(http.StatusInternalServerError, addErr)
+			return
+		}
+		c.AbortWithError(http.StatusBadRequest, errors.New("no usable .torrent file in the upload"))
+		return
 	}
 	c.JSON(200, tor.Status())
 }
