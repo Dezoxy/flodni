@@ -362,10 +362,12 @@ marked "every mode". Read these before the first start of v0.3.0:
   saved: 200 when it is, 504 when no metadata arrived before the timeout (the
   optional `metadata_wait`, in seconds, bounds it), 500 when the save failed (a
   JSON `error` says which). Without `save_to_db` it answers at once, as before.
-  `POST /torrent/upload` with `save` still saves in the background. The library
-  add sends its `metadata_wait` on, so a dead swarm answers 504 "no metadata"
-  within about that wait plus 5 s, as before, not 502; the add call is capped at
-  2 minutes (it was 30 s per call before the engine waited for the record).
+  `POST /torrent/upload` with `save` still saves in the background, and its
+  body is capped at 32 MiB: a larger one answers 413 and adds nothing. The
+  library add sends its `metadata_wait` on, so a dead swarm answers 504 "no
+  metadata" within about that wait plus 5 s, as before, not 502; the add call is
+  capped at 2 minutes (it was 30 s per call before the engine waited for the
+  record).
 - The engine answers 404, not a 307 redirect, to `POST /torrents/` with a
   trailing slash, in every mode.
 - Scoped mode, once chosen: both ports deny by default, a wrong bearer is
