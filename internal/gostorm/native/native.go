@@ -782,14 +782,43 @@ func (c *NativeClient) ListTorrents() ([]TorrentStats, error) {
 }
 
 // PipeResponseWriter bridges GoStorm's HTTP responses to our Go pipe.
+//
+// Only a 2xx response puts bytes in the pipe. torr.Stream answers a refusal with error text
+// (http.NotFound, a 403, the 416 http.ServeContent gives a range past the end), and that text
+// must never reach a reader as file bytes. On a non-2xx status the pipe is closed with an error
+// naming the status, so the reader gets that error instead of a short read; the stream
+// goroutine's deferred Close keeps it, as io.Pipe keeps the first close error. As in net/http,
+// the first WriteHeader wins and a Write with no WriteHeader before it is an implicit 200.
+// Like any http.ResponseWriter it is used from one goroutine.
 type PipeResponseWriter struct {
 	writer *io.PipeWriter
 	header http.Header
+	status int   // 0 until the first WriteHeader or Write
+	err    error // the status error, set when the first status was not 2xx
 }
 
-func (w *PipeResponseWriter) Header() http.Header         { return w.header }
-func (w *PipeResponseWriter) Write(p []byte) (int, error) { return w.writer.Write(p) }
-func (w *PipeResponseWriter) WriteHeader(statusCode int)  {}
+func (w *PipeResponseWriter) Header() http.Header { return w.header }
+
+func (w *PipeResponseWriter) Write(p []byte) (int, error) {
+	if w.status == 0 {
+		w.WriteHeader(http.StatusOK)
+	}
+	if w.err != nil {
+		return 0, w.err
+	}
+	return w.writer.Write(p)
+}
+
+func (w *PipeResponseWriter) WriteHeader(statusCode int) {
+	if w.status != 0 {
+		return
+	}
+	w.status = statusCode
+	if statusCode < 200 || statusCode > 299 {
+		w.err = fmt.Errorf("stream response status %d %s", statusCode, http.StatusText(statusCode))
+		_ = w.writer.CloseWithError(w.err)
+	}
+}
 
 // convertStatusToStats maps internal TorrentStatus to our local TorrentStats struct
 func convertStatusToStats(st *state.TorrentStatus) *TorrentStats {
