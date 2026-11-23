@@ -1064,6 +1064,54 @@ to v2026.11.3). Designed, not built; measurement comes before each change.
    since v2026.11.3 down by `flodni_engine_cache_evictions_total` zone and
    readers before changing eviction again.
 
+## Ideas from upstream v1.11.16 to v1.13.1 (after v2026.11.3)
+
+From a review of upstream Tiramisu's release notes v1.11.16 to v1.13.1
+(2026-11-17 to 2026-11-22) against Flodni's tree. Not ordered against the
+previous section yet; each step first checks what Flodni already does. Designed,
+not built.
+
+1. **Keep the inode map when the source folder is empty or partly mounted.**
+   `InodeMap.saveToDB` (`internal/vfs/inodemap.go`) deletes every row before
+   it rewrites the snapshot, with no guard against an empty or much smaller
+   map, so a start against an unmounted or half-mounted volume can renumber
+   every file. Refuse the rewrite when the map shrinks past a threshold, log
+   it and keep the stored rows. A test saves an empty map over a full one.
+   Upstream v1.12.0.
+2. **Pause other torrents' speculative reads when a playback risks a stall.**
+   Warm fills, catch-up and next-episode warming yield while a confirmed
+   session's buffered-ahead is below a floor, and resume when it recovers.
+   Complements step 2 of the previous section, which paces a second reader on
+   the same file. Judged on `pump_behind` stalls while warm work runs.
+   Upstream v1.13.1.
+3. **Warm cache eviction by last use, never under an open handle; keep
+   complete tails across restarts.** Check Flodni's warm cache against both
+   first; build only what is missing. Upstream v1.13.1.
+4. **Release a torrent only when nothing references it.** Removing one
+   episode of a season pack must not drop the pack while another stub or
+   record still cites it. Check Flodni's removal path; add the guard and a
+   test if it is missing. Upstream v1.12.01.
+5. **Check the native stream path for error responses read as file data.**
+   Upstream v1.12.03 turned non-2xx stream responses into read errors.
+   Flodni's native path appears to make no HTTP calls; confirm, and close the
+   step if so.
+
+Not taken: HTTPS on the panel port, MCP tokens, peer GeoIP, the UI changes
+and the move of settings into SQLite. Flodni has its own records and scoped
+auth.
+
+Needs investigation, not ordered: **is it worth moving to Tentacle?** Upstream
+v1.13.0 replaces GoStorm with Tentacle, a native engine built around FUSE, and
+removes the `:8090` API. Its notes claim, from a simulator, a 2.4x faster
+cached-read p95 and no reads stuck over 15 s on multi-file torrents (2 to 6 a
+run before), with sustained download on par. Before any decision, answer:
+how much of Tentacle is new code versus a reshaped GoStorm; whether it keeps
+the vendored anacrolix engine and Flodni's private-torrent guarantees (hard
+rule 3); what Flodni's own fixes since the fork would have to be re-done; how
+its read path and eviction compare with Flodni's on the evidence above; and
+whether a port is a cherry-pick, a rebase or a rewrite. The answer is an ADR,
+not code.
+
 ## Done
 
 - 2026-11-11, trim step 1: telemetry, the update check, the MCP server and
