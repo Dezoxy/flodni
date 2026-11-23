@@ -87,6 +87,13 @@ const TriggerRequest = "request"
 // to oldest first.
 var IsPlayed func(FileKey) bool
 
+// IsOpen, if set, reports whether a media-server handle holds the file open now. A quota
+// check never picks an open file as a victim (EvictTo, an operator's request, and the
+// removal of a torrent do not ask). Like IsPlayed it runs under the cache's quota lock
+// and tailMu, so it must read memory only, never block, never take a lock a reader
+// holds while it calls the cache, and never call a cache writer. Nil: no file is open.
+var IsOpen func(FileKey) bool
+
 // OnEvicted, if set, receives the files one quota check evicted. It runs after the
 // cache's locks are released, so it may write to a database.
 var OnEvicted func([]Eviction)
@@ -111,6 +118,8 @@ type evictOpts struct {
 	// and walks the disk even when the running total looks low.
 	request bool
 	limit   int64
+	// Set when the check skipped a file because a handle holds it open.
+	openSkipped *bool
 }
 
 // evictLog writes one JSON line per evicted file. The prefix is stable so a log
@@ -285,6 +294,15 @@ func (d *DiskWarmupCache) enforceQuotaLocked(needed int64, opts evictOpts) (evic
 			}
 		}
 		if u.key == opts.exclude || (opts.protect != nil && u.key.FileIdx >= 0 && opts.protect(u.key)) {
+			continue
+		}
+		// A file a handle holds open is skipped, not an error: with only open files left
+		// the check ends over the quota, as it does when every candidate is protected.
+		// A request (EvictTo) is the operator's call and does not ask.
+		if !opts.request && IsOpen != nil && u.key.FileIdx >= 0 && IsOpen(u.key) {
+			if opts.openSkipped != nil {
+				*opts.openSkipped = true
+			}
 			continue
 		}
 		u.played = IsPlayed != nil && u.key.FileIdx >= 0 && IsPlayed(u.key)

@@ -377,6 +377,7 @@ func (h *MkvHandle) nativePump(ctx context.Context, pumpReader streamReader, sta
 			h.mu.Lock()
 			h.hash = hash
 			h.fileID = fileID
+			h.holdFile(hash, fileID)
 			h.mu.Unlock()
 			logger.Info(fmt.Sprintf("[Pump] Late resolution success: %s", hash[:8]), "hash", hash[:8])
 		} else {

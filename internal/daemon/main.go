@@ -362,6 +362,7 @@ func Run() {
 	fileStates.setProtectionDays(gc().PlayedProtectionDays)
 	fileStates.logf = flog.Logf(logger)
 	warmup.IsPlayed = fileStates.IsPlayed
+	installOpenFileHook() // warmup.IsOpen: quota eviction skips a file a handle holds open
 	warmup.OnEvicted = fileStates.OnEvicted
 	// Warm on add (idle until warm_on_add is set): a removal cancels it before the
 	// torrent's records are forgotten.

@@ -765,6 +765,7 @@ func (n *VirtualMkvNode) Open(ctx context.Context, flags uint32) (fs.FileHandle,
 	if isNative {
 		h.hash = finalHash
 		h.fileID = fileIdx
+		h.holdFile(finalHash, fileIdx) // before the handle can read: quota eviction skips the file while it is open
 		// media.stop only knows the path; keep what EnsureTail needs to reach the file.
 		tailFillTargets.Store(n.vMeta.Path, tailFillTarget{hash: finalHash, fileID: fileIdx, size: n.vMeta.Size})
 		coldHeadReady := headReady

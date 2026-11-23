@@ -1848,6 +1848,15 @@ a head write waits for it; the daemon logs a walk that takes more than 50 ms.
   at recency) and does not argue for this switch. Not measured yet: it has not
   run against real plays.
 
+- **Open files are skipped (built).** A quota eviction never takes a file a
+  media-server handle holds open; the files are counted at open and given back
+  at release. When open files leave no room, a new head is not cached and its
+  reader is served from the engine, so open files cannot grow the cache past
+  the quota with new heads. An operator's `warmup evict` request, a torrent's
+  removal and the removal of a corrupt head do not ask: a file removed while
+  read is a cache miss for the reader, which then reads from the engine, never
+  an error or partial bytes.
+
 - **Played** means a playback confirmed by Plex's play webhook, never a
   scanner's read. A webhook marks at most one file: a movie by file name,
   IMDB id or a unique title (and year); an episode by file name, or by a
