@@ -128,7 +128,8 @@ jobs:
             rhysd/actionlint:1.7.12@sha256:b1934ee5f1c509618f2508e6eb47ee0d3520686341fec936f3b79331f9315667 -color
       - uses: zizmorcore/zizmor-action@bd12b495c90993a4301c73398142281a61499af3 # v0.9.0
         with:
-          version: "1.32.0"
+          # No version input: the default reads a hash-locked file inside the pinned action,
+          # so zizmor moves with the action's SHA. A version newer than the action has no lock.
           advanced-security: false # fail this job on findings instead of only uploading them
 
   dependency-scan:
