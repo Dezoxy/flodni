@@ -131,7 +131,7 @@ func TestHandlePrometheus(t *testing.T) {
 		"flodni_reader_budget_readahead_overshoot_bytes_total", "flodni_reader_budget_attributed_fill_bytes_total",
 		"flodni_playback_webhooks_received_total", "flodni_playback_webhook_match_rule_total", "flodni_warm_fills_total",
 		"flodni_playback_webhook_last_timestamp_seconds", "flodni_unconfirmed_read_last_session_timestamp_seconds", "flodni_warning",
-		"flodni_torrent_idle_closes_total", "flodni_torrent_reopens_total", "flodni_read_stalls_total",
+		"flodni_torrent_idle_closes_total", "flodni_torrent_reopens_total", "flodni_read_stalls_total", "flodni_confirmed_playback_seconds_total",
 		"flodni_keepalive_releases_total", "flodni_keepalive_evicted_total", "flodni_keepalive_held_torrents", "flodni_reannounce_total", "flodni_private_torrents_early_announce",
 		"flodni_wake_refused_total",
 		"flodni_warm_fill_bytes_total", "flodni_warm_cache_failures_total", "flodni_warm_queue_files", "flodni_warm_paused",
