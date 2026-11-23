@@ -20,8 +20,43 @@ env:
   IMAGE: ghcr.io/dezoxy/flodni
 
 jobs:
+  # Docs-only pull requests skip the Go build, the image and the end-to-end jobs. A
+  # workflow-level path filter would leave those required checks unreported and block the
+  # pull request; a job skipped by its `if` reports as passed. The filter fails open: any
+  # event but a pull request, a failed lookup or a failed job here runs everything
+  # (`!= 'false'` is true for an empty output). docs.yml checks the docs on every change.
+  changes:
+    name: Changed paths
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      pull-requests: read
+    outputs:
+      code: ${{ steps.filter.outputs.code }}
+    steps:
+      - name: Code or docs only
+        id: filter
+        env:
+          GH_TOKEN: ${{ github.token }}
+          EVENT: ${{ github.event_name }}
+          PR: ${{ github.event.pull_request.number }}
+          REPO: ${{ github.repository }}
+        run: |
+          code=true
+          if [ "$EVENT" = "pull_request" ] &&
+            files=$(gh api --paginate "repos/$REPO/pulls/$PR/files" --jq '.[].filename') &&
+            [ -n "$files" ] &&
+            ! printf '%s\n' "$files" | grep -qvE '^docs/|\.md$'; then
+            code=false
+          fi
+          echo "docs only: $([ "$code" = false ] && echo yes || echo no)"
+          echo "code=$code" >> "$GITHUB_OUTPUT"
+
   build-test:
     name: Build and test
+    needs: changes
+    if: ${{ !cancelled() && needs.changes.outputs.code != 'false' }}
     runs-on: ubuntu-latest
     timeout-minutes: 25
     # The image's own build stage: the same Go and Debian packages as docker/Dockerfile,
@@ -147,7 +182,8 @@ jobs:
     # Image and end-to-end jobs run on pull requests and release tags only. A push to
     # main is a squash of a pull request whose identical tree already passed them (the
     # merge flow checks the tree), and a release tag runs them again before publishing.
-    if: github.event_name == 'pull_request' || startsWith(github.ref, 'refs/tags/v')
+    needs: changes
+    if: ${{ !cancelled() && needs.changes.outputs.code != 'false' && (github.event_name == 'pull_request' || startsWith(github.ref, 'refs/tags/v')) }}
     # Builds the code under test with no write permission and no secret, beside the checks.
     # The end-to-end matrix starts as soon as the images are saved here; the smoke test and
     # the scan (job "image") run beside it on the same images.
@@ -208,8 +244,8 @@ jobs:
   # the end-to-end jobs run.
   image:
     name: Image (build, smoke test, scan)
-    needs: image-build
-    if: ${{ always() && (github.event_name == 'pull_request' || startsWith(github.ref, 'refs/tags/v')) }}
+    needs: [changes, image-build]
+    if: ${{ always() && needs.changes.outputs.code != 'false' && (github.event_name == 'pull_request' || startsWith(github.ref, 'refs/tags/v')) }}
     runs-on: ubuntu-latest
     timeout-minutes: 20
     permissions:
@@ -305,8 +341,8 @@ jobs:
   # The one stable name to require: matrix job names change with the variant list.
   e2e-result:
     name: End-to-end
-    needs: e2e
-    if: ${{ always() && (github.event_name == 'pull_request' || startsWith(github.ref, 'refs/tags/v')) }}
+    needs: [changes, e2e]
+    if: ${{ always() && needs.changes.outputs.code != 'false' && (github.event_name == 'pull_request' || startsWith(github.ref, 'refs/tags/v')) }}
     runs-on: ubuntu-latest
     timeout-minutes: 5
     permissions: {}
