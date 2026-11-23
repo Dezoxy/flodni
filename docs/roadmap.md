@@ -766,9 +766,10 @@ designed, not built.
     link-local address, and checks the dialled IP so DNS rebinding does not get
     around it. It is opt-in because a link to a LAN indexer is a legitimate
     use. Designed, not built.
-22. **A body cap on `/torrent/upload`.** A `MaxBytesReader` on the upload route,
-    with a handler test that drives the real upload and add handlers together.
-    Designed, not built.
+22. **A body cap on `/torrent/upload`.** [FINISHED] Built (#293): a
+    `MaxBytesReader` at 32 MiB on the upload route, with a handler test that
+    drives the real upload and add handlers together. An upload with no usable
+    torrent answers 400 instead of panicking (#295).
 
 ## Authentication (v0.3.0)
 
@@ -1109,12 +1110,13 @@ designed until it says built.
    floor (pause below 10 s of runway, resume at 20 s) would close that gap.
    Open. Upstream v1.13.1.
 3. **Warm cache eviction by last use, never under an open handle; keep
-   complete tails across restarts.** Checked 2026-11-23, all three partly:
-   eviction takes never-played files first, then the oldest write; last use
-   needs `warmup_eviction_order=read` and is lost at a restart. Eviction
-   closes a file's handle with no check for a reader; whether a live read then
-   fails is not confirmed. Complete tails survive a restart in index mode
-   only. Open. Upstream v1.13.1.
+   complete tails across restarts.** The open-handle part is built (#294):
+   quota eviction skips a file a handle holds open, a new head is not cached
+   when open files hold the quota, and a read racing a close is a cache miss.
+   The other two are open, checked 2026-11-23: eviction takes never-played
+   files first, then the oldest write; last use needs
+   `warmup_eviction_order=read` and is lost at a restart. Complete tails
+   survive a restart in index mode only. Upstream v1.13.1.
 4. **Release a torrent only when nothing references it.** [FINISHED] Already
    built: `dropTorrentIfUnused` (`internal/library/manager.go`) keeps a torrent
    while any stub links to it or a stub cannot be read. It checks stubs on
@@ -1567,3 +1569,7 @@ read of upstream v1.12.03 and v1.13.1 on 2026-11-23, nothing run; recorded in
   #290): stalls labelled by reader role, a promotion-reason log line, a
   confirmed watch-time counter, an inode map that survives a failed load, and
   no engine error text read as file data.
+- 2026-11-23, durable records step 22 and the open-handle part of upstream
+  step 3 (#293 to #295, released in v2026.11.5): a 32 MiB upload body cap, a
+  400 for an upload with no usable torrent, quota eviction that skips open
+  files, and a warm read racing a close served as a cache miss.
