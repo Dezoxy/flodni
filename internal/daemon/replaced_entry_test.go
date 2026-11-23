@@ -154,7 +154,7 @@ func TestInvalidationLeavesNothingToResume(t *testing.T) {
 			if _, ok := lastClosed.Load(path); ok {
 				t.Fatal("invalidation left a resumable session")
 			}
-			ttffRead(path, srcWarmupHead, time.Millisecond, 10, 0)
+			ttffRead(path, srcWarmupHead, time.Millisecond, 10, 0, stallRoleSecond)
 			if _, ok := sessions.Load(path); ok {
 				t.Fatal("a read after invalidation resumed a session on the removed stub")
 			}

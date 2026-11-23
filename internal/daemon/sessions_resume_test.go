@@ -13,13 +13,13 @@ func TestReadAfterCloseOpensLinkedSession(t *testing.T) {
 	const path = "/m/pause.mkv"
 	ttffRegister(path, 100<<20, "h", 3, true, false)
 	old := mustSession(t, path)
-	ttffRead(path, srcFetchBlock, time.Millisecond, 4096, 0)
+	ttffRead(path, srcFetchBlock, time.Millisecond, 4096, 0, stallRoleSecond)
 	old.closeSession()
 	if _, ok := sessions.Load(path); ok {
 		t.Fatal("closed session still registered")
 	}
 
-	ttffRead(path, srcFetchBlock, time.Millisecond, 2<<20, 50<<20)
+	ttffRead(path, srcFetchBlock, time.Millisecond, 2<<20, 50<<20, stallRoleSecond)
 	ns := mustSession(t, path)
 	if ns == old || ns.resumedFrom != old.id || ns.id == old.id {
 		t.Fatalf("resumed session not linked: old=%d new=%d from=%d", old.id, ns.id, ns.resumedFrom)
@@ -35,7 +35,7 @@ func TestReadAfterCloseOpensLinkedSession(t *testing.T) {
 
 	// A second pause links to the second session, not the first.
 	ns.closeSession()
-	ttffRead(path, srcFetchBlock, time.Millisecond, 10, 0)
+	ttffRead(path, srcFetchBlock, time.Millisecond, 10, 0, stallRoleSecond)
 	if third := mustSession(t, path); third.resumedFrom != ns.id {
 		t.Fatalf("third from %d, want %d", third.resumedFrom, ns.id)
 	}
@@ -51,11 +51,11 @@ func TestProbeReleaseDoesNotOpenSession(t *testing.T) {
 	if _, ok := lastClosed.Load(path); ok {
 		t.Fatal("probe release left a resumable session")
 	}
-	ttffRead(path, srcWarmupHead, time.Millisecond, 10, 0)
+	ttffRead(path, srcWarmupHead, time.Millisecond, 10, 0, stallRoleSecond)
 	if _, ok := sessions.Load(path); ok {
 		t.Fatal("read with nothing to resume opened a session")
 	}
-	ttffRead("/m/never.mkv", srcWarmupHead, time.Millisecond, 10, 0)
+	ttffRead("/m/never.mkv", srcWarmupHead, time.Millisecond, 10, 0, stallRoleSecond)
 	if _, ok := sessions.Load("/m/never.mkv"); ok {
 		t.Fatal("read on an unknown path opened a session")
 	}

@@ -163,9 +163,9 @@ func TestHandlePrometheus(t *testing.T) {
 		`flodni_torrent_idle_closes_total{confirmed="false"}`,
 		`flodni_torrent_reopens_total{confirmed="true"}`,
 		`flodni_torrent_reopens_total{confirmed="false"}`,
-		`flodni_read_stalls_total{confirmed="true",cause="seek",origin="evicted"}`,
-		`flodni_read_stalls_total{confirmed="true",cause="playback",origin="evicted"}`,
-		`flodni_read_stalls_total{confirmed="false",cause="seek",origin="evicted"}`,
+		`flodni_read_stalls_total{confirmed="true",cause="seek",origin="evicted",role="primary"}`,
+		`flodni_read_stalls_total{confirmed="true",cause="playback",origin="evicted",role="primary"}`,
+		`flodni_read_stalls_total{confirmed="false",cause="seek",origin="evicted",role="primary"}`,
 		`flodni_keepalive_releases_total{reason="stop"}`,
 		`flodni_keepalive_releases_total{reason="ceiling"}`,
 		`flodni_keepalive_evicted_total`,
@@ -182,7 +182,7 @@ func TestHandlePrometheus(t *testing.T) {
 		`flodni_engine_db_write_errors_total{op="rem"}`,
 		`flodni_engine_db_write_errors_total{op="clear"}`,
 		`flodni_keepalive_held_torrents`,
-		`flodni_read_stalls_total{confirmed="false",cause="playback",origin="evicted"}`,
+		`flodni_read_stalls_total{confirmed="false",cause="playback",origin="evicted",role="primary"}`,
 		`flodni_unconfirmed_read_bytes_total`,
 		`flodni_unconfirmed_read_sessions_total{outcome="unconfirmed"}`,
 		`flodni_unconfirmed_read_sessions_total{outcome="confirmed_late"}`,
@@ -281,8 +281,8 @@ func closedCounts() map[string]int64 {
 func TestReadBytesCountedWithoutSession(t *testing.T) {
 	resetSessionState(t)
 	before := ttffStats.readBytes[srcWarmupTail].Load()
-	ttffRead("/m/none.mkv", srcWarmupTail, time.Millisecond, 4096, 0)
-	ttffRead("/m/none.mkv", srcWarmupTail, time.Millisecond, 0, 0) // a read of nothing adds none
+	ttffRead("/m/none.mkv", srcWarmupTail, time.Millisecond, 4096, 0, stallRoleSecond)
+	ttffRead("/m/none.mkv", srcWarmupTail, time.Millisecond, 0, 0, stallRoleSecond) // a read of nothing adds none
 	if got := ttffStats.readBytes[srcWarmupTail].Load() - before; got != 4096 {
 		t.Fatalf("bytes +%d, want 4096", got)
 	}

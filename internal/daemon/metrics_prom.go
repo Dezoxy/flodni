@@ -302,17 +302,19 @@ func collectPlaybackProm(w *promtext.Writer) {
 	w.Counter("flodni_wake_refused_total",
 		"Wakes the engine refused because it keeps no record of the torrent: one per handle at a read, one per open. Not a failed read and not a dead swarm; 0 from start.",
 		promSample(wakeRefusedCount.Load()))
-	stalls := make([]promtext.Sample, 0, 2*len(stallCauseNames)*numStallOrigins)
+	stalls := make([]promtext.Sample, 0, 2*len(stallCauseNames)*numStallOrigins*numStallRoles)
 	for _, conf := range []string{"true", "false"} {
 		for cause, name := range stallCauseNames {
 			for origin, oname := range stallOriginNames {
-				stalls = append(stalls, promSample(keepaliveCounters.stalls[confirmedIdx(conf == "true")][cause][origin].Load(),
-					lbl("confirmed", conf), lbl("cause", name), lbl("origin", oname)))
+				for role, rname := range stallRoleNames {
+					stalls = append(stalls, promSample(keepaliveCounters.stalls[confirmedIdx(conf == "true")][cause][origin][role].Load(),
+						lbl("confirmed", conf), lbl("cause", name), lbl("origin", oname), lbl("role", rname)))
+				}
 			}
 		}
 	}
 	w.Counter("flodni_read_stalls_total",
-		"Served reads that took longer than one second. Failed reads are not counted. confirmed as in flodni_torrent_idle_closes_total. cause is seek when the stall began after a non-sequential jump of the session's read position (the same jump the session seek count uses) and before the first read the read-ahead cache served after it, no more than 15 s after the jump; playback for every other stall. origin is what the engine was doing, checked in this order: evicted when a piece of the read's span completed again while the read ran (it had been evicted from the in-memory piece cache and came twice), pump_behind when a pump exists for the session and its fill offset is at or below the read offset, no_pump when the session has no pump, swarm for everything else (a pump ahead of the read, a slow swarm). A read of a file the session has no file index for is never evicted. Present from 0 for every confirmed, cause and origin combination; summed over origin it is the count the pair had before origin.",
+		"Served reads that took longer than one second. Failed reads are not counted. confirmed as in flodni_torrent_idle_closes_total. cause is seek when the stall began after a non-sequential jump of the session's read position (the same jump the session seek count uses) and before the first read the read-ahead cache served after it, no more than 15 s after the jump; playback for every other stall. origin is what the engine was doing, checked in this order: evicted when a piece of the read's span completed again while the read ran (it had been evicted from the in-memory piece cache and came twice), pump_behind when a pump exists for the session and its fill offset is at or below the read offset, no_pump when the session has no pump, swarm for everything else (a pump ahead of the read, a slow swarm). A read of a file the session has no file index for is never evicted. role is primary when the handle that served the read was its file's primary (the one the pump follows) when the read finished, second for every other handle, including one on a file with no primary, and for a probe read. Present from 0 for every confirmed, cause, origin and role combination; summed over role it is the count the combination had before role, summed over origin the count the pair had before origin.",
 		stalls...)
 	w.Counter("flodni_reannounce_total",
 		"Tracker re-announces actually sent for a torrent with a confirmed playback whose swarm starved (fewer than 3 connected peers for 60 s with a read stall, a hung read or a short, shrinking buffer), by reason (starved) and private (true for a private torrent, sent only when its tracker's min interval allowed it). Present from 0.",

@@ -358,7 +358,7 @@ func (h *MkvHandle) readInner(fuseCtx context.Context, dest []byte, off int64) (
 		if !h.isPrimaryHandle.Load() && !probe {
 			if val, ok := app.playbackRegistry.Load(h.path); ok {
 				if pbs, ok := val.(*PlaybackState); ok && (pbs.GetStatus() || pbs.IsInferredPlayback()) {
-					becomePrimary(h)
+					becomePrimary(h, promoteSeekDuringPlayback, off, h.seqAdvances.Load())
 				}
 			}
 		}
@@ -437,7 +437,7 @@ func (h *MkvHandle) readInner(fuseCtx context.Context, dest []byte, off int64) (
 				h.lastLen = n
 				h.lastTime = now
 				h.mu.Unlock()
-				ttffRead(h.path, srcWarmupHead, time.Since(now), n, off)
+				ttffRead(h.path, srcWarmupHead, time.Since(now), n, off, stallRoleOf(h, probe))
 				return fuse.ReadResultData(dest[:n]), 0
 			}
 		}
@@ -457,7 +457,7 @@ func (h *MkvHandle) readInner(fuseCtx context.Context, dest []byte, off int64) (
 			h.mu.Lock()
 			h.lastLen, h.lastTime = n, now
 			h.mu.Unlock()
-			ttffRead(h.path, srcWarmupTail, time.Since(now), n, off)
+			ttffRead(h.path, srcWarmupTail, time.Since(now), n, off, stallRoleOf(h, probe))
 			return fuse.ReadResultData(dest[:n]), 0
 		}
 
@@ -478,7 +478,7 @@ func (h *MkvHandle) readInner(fuseCtx context.Context, dest []byte, off int64) (
 			h.mu.Lock()
 			h.lastLen, h.lastTime = nFetch, now
 			h.mu.Unlock()
-			ttffRead(h.path, srcFetchBlock, time.Since(now), nFetch, off)
+			ttffRead(h.path, srcFetchBlock, time.Since(now), nFetch, off, stallRoleOf(h, probe))
 			return fuse.ReadResultData(dest[:nFetch]), 0
 		}
 	}
@@ -546,7 +546,7 @@ func (h *MkvHandle) readInner(fuseCtx context.Context, dest []byte, off int64) (
 		h.lastTime = now
 		h.mu.Unlock()
 
-		ttffRead(h.path, srcRACacheHit, time.Since(cacheStart), n, off)
+		ttffRead(h.path, srcRACacheHit, time.Since(cacheStart), n, off, stallRoleOf(h, probe))
 		return fuse.ReadResultData(dest[:n]), 0
 	}
 
@@ -702,7 +702,7 @@ pumpSlotResolved:
 		h.lastLen = n
 		h.lastTime = now
 		h.mu.Unlock()
-		ttffRead(h.path, srcRACacheHit, time.Since(cacheStart), n, off)
+		ttffRead(h.path, srcRACacheHit, time.Since(cacheStart), n, off, stallRoleOf(h, probe))
 		return fuse.ReadResultData(dest[:n]), 0
 	}
 
@@ -741,7 +741,7 @@ pumpSlotResolved:
 					h.lastLen = nCopy
 					h.lastTime = now
 					h.mu.Unlock()
-					ttffRead(h.path, srcRACacheHit, time.Since(copyStart), nCopy, off)
+					ttffRead(h.path, srcRACacheHit, time.Since(copyStart), nCopy, off, stallRoleOf(h, probe))
 					return fuse.ReadResultData(dest[:nCopy]), 0
 				}
 				if leaderDone {
@@ -871,7 +871,7 @@ DATA_READY:
 	if n > 0 {
 		// The bytes are already in dest and the read-ahead window behind them is still
 		// filling; raCache.Put and the SSD warmup writes happen in FetchAhead's callback.
-		ttffRead(h.path, srcFetchBlock, timing.HTTPFetchTime, n, off)
+		ttffRead(h.path, srcFetchBlock, timing.HTTPFetchTime, n, off, stallRoleOf(h, probe))
 		noteFetchStall(h.path, probe)
 
 		// Update sequential detection state
