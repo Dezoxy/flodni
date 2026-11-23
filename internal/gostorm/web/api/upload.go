@@ -1,6 +1,7 @@
 package api
 
 import (
+	"errors"
 	"net/http"
 
 	"flodni/internal/gostorm/log"
@@ -10,6 +11,10 @@ import (
 
 	"github.com/gin-gonic/gin"
 )
+
+// maxTorrentUploadBody caps the body of POST /torrent/upload: a real client may send a
+// .torrent of up to about 16 MiB, and 32 MiB leaves room for that plus the multipart framing.
+const maxTorrentUploadBody = 32 << 20
 
 // torrentUpload godoc
 //
@@ -31,8 +36,14 @@ import (
 //	@Success		200	{object}	state.TorrentStatus	"Torrent status"
 //	@Router			/torrent/upload [post]
 func torrentUpload(c *gin.Context) {
+	c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, maxTorrentUploadBody)
 	form, err := c.MultipartForm()
 	if err != nil {
+		var tooLarge *http.MaxBytesError
+		if errors.As(err, &tooLarge) {
+			c.AbortWithError(http.StatusRequestEntityTooLarge, err)
+			return
+		}
 		c.AbortWithError(http.StatusBadRequest, err)
 		return
 	}
@@ -72,7 +83,7 @@ func torrentUpload(c *gin.Context) {
 			continue
 		}
 
-		tor, err = torr.AddTorrent(spec, title, poster, data, category)
+		tor, err = addTorrentToEngine(spec, title, poster, data, category)
 		if err != nil {
 			log.TLogln("error upload torrent:", err)
 			continue
