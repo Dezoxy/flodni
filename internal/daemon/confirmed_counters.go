@@ -57,6 +57,51 @@ var stallOriginNames = [numStallOrigins]string{
 	stallOriginSwarm:      "swarm",
 }
 
+// watchCreditCap is the most one gap between two served reads of a session adds to
+// confirmedPlaybackNS. Players read in bursts, so counting only the seconds that hold a
+// read would undercount by an amount that depends on the client; a capped gap does not.
+const watchCreditCap = 30 * time.Second
+
+// confirmedPlaybackNS is the watch time of confirmed torrents in nanoseconds: the
+// denominator for flodni_read_stalls_total{confirmed="true"}. It changes no behaviour.
+var confirmedPlaybackNS atomic.Int64
+
+// watchCreditStep is the least time between two moves of a session's previous-read
+// time. A read less than a step after the last move changes nothing and its time stays
+// in the next gap, so the confirmed lookup below runs at most about once per session per
+// step instead of on every read.
+const watchCreditStep = time.Second
+
+// creditWatchTime is called with the time of each served read. The first read stores its
+// time and credits nothing. A later read at least watchCreditStep after the stored time
+// moves it forward to nowN and, when the torrent is confirmed by the same test that
+// labels a stall, credits the gap, at most watchCreditCap. An unconfirmed read moves the
+// time too, so a later confirmation does not credit the time before it.
+//
+// hashConfirmed takes confirmedHashes.mu, and rebuilds the snapshot under it once a
+// second by walking the playback registry. Calling it on every read would put that lock
+// on the read path, so it is reached once per step only; the reads in between cost one
+// atomic load. The time only moves forward (a compare-and-swap loop), so reads racing on
+// the session credit each stretch once, and nothing is allocated here.
+func (s *TTFFSession) creditWatchTime(nowN int64) {
+	for {
+		prev := s.watchPrevAt.Load()
+		if prev != 0 && nowN-prev < int64(watchCreditStep) {
+			return
+		}
+		if !s.watchPrevAt.CompareAndSwap(prev, nowN) {
+			continue
+		}
+		if prev == 0 {
+			return
+		}
+		if gap := min(time.Duration(nowN-prev), watchCreditCap); hashConfirmed(s.hash) {
+			confirmedPlaybackNS.Add(int64(gap))
+		}
+		return
+	}
+}
+
 // Roles of the handle that served a stalled read. The role is read when the read finishes.
 const (
 	// stallRolePrimary: the handle was its file's primary (the one the pump follows).

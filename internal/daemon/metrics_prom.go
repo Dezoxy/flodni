@@ -7,6 +7,7 @@ import (
 	"runtime"
 	"sort"
 	"sync/atomic"
+	"time"
 
 	"github.com/anacrolix/torrent"
 
@@ -316,6 +317,9 @@ func collectPlaybackProm(w *promtext.Writer) {
 	w.Counter("flodni_read_stalls_total",
 		"Served reads that took longer than one second. Failed reads are not counted. confirmed as in flodni_torrent_idle_closes_total. cause is seek when the stall began after a non-sequential jump of the session's read position (the same jump the session seek count uses) and before the first read the read-ahead cache served after it, no more than 15 s after the jump; playback for every other stall. origin is what the engine was doing, checked in this order: evicted when a piece of the read's span completed again while the read ran (it had been evicted from the in-memory piece cache and came twice), pump_behind when a pump exists for the session and its fill offset is at or below the read offset, no_pump when the session has no pump, swarm for everything else (a pump ahead of the read, a slow swarm). A read of a file the session has no file index for is never evicted. role is primary when the handle that served the read was its file's primary (the one the pump follows) when the read finished, second for every other handle, including one on a file with no primary, and for a probe read. Present from 0 for every confirmed, cause, origin and role combination; summed over role it is the count the combination had before role, summed over origin the count the pair had before origin.",
 		stalls...)
+	w.Counter("flodni_confirmed_playback_seconds_total",
+		"Watch time of torrents with a webhook-confirmed playback, in seconds: on a served read of a session at least 1 s after the last one that was counted, the time since that one, at most 30 s per gap (reads closer than that wait and their time joins the next gap), counted only when the read is confirmed by the test that sets confirmed=\"true\" on flodni_read_stalls_total (the first read of a session counts 0; an unconfirmed read counts nothing but moves the previous-read time). The denominator for stalls per watch-hour. Present from 0.",
+		promtext.Sample{Value: float64(confirmedPlaybackNS.Load()) / float64(time.Second)})
 	w.Counter("flodni_reannounce_total",
 		"Tracker re-announces actually sent for a torrent with a confirmed playback whose swarm starved (fewer than 3 connected peers for 60 s with a read stall, a hung read or a short, shrinking buffer), by reason (starved) and private (true for a private torrent, sent only when its tracker's min interval allowed it). Present from 0.",
 		promSample(reannounces[1].Load(), lbl("reason", "starved"), lbl("private", "true")),

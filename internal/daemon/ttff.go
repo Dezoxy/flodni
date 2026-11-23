@@ -163,6 +163,7 @@ type TTFFSession struct {
 	// only once playback has consumed that much.
 	firstDeepReadAt atomic.Int64 // 0 = unset (CAS-once)
 	lastReadAt      atomic.Int64
+	watchPrevAt     atomic.Int64 // unixNano of the previous served read, 0 = none (creditWatchTime)
 	bytesRead       atomic.Int64
 	reads           atomic.Int64 // served reads, for /api/sessions
 	// Bytes handed to the caller per serving path, for /api/sessions and the
@@ -291,6 +292,7 @@ func (s *TTFFSession) recordRead(src ttffSource, d time.Duration, n int, off int
 	}
 	nowN := ttffNow().UnixNano()
 	s.lastReadAt.Store(nowN)
+	s.creditWatchTime(nowN)
 	s.reads.Add(1)
 	if s.firstDeepReadAt.Load() == 0 {
 		s.blockedNS.Add(max(d.Nanoseconds(), 0))
