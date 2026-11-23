@@ -1016,7 +1016,8 @@ Needs the owner's decision, not ordered yet:
 ## A second reader on a playing file (after v2026.11.3)
 
 From production evidence on one host, 2026-11-18 to 2026-11-22 (v2026.11.1
-to v2026.11.3). Designed, not built; measurement comes before each change.
+to v2026.11.3). A step is designed until it says built; measurement comes
+before each change.
 
 - About half of the confirmed stalls under v2026.11.3 (159 of 324 in about
   30 watch-hours) came from six sessions that read the whole file in 3 to 16
@@ -1044,19 +1045,25 @@ indices and the file path only. So the player cannot be picked by position,
 and `player_off` is written by the handle that already won the primary role.
 The steps below measure per reader first, then tighten the guard that exists.
 
-1. **Label stalls by reader role and log why a handle became primary.** Add a
-   `role` label (`primary` or `second`) to the stall counters and a log line
-   naming the promotion path. Stall `cause` is tracked per path, `confirmed`
-   per torrent, and probe reads count too, so some of the 159 may be
-   extractor reads no viewer waited on. This is the measurement for steps 4
-   and 5. Relabelling such a jump as `seek` instead would hide real stalls.
-2. **Count watch time.** A `flodni_confirmed_playback_seconds_total` counter
-   (seconds in which a confirmed session read), so stalls per watch-hour can
-   be compared across releases without an outside source.
+1. **Label stalls by reader role and log why a handle became primary.**
+   [FINISHED] Add a `role` label (`primary` or `second`) to the stall counters
+   and a log line naming the promotion path. Stall `cause` is tracked per
+   path, `confirmed` per torrent, and probe reads count too, so some of the
+   159 may be extractor reads no viewer waited on. This is the measurement
+   for steps 4 and 5. Relabelling such a jump as `seek` instead would hide
+   real stalls. Built (#288); promotion decisions did not change.
+2. **Count watch time.** [FINISHED] A `flodni_confirmed_playback_seconds_total`
+   counter, so stalls per watch-hour can be compared across releases without
+   an outside source. Built (#289): it credits the time between a session's
+   served reads, at most 30 s per gap, because players read in bursts and
+   "seconds with a read" would depend on the client.
 3. **Find what still evicts ahead of the player.** Break the `evicted` stalls
    since v2026.11.3 down by `flodni_engine_cache_evictions_total` zone,
    readers and whole-file sessions, as queries, before changing eviction
-   again.
+   again. First pass, 2026-11-23, about 64 hours: of 102,918 evictions, 90 %
+   were behind a reader, 6 % had no reader and 4 % were `ahead_unread`. Two
+   thirds of the `ahead_unread` ones had one reader, so the second reader does
+   not explain them all. The whole-file split waits for step 1's data.
 4. **Close the holes in the primary-promotion guard** (`pump.go`). The
    incumbent counts only if it read within the last 6 s; once a usurper
    releases no primary exists and the proof drops to 3 reads, which a reader
@@ -1084,41 +1091,47 @@ needed; then the upstream checks.
 
 From a review of upstream Tiramisu's release notes v1.11.16 to v1.13.1
 (2026-11-17 to 2026-11-22) against Flodni's tree. Ordered at the end of the
-previous section; each step first checks what Flodni already does. Designed,
-not built.
+previous section; each step first checks what Flodni already does. A step is
+designed until it says built.
 
-1. **Keep the inode map after a failed load.** File inodes are a hash of
-   the infohash and file index, and the map shrinks only through the guarded
-   prune, so a large removal is not the risk. The risk is a load that fails
-   with only a warning, followed by `InodeMap.saveToDB`
+1. **Keep the inode map after a failed load.** [FINISHED] File inodes are a
+   hash of the infohash and file index, and the map shrinks only through the
+   guarded prune, so a large removal is not the risk. The risk is a load that
+   fails with only a warning, followed by `InodeMap.saveToDB`
    (`internal/vfs/inodemap.go`), which deletes every row before it rewrites.
    Refuse a save after a failed load, and refuse writing zero file rows over
-   stored rows; no ratio threshold, so a large removal still saves. Tests
-   cover both. Upstream v1.12.0.
-2. **Check the pause of other torrents' speculative reads.** Warm on add
-   and catch-up already pause while any playback is open. Check only
-   next-episode warming, and whether upstream's buffered-ahead floor adds
-   anything; close the step if not. Upstream v1.13.1.
+   stored rows; no ratio threshold, so a large removal still saves. Built
+   (#287). Upstream v1.12.0.
+2. **Check the pause of other torrents' speculative reads.** Checked
+   2026-11-23: warm on add and catch-up pause while any playback is open.
+   Next-episode warming deliberately does not (`noPause`, one fill at a time),
+   and nothing checks the playing stream's buffer while it runs. Upstream's
+   floor (pause below 10 s of runway, resume at 20 s) would close that gap.
+   Open. Upstream v1.13.1.
 3. **Warm cache eviction by last use, never under an open handle; keep
-   complete tails across restarts.** Check Flodni's warm cache against both
-   first; build only what is missing. Upstream v1.13.1.
-4. **Release a torrent only when nothing references it.** Removing one
-   episode of a season pack must not drop the pack while another stub or
-   record still cites it. Check Flodni's removal path; add the guard and a
-   test if it is missing; the diff gets a review, since it touches removals.
-   Upstream v1.12.01.
-5. **Check the native stream path for error responses read as file data.**
-   Upstream v1.12.03 turned non-2xx stream responses into read errors.
-   Flodni's native path appears to make no HTTP calls; confirm, and close the
-   step if so.
+   complete tails across restarts.** Checked 2026-11-23, all three partly:
+   eviction takes never-played files first, then the oldest write; last use
+   needs `warmup_eviction_order=read` and is lost at a restart. Eviction
+   closes a file's handle with no check for a reader; whether a live read then
+   fails is not confirmed. Complete tails survive a restart in index mode
+   only. Open. Upstream v1.13.1.
+4. **Release a torrent only when nothing references it.** [FINISHED] Already
+   built: `dropTorrentIfUnused` (`internal/library/manager.go`) keeps a torrent
+   while any stub links to it or a stub cannot be read. It checks stubs on
+   disk only, not database records. Upstream v1.12.01.
+5. **Never read an engine error response as file data.** [FINISHED] The native
+   path makes no network call, but its in-process response writer dropped the
+   status, so the text of a 404 or 403 could reach a reader as file bytes and
+   the warm tail. Built (#290): a non-2xx status now fails the read. Upstream
+   v1.12.03.
 
 Not taken: HTTPS on the panel port, MCP tokens, peer GeoIP, the UI changes
 and the move of settings into SQLite. Flodni has its own records and scoped
 auth.
 
 **Moving to Tentacle: investigated, stay on Flodni's engine.** From a code
-read of upstream v1.12.03 and v1.13.1 on 2026-11-23, nothing run; to be
-recorded as an ADR.
+read of upstream v1.12.03 and v1.13.1 on 2026-11-23, nothing run; recorded in
+[ADR 0007](architecture/decisions/0007-stay-off-tentacle.md).
 
 - Tentacle reshapes GoStorm's bridge and engine, rewrites the piece store and
   adds a new streamer. The FUSE pump and primary promotion stay.
@@ -1550,3 +1563,7 @@ recorded as an ADR.
   from not stored; a fail-closed drop check; linked and orphan reporting; one
   fuzzy matcher; eviction to a low-water mark; and enforced `App` test isolation
   (#202 to #216).
+- 2026-11-23, second reader steps 1 and 2 and upstream steps 1 and 5 (#287 to
+  #290): stalls labelled by reader role, a promotion-reason log line, a
+  confirmed watch-time counter, an inode map that survives a failed load, and
+  no engine error text read as file data.
