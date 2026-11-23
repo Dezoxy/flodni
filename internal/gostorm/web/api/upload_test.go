@@ -3,6 +3,7 @@ package api
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"io"
 	"mime/multipart"
 	"net/http"
@@ -291,5 +292,55 @@ func TestUploadMalformedMultipartStays400(t *testing.T) {
 	}
 	if got := engine.hashes(); len(got) != 0 {
 		t.Errorf("a malformed upload added %v, want nothing", got)
+	}
+}
+
+// An upload that yields no torrent answers an error instead of panicking on a nil
+// torrent: 400 when the client sent nothing usable, 500 when the engine refused it.
+func TestUploadWithNoUsableTorrent(t *testing.T) {
+	torrentBytes, _ := smallTorrent(t)
+	for _, c := range []struct {
+		name      string
+		file      []byte
+		engineErr error
+		want      int
+	}{
+		{"no file part", nil, nil, http.StatusBadRequest},
+		{"file is not a torrent", []byte("not a torrent"), nil, http.StatusBadRequest},
+		{"engine refuses it", torrentBytes, errors.New("engine closed"), http.StatusInternalServerError},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			t.Setenv("TMPDIR", t.TempDir())
+			engine := stubEngine(t)
+			if c.engineErr != nil {
+				addTorrentToEngine = func(*torrent.TorrentSpec, string, string, string, string) (*torr.Torrent, error) {
+					return nil, c.engineErr
+				}
+			}
+			var body bytes.Buffer
+			w := multipart.NewWriter(&body)
+			if err := w.WriteField("title", "t"); err != nil {
+				t.Fatal(err)
+			}
+			if c.file != nil {
+				part, err := w.CreateFormFile("file", "x.torrent")
+				if err != nil {
+					t.Fatal(err)
+				}
+				if _, err := part.Write(c.file); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if err := w.Close(); err != nil {
+				t.Fatal(err)
+			}
+			rec := postUpload(uploadRouter(), &body, w.FormDataContentType())
+			if rec.Code != c.want {
+				t.Fatalf("status %d, want %d", rec.Code, c.want)
+			}
+			if got := engine.hashes(); len(got) != 0 {
+				t.Fatalf("engine got %v, want nothing added", got)
+			}
+		})
 	}
 }

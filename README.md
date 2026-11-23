@@ -363,7 +363,8 @@ marked "every mode". Read these before the first start of v0.3.0:
   optional `metadata_wait`, in seconds, bounds it), 500 when the save failed (a
   JSON `error` says which). Without `save_to_db` it answers at once, as before.
   `POST /torrent/upload` with `save` still saves in the background, and its
-  body is capped at 32 MiB: a larger one answers 413 and adds nothing. The
+  body is capped at 32 MiB: a larger one answers 413 and adds nothing. An
+  upload with no usable `.torrent` answers 400, and an engine refusal 500. The
   library add sends its `metadata_wait` on, so a dead swarm answers 504 "no
   metadata" within about that wait plus 5 s, as before, not 502; the add call is
   capped at 2 minutes (it was 30 s per call before the engine waited for the
