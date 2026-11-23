@@ -1646,8 +1646,10 @@ run_keepalive() {
   for c in true false; do
     for cause in seek playback; do
       for origin in evicted pump_behind no_pump swarm; do
-        [ "$(prom_value "$body" "flodni_read_stalls_total{confirmed=\"$c\",cause=\"$cause\",origin=\"$origin\"}")" = absent ] &&
-          missing="$missing flodni_read_stalls_total{$c,$cause,$origin}"
+        for role in primary second; do
+          [ "$(prom_value "$body" "flodni_read_stalls_total{confirmed=\"$c\",cause=\"$cause\",origin=\"$origin\",role=\"$role\"}")" = absent ] &&
+            missing="$missing flodni_read_stalls_total{$c,$cause,$origin,$role}"
+        done
       done
     done
   done

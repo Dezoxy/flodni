@@ -599,8 +599,9 @@ func ttffRegister(path string, size int64, hash string, fileIndex int, headReady
 }
 
 // ttffRead records one served read: per-source histogram always; session state
-// when a session exists for the path.
-func ttffRead(path string, src ttffSource, d time.Duration, n int, off int64) {
+// when a session exists for the path. role is the serving handle's stallRole*, counted
+// with a stall.
+func ttffRead(path string, src ttffSource, d time.Duration, n int, off int64, role int) {
 	if n > 0 && int(src) < len(ttffStats.readBytes) {
 		ttffStats.readBytes[src].Add(int64(n))
 	}
@@ -619,7 +620,7 @@ func ttffRead(path string, src ttffSource, d time.Duration, n int, off int64) {
 		cause = s.recordRead(src, d, n, off)
 	}
 	if d > ttffStallDuration {
-		countStall(path, cause, off, n, d)
+		countStall(path, cause, role, off, n, d)
 	}
 }
 

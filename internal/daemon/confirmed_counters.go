@@ -13,10 +13,11 @@ import (
 var keepaliveCounters struct {
 	idleCloses [2]atomic.Int64
 	reopens    [2]atomic.Int64
-	// stalls is [confirmed][cause][origin]: cause is stallCausePlayback or stallCauseSeek,
-	// origin one of the stallOrigin constants. Summed over origin it is the count the pair
-	// had before the origin label.
-	stalls [2][2][numStallOrigins]atomic.Int64
+	// stalls is [confirmed][cause][origin][role]: cause is stallCausePlayback or stallCauseSeek,
+	// origin one of the stallOrigin constants, role one of the stallRole constants. Summed over
+	// role it is the count the combination had before the role label, summed over origin the
+	// count the pair had before the origin label.
+	stalls [2][2][numStallOrigins][numStallRoles]atomic.Int64
 	// Keep-alive hold (phase b), in keepalive.go: releases by reason (0 stop, 1
 	// ceiling) and torrents that lost to the cap.
 	releases [2]atomic.Int64
@@ -99,6 +100,29 @@ func (s *TTFFSession) creditWatchTime(nowN int64) {
 		}
 		return
 	}
+}
+
+// Roles of the handle that served a stalled read. The role is read when the read finishes.
+const (
+	// stallRolePrimary: the handle was its file's primary (the one the pump follows).
+	stallRolePrimary = iota
+	// stallRoleSecond: anything else, a handle on a file with no primary and a probe read included.
+	stallRoleSecond
+	numStallRoles
+)
+
+var stallRoleNames = [numStallRoles]string{
+	stallRolePrimary: "primary",
+	stallRoleSecond:  "second",
+}
+
+// stallRoleOf is the role of the handle h serving a read; probe is the read's probe flag.
+// One atomic load: it runs on every read, stalled or not.
+func stallRoleOf(h *MkvHandle, probe bool) int {
+	if !probe && h.isPrimaryHandle.Load() {
+		return stallRolePrimary
+	}
+	return stallRoleSecond
 }
 
 func confirmedIdx(confirmed bool) int {
@@ -190,9 +214,9 @@ func countReopen(path, hash string) {
 }
 
 // countStall counts a served read over the stall threshold, labelled by the torrent
-// of the path: the session's hash, else the registry state's, by cause and by origin. off and
+// of the path: the session's hash, else the registry state's, by cause, origin and role. off and
 // n are the read's offset and returned bytes, d how long it took.
-func countStall(path string, cause int, off int64, n int, d time.Duration) {
+func countStall(path string, cause, role int, off int64, n int, d time.Duration) {
 	hash, fileIdx := "", 0
 	if v, ok := sessions.Load(path); ok {
 		s := v.(*TTFFSession)
@@ -206,5 +230,5 @@ func countStall(path string, cause int, off int64, n int, d time.Duration) {
 		}
 	}
 	origin := stallOriginOf(path, hash, fileIdx, off, n, d)
-	keepaliveCounters.stalls[confirmedIdx(hashConfirmed(hash))][cause][origin].Add(1)
+	keepaliveCounters.stalls[confirmedIdx(hashConfirmed(hash))][cause][origin][role].Add(1)
 }

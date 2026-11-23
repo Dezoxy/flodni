@@ -24,7 +24,9 @@ func watchEnv(t *testing.T, confirmed bool) (*time.Time, func() time.Duration) {
 	return clock, func() time.Duration { return time.Duration(confirmedPlaybackNS.Load() - base) }
 }
 
-func watchRead(off int64) { ttffRead("/m/s.mkv", srcFetchBlock, time.Millisecond, 4096, off) }
+func watchRead(off int64) {
+	ttffRead("/m/s.mkv", srcFetchBlock, time.Millisecond, 4096, off, stallRoleSecond)
+}
 
 func TestWatchTimeFirstReadCreditsNothing(t *testing.T) {
 	_, credited := watchEnv(t, true)

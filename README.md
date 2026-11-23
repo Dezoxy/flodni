@@ -2794,7 +2794,7 @@ scraper on the same host or Docker network.
 | `flodni_torrent_idle_closes_total` | counter | `confirmed` | Torrents the engine closed because no reader had them for the idle timeout. `confirmed` is `true` when a file of the torrent had a webhook-confirmed playback; the label is refreshed once a second. Both values present from 0. With the keep-alive on, a torrent it holds is not counted; see Keep-alive. |
 | `flodni_torrent_reopens_total` | counter | `confirmed` | Closed torrents a read on an open handle woke again; the wake at open is not counted. `confirmed` as above. |
 | `flodni_wake_refused_total` | counter | none | Wakes the engine refused because it keeps no record of the torrent: one per handle at a read, one per open. Not a failed read and not a dead swarm. 0 from start. See "A stub the engine does not store". |
-| `flodni_read_stalls_total` | counter | `confirmed`, `cause`, `origin` | Served reads that took over one second; failed reads are not counted. `confirmed` as above. `cause` is `seek` or `playback`; `origin` is `evicted`, `pump_behind`, `no_pump` or `swarm`. All sixteen combinations present from 0; see "Stall cause" and "Stall origin" below. Independent of sessions. |
+| `flodni_read_stalls_total` | counter | `confirmed`, `cause`, `origin`, `role` | Served reads that took over one second; failed reads are not counted. `confirmed` as above. `cause` is `seek` or `playback`; `origin` is `evicted`, `pump_behind`, `no_pump` or `swarm`; `role` is `primary` (the handle that served the read was its file's primary when the read finished) or `second` (any other handle, a probe read included). All thirty-two combinations present from 0; see "Stall cause" and "Stall origin" below. Independent of sessions. |
 | `flodni_confirmed_playback_seconds_total` | counter | none | Watch time of torrents with a confirmed playback, in seconds, the denominator for stalls per watch-hour. On a served read of a session at least 1 s after the last one counted it adds the time since that one, at most 30 s per gap (closer reads wait and join the next gap), when the read counts as confirmed by the test that sets `confirmed="true"` on `flodni_read_stalls_total`. The first read of a session adds 0; an unconfirmed read adds nothing but moves the previous-read time. Fractional seconds. 0 from start. |
 | `flodni_reannounce_total` | counter | `reason`, `private` | Tracker re-announces actually sent for a torrent with a confirmed playback whose swarm starved; `reason` is `starved`, `private` is `true` for a private torrent (counted only when its tracker's min interval allowed the announce) and `false` for a public one. Both series present from 0. See "Starved-torrent re-announce". |
 | `flodni_private_torrents_early_announce` | gauge | `state` | Loaded private torrents by whether any of their trackers allows an early (starved) re-announce: `eligible` when a tracker's last successful announce sent a min interval below its interval, `ineligible` when none did, `unknown` before a successful announce. Passive: read from regular announces, no extra tracker request. All three present from 0. See "Starved-torrent re-announce". |
@@ -2924,7 +2924,11 @@ cache served after that jump, and no more than 15 s after the jump began (the
 cap keeps a slow swarm after a seek from being hidden for good). The read that
 jumps counts, so a seek's cold start is a seek stall. `cause="playback"`:
 every other stall. The position is tracked per session, which is per file, so
-a second handle on the same file shares it. It is accounting only: reads and
+a second handle on the same file shares it. `role` splits each stall by the
+handle that served it: `primary` when it was the file's primary (the handle
+the pump follows) as the read finished, `second` for every other handle, a
+handle on a file with no primary and a probe read included; summed over `role`,
+a combination is what it was before the label. It is accounting only: reads and
 the pump behave as before. For a stall alert, use
 `flodni_read_stalls_total{cause="playback"}`; the seek series show how often
 viewers seek.

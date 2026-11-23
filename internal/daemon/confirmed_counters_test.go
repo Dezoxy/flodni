@@ -27,7 +27,9 @@ func resetKeepaliveState(t *testing.T) {
 			keepaliveCounters.reopens[i].Store(0)
 			for c := range keepaliveCounters.stalls[i] {
 				for o := range keepaliveCounters.stalls[i][c] {
-					keepaliveCounters.stalls[i][c][o].Store(0)
+					for r := range keepaliveCounters.stalls[i][c][o] {
+						keepaliveCounters.stalls[i][c][o][r].Store(0)
+					}
 				}
 			}
 		}
@@ -116,10 +118,10 @@ func TestStallCountedByConfirmedAtTtffRead(t *testing.T) {
 	app.playbackRegistry.Store("/m/b.mkv", &PlaybackState{Path: "/m/b.mkv", Hash: kaHashB, IsHealthy: true})
 	app.playbackRegistry.Store("/m/a.mkv", &PlaybackState{Path: "/m/a.mkv", Hash: kaHashA})
 
-	ttffRead("/m/b.mkv", srcFetchBlock, ttffStallDuration+time.Millisecond, 4096, 0)
-	ttffRead("/m/a.mkv", srcFetchBlock, ttffStallDuration+time.Millisecond, 4096, 0)
-	ttffRead("/m/a.mkv", srcFetchBlock, ttffStallDuration, 4096, 0)
-	ttffRead("/m/nosuch.mkv", srcFetchBlock, 5*time.Second, 4096, 0)
+	ttffRead("/m/b.mkv", srcFetchBlock, ttffStallDuration+time.Millisecond, 4096, 0, stallRoleSecond)
+	ttffRead("/m/a.mkv", srcFetchBlock, ttffStallDuration+time.Millisecond, 4096, 0, stallRoleSecond)
+	ttffRead("/m/a.mkv", srcFetchBlock, ttffStallDuration, 4096, 0, stallRoleSecond)
+	ttffRead("/m/nosuch.mkv", srcFetchBlock, 5*time.Second, 4096, 0, stallRoleSecond)
 	if u := stallSum(0, stallCausePlayback) + stallSum(0, stallCauseSeek); u != 2 ||
 		stallSum(1, stallCausePlayback)+stallSum(1, stallCauseSeek) != 1 {
 		t.Fatalf("stalls unconfirmed=%d confirmed=%d, want 2 and 1", u,

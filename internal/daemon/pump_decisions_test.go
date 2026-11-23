@@ -463,7 +463,7 @@ func TestBecomePrimaryDemotesTheOldPrimaryAndResetsItsStreak(t *testing.T) {
 	other.isPrimaryHandle.Store(true)
 	registerHandle(t, old, next, other)
 
-	if !becomePrimary(next) {
+	if !becomePrimary(next, "test", 0, 0) {
 		t.Fatal("promotion of a non-primary handle must report true")
 	}
 	if !next.isPrimaryHandle.Load() || old.isPrimaryHandle.Load() {
@@ -475,7 +475,7 @@ func TestBecomePrimaryDemotesTheOldPrimaryAndResetsItsStreak(t *testing.T) {
 	if !other.isPrimaryHandle.Load() {
 		t.Error("a primary on another path must be left alone")
 	}
-	if becomePrimary(next) {
+	if becomePrimary(next, "test", 0, 0) {
 		t.Error("promoting an already primary handle must report false")
 	}
 }

@@ -162,7 +162,7 @@ func (h *MkvHandle) startNativePump(finalHash string, fileIdx int) {
 			// Primary reconnect (refCount 0→1): inherit player position.
 			// Secondary handles (Plex probes at arbitrary offsets): no inheritance.
 			if newRefs == 1 && !h.shadowsActivePlayer() {
-				becomePrimary(h)
+				becomePrimary(h, promoteAttachFirstRef, atomic.LoadInt64(&ps.playerOff), h.seqAdvances.Load())
 				if curPos := atomic.LoadInt64(&ps.playerOff); curPos > 0 {
 					atomic.StoreInt64(&h.lastOff, curPos)
 				}
@@ -184,7 +184,7 @@ func (h *MkvHandle) startNativePump(finalHash string, fileIdx int) {
 			<-masterDataSemaphore
 			ps := val.(*NativePumpState)
 			if newRefs, attached := h.attachRef(ps); attached && newRefs == 1 && !h.shadowsActivePlayer() {
-				becomePrimary(h)
+				becomePrimary(h, promoteAttachFirstRefLate, atomic.LoadInt64(&ps.playerOff), h.seqAdvances.Load())
 				if curPos := atomic.LoadInt64(&ps.playerOff); curPos > 0 {
 					atomic.StoreInt64(&h.lastOff, curPos)
 				}
@@ -205,7 +205,7 @@ func (h *MkvHandle) startNativePump(finalHash string, fileIdx int) {
 		// The pump's creator is its primary, unless a player is watching through another handle
 		// (a probe that opens while no pump is registered must not take the primary this way).
 		if !h.shadowsActivePlayer() {
-			becomePrimary(h)
+			becomePrimary(h, promotePumpCreator, h.followOff(), h.seqAdvances.Load())
 		}
 		// Capture the reader now and pass it to the pump goroutine: re-reading h.nativeReader
 		// inside the goroutine raced with Release setting it to nil, and the resulting early
@@ -1051,9 +1051,7 @@ func (h *MkvHandle) promoteIfStreaming(prevOff, off int64, readLen int) {
 	if inc := activeStreamingPrimary(h.path, h); inc != nil && h.defersTo(inc, ps.sessionStartedAt()) {
 		return
 	}
-	if becomePrimary(h) {
-		logger.Info(fmt.Sprintf("[V284] Handle promoted to primary after %d sequential reads at %dMB: %s", h.seqAdvances.Load(), off/(1024*1024), filepath.Base(h.path)), "file", filepath.Base(h.path))
-	}
+	becomePrimary(h, promoteSequentialReads, off, h.seqAdvances.Load())
 }
 
 func tailProbeZoneSize(size int64) int64 {
@@ -1247,7 +1245,25 @@ func primaryOffsetFor(path string, except *MkvHandle) int64 {
 	return off
 }
 
+// Why a handle was promoted, as the [V284] line names it. One per becomePrimary call site.
+const (
+	// promoteAttachFirstRef: the first reference on a pump that already runs (a reconnect after
+	// every handle left), which inherits the player's position.
+	promoteAttachFirstRef = "attach_first_ref"
+	// promoteAttachFirstRefLate: the same, found only after the wait for a master slot, when
+	// another handle had registered the pump meanwhile.
+	promoteAttachFirstRefLate = "attach_first_ref_after_slot_wait"
+	// promotePumpCreator: the handle that started the pump.
+	promotePumpCreator = "pump_creator"
+	// promoteSequentialReads: primaryProofFor consecutive sequential reads during a playback.
+	promoteSequentialReads = "sequential_reads"
+	// promoteSeekDuringPlayback: a genuine seek by a secondary handle during a playback.
+	promoteSeekDuringPlayback = "seek_during_playback"
+)
+
 // becomePrimary makes h the only primary handle for its path, returning false if it already was.
+// A real promotion logs one [V284] line: why (a promote* reason), whether another primary was
+// displaced, the offset off the caller read or follows and the handle's sequential streak reads.
 // The pump follows the MAX of the primary offsets, so a probe that earned primary and then went
 // idle kept dragging it to a frozen offset (Soulm8te, 2026-08-22: a stale PRI@8697MB anchored the
 // pump 7.8GB past a player reading at 1120MB). Demotion is edge-triggered here at promotion time,
@@ -1255,17 +1271,20 @@ func primaryOffsetFor(path string, except *MkvHandle) int64 {
 // heuristic in 6ae20c9 thrash (6517 jump pairs in 19h). Demoted handles lose their sequential
 // streak too, so reclaiming primary costs a fresh primaryProofReads run and a frozen handle,
 // which by definition stops reading, can never reclaim it at all.
-func becomePrimary(h *MkvHandle) bool {
+func becomePrimary(h *MkvHandle, reason string, off int64, reads int32) bool {
 	if !h.isPrimaryHandle.CompareAndSwap(false, true) {
 		return false
 	}
+	hadPrimary := false
 	app.activeHandles.Range(func(key, _ interface{}) bool {
 		other, ok := key.(*MkvHandle)
 		if ok && other != h && other.path == h.path && other.isPrimaryHandle.CompareAndSwap(true, false) {
 			other.seqAdvances.Store(0)
+			hadPrimary = true
 		}
 		return true
 	})
+	logger.Info(fmt.Sprintf("[V284] Handle promoted to primary: reason=%s had_primary=%t off=%dMB reads=%d", reason, hadPrimary, max(off, 0)/(1024*1024), reads), "file", filepath.Base(h.path))
 	return true
 }
 
