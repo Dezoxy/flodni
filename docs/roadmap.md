@@ -1001,6 +1001,13 @@ briefly leaves the window unprotected. Measurement comes before each change.
    gauge of allocated piece-buffer bytes. Judged on the heap peak. The
    deployment side (a lower `GOGC`, a `GOMEMLIMIT` near the real need) goes in
    the README's tuning notes, not in code.
+5. **Break down the stalls at a stream's start.** Measured 2026-11-23 over 33.7
+   playback hours: a stream's first 5 minutes are about 14 % of playback minutes
+   and hold 38 % of the confirmed stalls (162 of 430), 34.8 an hour against 8.8
+   later. Split them by `origin`, `role` and `cause`, and separate the stalls
+   that delayed the picture from those a client's buffer absorbed. Queries
+   first, no code, and no fix until the split shows what viewers actually see.
+   Designed, not run.
 
 Needs the owner's decision, not ordered yet:
 
@@ -1108,7 +1115,12 @@ designed until it says built.
    Next-episode warming deliberately does not (`noPause`, one fill at a time),
    and nothing checks the playing stream's buffer while it runs. Upstream's
    floor (pause below 10 s of runway, resume at 20 s) would close that gap.
-   Open. Upstream v1.13.1.
+   Measured 2026-11-23, not worth building for now: over 33.7 playback hours
+   three next-episode fills moved about 10 MiB, and at most 14 of 430 confirmed
+   stalls (3.3 %) fell within a minute of one. All 14 were around a single
+   1.1 MiB fill at a stream's start, when stalls are about four times as common
+   anyway. Not built. Look again if `warm_next_episode_same_torrent` is turned
+   on or these fills become common. Upstream v1.13.1.
 3. **Warm cache eviction by last use, never under an open handle; keep
    complete tails across restarts.** The open-handle part is built (#294):
    quota eviction skips a file a handle holds open, a new head is not cached
