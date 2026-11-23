@@ -21,10 +21,10 @@ require (
 	github.com/pkg/errors v0.9.1
 	github.com/wlynxg/anet v0.0.5
 	go.etcd.io/bbolt v1.5.0
-	golang.org/x/exp v0.0.0-20261120182113-8801fbdfac81
+	golang.org/x/exp v0.0.0-20261121134650-e1094eeca1b5
 	golang.org/x/sys v0.50.0
 	golang.org/x/time v0.16.0
-	modernc.org/sqlite v1.62.0
+	modernc.org/sqlite v1.63.0
 )
 
 require (
