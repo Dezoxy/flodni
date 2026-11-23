@@ -40,13 +40,15 @@ func stallCounts() (playback, seek int64) {
 // counter had before it was split.
 func stallSum(confirmed, cause int) (n int64) {
 	for o := range keepaliveCounters.stalls[confirmed][cause] {
-		n += keepaliveCounters.stalls[confirmed][cause][o].Load()
+		for r := range keepaliveCounters.stalls[confirmed][cause][o] {
+			n += keepaliveCounters.stalls[confirmed][cause][o][r].Load()
+		}
 	}
 	return n
 }
 
 func stallRead(src ttffSource, d time.Duration, off int64) {
-	ttffRead("/m/s.mkv", src, d, int(stallMiB), off)
+	ttffRead("/m/s.mkv", src, d, int(stallMiB), off, stallRoleSecond)
 }
 
 const slow = 2 * time.Second // over ttffStallDuration
@@ -150,10 +152,10 @@ func TestStallCauseMetricHasFourSeries(t *testing.T) {
 	resetKeepaliveState(t)
 	body := scrape(t).Body.String()
 	for _, want := range []string{
-		`flodni_read_stalls_total{confirmed="true",cause="seek",origin="swarm"} 0`,
-		`flodni_read_stalls_total{confirmed="true",cause="playback",origin="swarm"} 0`,
-		`flodni_read_stalls_total{confirmed="false",cause="seek",origin="swarm"} 0`,
-		`flodni_read_stalls_total{confirmed="false",cause="playback",origin="swarm"} 0`,
+		`flodni_read_stalls_total{confirmed="true",cause="seek",origin="swarm",role="second"} 0`,
+		`flodni_read_stalls_total{confirmed="true",cause="playback",origin="swarm",role="second"} 0`,
+		`flodni_read_stalls_total{confirmed="false",cause="seek",origin="swarm",role="second"} 0`,
+		`flodni_read_stalls_total{confirmed="false",cause="playback",origin="swarm",role="second"} 0`,
 	} {
 		if !strings.Contains(body, want) {
 			t.Errorf("series missing: %s", want)
@@ -164,8 +166,8 @@ func TestStallCauseMetricHasFourSeries(t *testing.T) {
 			t.Errorf("HELP does not state the 15 s rule: %s", line)
 		}
 	}
-	keepaliveCounters.stalls[1][stallCauseSeek][stallOriginSwarm].Add(3)
-	if body = scrape(t).Body.String(); !strings.Contains(body, `flodni_read_stalls_total{confirmed="true",cause="seek",origin="swarm"} 3`) {
+	keepaliveCounters.stalls[1][stallCauseSeek][stallOriginSwarm][stallRoleSecond].Add(3)
+	if body = scrape(t).Body.String(); !strings.Contains(body, `flodni_read_stalls_total{confirmed="true",cause="seek",origin="swarm",role="second"} 3`) {
 		t.Error("confirmed seek series did not count")
 	}
 }

@@ -21,16 +21,16 @@ func deepEnv(t *testing.T, confirmed bool) (*TTFFSession, *time.Time) {
 func TestFirstDeepReadBlockedSum(t *testing.T) {
 	s, clock := deepEnv(t, false)
 	*clock = clock.Add(time.Second)
-	ttffRead("/m/s.mkv", srcWarmupHead, 40*time.Millisecond, 4096, 0) // the header
+	ttffRead("/m/s.mkv", srcWarmupHead, 40*time.Millisecond, 4096, 0, stallRoleSecond) // the header
 	*clock = clock.Add(time.Second)
-	ttffRead("/m/s.mkv", srcFetchBlock, 3*time.Second, 4096, 1<<20) // a slow shallow read
+	ttffRead("/m/s.mkv", srcFetchBlock, 3*time.Second, 4096, 1<<20, stallRoleSecond) // a slow shallow read
 	if s.firstDeepReadAt.Load() != 0 {
 		t.Fatal("a shallow read stamped the deep read")
 	}
 	*clock = clock.Add(time.Second)
-	ttffRead("/m/s.mkv", srcFetchBlock, 20*time.Second, 4096, ttffDeepReadOff) // the first deep read
+	ttffRead("/m/s.mkv", srcFetchBlock, 20*time.Second, 4096, ttffDeepReadOff, stallRoleSecond) // the first deep read
 	*clock = clock.Add(time.Second)
-	ttffRead("/m/s.mkv", srcFetchBlock, 9*time.Second, 4096, ttffDeepReadOff+4096) // after it
+	ttffRead("/m/s.mkv", srcFetchBlock, 9*time.Second, 4096, ttffDeepReadOff+4096, stallRoleSecond) // after it
 	want := 40*time.Millisecond + 3*time.Second + 20*time.Second
 	if got := time.Duration(s.blockedNS.Load()); got != want {
 		t.Fatalf("blocked = %v, want %v", got, want)
@@ -41,7 +41,7 @@ func TestFirstDeepReadBlockedSum(t *testing.T) {
 func TestFirstDeepReadConfirmedLabel(t *testing.T) {
 	for _, conf := range []bool{false, true} {
 		s, _ := deepEnv(t, conf)
-		ttffRead("/m/s.mkv", srcFetchBlock, 2*time.Second, int(stallMiB), ttffDeepReadOff)
+		ttffRead("/m/s.mkv", srcFetchBlock, 2*time.Second, int(stallMiB), ttffDeepReadOff, stallRoleSecond)
 		if got := s.deepConfirmed.Load(); got != conf {
 			t.Errorf("confirmed=%v: session labelled %v", conf, got)
 		}
@@ -57,7 +57,7 @@ func TestFirstDeepReadClosesIntoLabelledHistograms(t *testing.T) {
 		agg := ttffStats.openToDeepRead.Count()
 		s, clock := deepEnv(t, conf)
 		*clock = clock.Add(time.Second)
-		ttffRead("/m/s.mkv", srcFetchBlock, 50*time.Second, int(2*stallMiB), ttffDeepReadOff)
+		ttffRead("/m/s.mkv", srcFetchBlock, 50*time.Second, int(2*stallMiB), ttffDeepReadOff, stallRoleSecond)
 		s.closeSession()
 		if got := ttffStats.openToDeepReadBy[i].Count() - before[0]; got != 1 {
 			t.Errorf("confirmed=%v: open-to-deep-read +%d, want 1", conf, got)

@@ -10,7 +10,9 @@ import (
 // originCounts is the unconfirmed row of the counter for one cause, by origin.
 func originCounts(cause int) (out [numStallOrigins]int64) {
 	for o := range out {
-		out[o] = keepaliveCounters.stalls[0][cause][o].Load()
+		for r := range keepaliveCounters.stalls[0][cause][o] {
+			out[o] += keepaliveCounters.stalls[0][cause][o][r].Load()
+		}
 	}
 	return out
 }
@@ -112,11 +114,11 @@ func TestStallOriginNeverEvictedWithoutAKey(t *testing.T) {
 	t.Run("no session", func(t *testing.T) {
 		resetKeepaliveState(t)
 		asks := stubRefetched(t, true)
-		ttffRead("/m/none.mkv", srcFetchBlock, slow, int(stallMiB), 0)
+		ttffRead("/m/none.mkv", srcFetchBlock, slow, int(stallMiB), 0, stallRoleSecond)
 		if len(*asks) != 0 {
 			t.Errorf("engine asked %d times", len(*asks))
 		}
-		if got := keepaliveCounters.stalls[0][stallCausePlayback][stallOriginNoPump].Load(); got != 1 {
+		if got := originCounts(stallCausePlayback)[stallOriginNoPump]; got != 1 {
 			t.Errorf("no_pump = %d, want 1", got)
 		}
 	})
@@ -132,7 +134,7 @@ func TestStallOriginNeverEvictedWithoutAKey(t *testing.T) {
 		sess, _ := stallEnv(t)
 		sess.fileIndex = 3
 		asks := stubRefetched(t, true)
-		ttffRead("/m/s.mkv", srcFetchBlock, slow, 0, 500*stallMiB)
+		ttffRead("/m/s.mkv", srcFetchBlock, slow, 0, 500*stallMiB, stallRoleSecond)
 		if len(*asks) != 0 {
 			t.Errorf("engine asked %d times for an empty read", len(*asks))
 		}
@@ -154,7 +156,7 @@ func TestStallOriginMetricSeries(t *testing.T) {
 	for _, conf := range []string{"true", "false"} {
 		for _, cause := range stallCauseNames {
 			for _, origin := range stallOriginNames {
-				want := fmt.Sprintf(`flodni_read_stalls_total{confirmed=%q,cause=%q,origin=%q} 0`, conf, cause, origin)
+				want := fmt.Sprintf(`flodni_read_stalls_total{confirmed=%q,cause=%q,origin=%q,role="second"} 0`, conf, cause, origin)
 				if !strings.Contains(body, want+"\n") {
 					t.Errorf("series missing: %s", want)
 				}
@@ -170,8 +172,8 @@ func TestStallOriginMetricSeries(t *testing.T) {
 			}
 		}
 	}
-	keepaliveCounters.stalls[0][stallCausePlayback][stallOriginEvicted].Add(2)
-	keepaliveCounters.stalls[0][stallCausePlayback][stallOriginNoPump].Add(5)
+	keepaliveCounters.stalls[0][stallCausePlayback][stallOriginEvicted][stallRoleSecond].Add(2)
+	keepaliveCounters.stalls[0][stallCausePlayback][stallOriginNoPump][stallRolePrimary].Add(5)
 	if got := stallSum(0, stallCausePlayback); got != 7 {
 		t.Errorf("sum over origin = %d, want 7", got)
 	}
