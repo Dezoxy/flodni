@@ -89,6 +89,9 @@ type MkvHandle struct {
 	wasPrimary      atomic.Bool  // recorded a resume position as the primary: an older handle may retake the primary from a later incumbent only then (defersTo)
 	openCounted     atomic.Bool  // this handle's count in globalOpenTracker is outstanding (countOpen, uncountOpen)
 	tailRun         atomic.Int32 // sequential streaming reads in the tail zone since that jump
+
+	// The cache file this handle holds open, for quota eviction to skip (open_files.go).
+	openFile atomic.Pointer[openFileCount]
 }
 
 // Compile-time interface checks for MkvHandle
@@ -215,6 +218,7 @@ func (h *MkvHandle) readInner(fuseCtx context.Context, dest []byte, off int64) (
 		if hash, fileID, err := resolveTargetFile(h.url, h.size, h.path); err == nil {
 			h.hash = hash
 			h.fileID = fileID
+			h.holdFile(hash, fileID)
 			logger.Info(fmt.Sprintf("[LateResolution] Recovered hash for %s: %s", filepath.Base(h.path), h.hash[:8]), "file", filepath.Base(h.path), "hash", h.hash[:8])
 			go h.pumpOnce.Do(func() {
 				h.startNativePump(h.hash, h.fileID)
@@ -1014,6 +1018,7 @@ func (h *MkvHandle) releaseResources() syscall.Errno {
 	// without slot, replaced pump) would otherwise leak this entry, and both the live
 	// handle checks (anyLiveHandleFor*) and cleanup's activePaths trust the map.
 	app.activeHandles.Delete(h)
+	h.dropFile() // quota eviction may take the file again
 
 	// A handle that counted itself open when it took a pump reference and has lost the pump
 	// since (a creator whose pump ended, an attached handle whose pump is gone) gives the

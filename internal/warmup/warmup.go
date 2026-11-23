@@ -1113,10 +1113,22 @@ func (d *DiskWarmupCache) ReadAt(hash string, fileID int, buf []byte, off int64)
 	}
 
 	n, err := ch.f.ReadAt(buf, off)
+	if readLostToClose(ch, err) {
+		return 0, nil
+	}
 	if n > 0 {
 		d.noteRead(hash, fileID)
 	}
 	return n, err
+}
+
+// readLostToClose reports whether a read through ch raced the handle's close: an
+// eviction, a removal or the idle reaper closed it after the reader took it from
+// getHandle. Such a read is a cache miss, so the caller goes to the engine. Whatever the
+// read returned is dropped, however many bytes: the file may be gone or replaced, and a
+// miss is always correct. Any other error is the caller's to see.
+func readLostToClose(ch *cachedHandle, err error) bool {
+	return ch.closed.Load() || errors.Is(err, os.ErrClosed)
 }
 
 func (d *DiskWarmupCache) WriteTail(hash string, fileID int, data []byte, absoluteOffset, fileSize int64) {
@@ -1236,6 +1248,9 @@ func (d *DiskWarmupCache) ReadTail(hash string, fileID int, buf []byte, absolute
 	}
 
 	n, err := ch.f.ReadAt(buf, relOffset)
+	if readLostToClose(ch, err) {
+		return 0, nil
+	}
 	if n > 0 {
 		d.noteRead(hash, fileID)
 	}
