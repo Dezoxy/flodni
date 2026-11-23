@@ -2,6 +2,7 @@ package vfs
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
@@ -37,6 +38,10 @@ const (
 	DefaultInodeMapPath = "/home/pi/STATE/inode_map.json"
 )
 
+// ErrSaveRefused is returned by SaveToDisk when a save would replace stored rows
+// with a map that cannot be trusted. Nothing was written; the map stays dirty.
+var ErrSaveRefused = errors.New("inodemap: save refused")
+
 // InodeMap manages persistent content -> inode mapping
 type InodeMap struct {
 	shards    [32]*inodeShard
@@ -49,6 +54,14 @@ type InodeMap struct {
 	stopOnce sync.Once
 	saveMu   sync.Mutex // Serialize SaveToDisk
 	db       *metadb.DB // V1.7.1: Optional SQLite backend
+
+	// loadFailed is set by a LoadFromDisk that hit a real read or parse error and
+	// cleared by the next one that succeeds. It is atomic so the save path adds no
+	// lock: LoadFromDisk takes neither saveMu nor a shard lock around it.
+	loadFailed atomic.Bool
+	// refusalLogged keeps a refused save to one warning per streak, because the
+	// background saver retries every InodeSaveInterval while the map stays dirty.
+	refusalLogged atomic.Bool
 
 	// Statistics
 	hits   int64
@@ -140,11 +153,18 @@ func (im *InodeMap) IsDirty() bool {
 
 // LoadFromDisk loads the inode map and distributes entries across shards.
 // If SQLite is available (im.db != nil), loads from DB instead of JSON.
+// A failed load blocks saveToDB until a later load succeeds; nothing stored yet
+// is not a failure.
 func (im *InodeMap) LoadFromDisk() error {
+	var err error
 	if im.db != nil {
-		return im.loadFromDB()
+		err = im.loadFromDB()
+	} else {
+		err = im.loadFromJSON()
 	}
-	return im.loadFromJSON()
+	im.loadFailed.Store(err != nil)
+	im.refusalLogged.Store(false)
+	return err
 }
 
 // loadFromDB populates in-memory maps from SQLite.
@@ -324,11 +344,28 @@ func (im *InodeMap) saveToDB() error {
 		s.mu.RUnlock()
 	}
 
+	if im.loadFailed.Load() {
+		return im.refuseSave("the last load failed, so the map may be empty or partial")
+	}
+
 	tx, err := im.db.SQL().Begin()
 	if err != nil {
 		return err
 	}
 	defer tx.Rollback()
+
+	// An empty file set over stored files is a lost load, not a real removal. Removing
+	// every file leaves the old rows until the next non-empty save: file inodes hash
+	// infohash and index, so the stale rows are harmless.
+	if len(nameMap) == 0 {
+		var storedFiles int
+		if err := tx.QueryRow("SELECT COUNT(*) FROM inodes WHERE type = 'file'").Scan(&storedFiles); err != nil {
+			return fmt.Errorf("inodemap: count stored files: %w", err)
+		}
+		if storedFiles > 0 {
+			return im.refuseSave(fmt.Sprintf("the map has no files but StateDB holds %d", storedFiles))
+		}
+	}
 
 	// Clear existing inodes before rewrite
 	if _, err := tx.Exec("DELETE FROM inodes"); err != nil {
@@ -378,8 +415,17 @@ func (im *InodeMap) saveToDB() error {
 	}
 
 	im.setDirty(false)
+	im.refusalLogged.Store(false)
 	im.logger.Info(fmt.Sprintf("InodeMap: Saved %d files, %d dirs to StateDB", fileCount, dirCount), "file_count", fileCount, "dir_count", dirCount)
 	return nil
+}
+
+// refuseSave builds the ErrSaveRefused error and warns once per streak of refusals.
+func (im *InodeMap) refuseSave(reason string) error {
+	if im.refusalLogged.CompareAndSwap(false, true) {
+		im.logger.Warn(fmt.Sprintf("InodeMap: save refused, StateDB rows left untouched: %s", reason), "reason", reason)
+	}
+	return fmt.Errorf("%w: %s", ErrSaveRefused, reason)
 }
 
 // splitInodeKey splits an "infohash:index" map key. A key without a valid index
@@ -456,6 +502,13 @@ func (im *InodeMap) saveToJSON() error {
 	return nil
 }
 
+// logSaveError logs a failed background save. A refusal already warned once.
+func (im *InodeMap) logSaveError(err error) {
+	if err != nil && !errors.Is(err, ErrSaveRefused) {
+		im.logger.Info(fmt.Sprintf("InodeMap: save failed: %v", err), "err", err)
+	}
+}
+
 func (im *InodeMap) StartBackgroundSaver() {
 	go func() {
 		ticker := time.NewTicker(InodeSaveInterval)
@@ -464,15 +517,11 @@ func (im *InodeMap) StartBackgroundSaver() {
 			select {
 			case <-ticker.C:
 				if im.IsDirty() {
-					if err := im.SaveToDisk(); err != nil {
-						im.logger.Info(fmt.Sprintf("InodeMap: save failed: %v", err), "err", err)
-					}
+					im.logSaveError(im.SaveToDisk())
 				}
 			case <-im.stopChan:
 				if im.IsDirty() {
-					if err := im.SaveToDisk(); err != nil {
-						im.logger.Info(fmt.Sprintf("InodeMap: save failed: %v", err), "err", err)
-					}
+					im.logSaveError(im.SaveToDisk())
 				}
 				return
 			}
@@ -484,9 +533,7 @@ func (im *InodeMap) Stop() {
 	im.stopOnce.Do(func() {
 		close(im.stopChan)
 		if im.IsDirty() {
-			if err := im.SaveToDisk(); err != nil {
-				im.logger.Info(fmt.Sprintf("InodeMap: save failed: %v", err), "err", err)
-			}
+			im.logSaveError(im.SaveToDisk())
 		}
 	})
 }
