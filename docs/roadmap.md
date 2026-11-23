@@ -1005,11 +1005,141 @@ Needs the owner's decision, not ordered yet:
 
 - A second reader on a playing file (another viewer, or a probe) gets one
   engine stream per FUSE read today. Is a second viewer first-class, with its
-  own lead, or kept as a probe with one reused reader?
+  own lead, or kept as a probe with one reused reader? The next section
+  covers a second reader that is not a viewer (subtitle extraction); a
+  second real viewer stays open here.
 - Warm the first 16 MiB instead of 4 MiB for next episodes and recent adds,
   if step 1 shows confirmed starts waiting past the warm head. Costs warmup
   quota.
 - A smaller engine cache for an unconfirmed open (scans and probes).
+
+## A second reader on a playing file (after v2026.11.3)
+
+From production evidence on one host, 2026-11-18 to 2026-11-22 (v2026.11.1
+to v2026.11.3). Designed, not built; measurement comes before each change.
+
+- About half of the confirmed stalls under v2026.11.3 (159 of 324 in about
+  30 watch-hours) came from six sessions that read the whole file in 3 to 16
+  minutes while the viewer was a few minutes in. The reader is the media
+  server's subtitle extraction: for a direct play with an embedded text
+  subtitle selected on a client that cannot read it from the stream, Plex runs
+  its transcoder with `-map 0:<subtitle> -codec copy -f segment
+  -segment_format srt`, which demuxes the whole container as fast as reads
+  return. Through Flodni that is the whole torrent at link rate (up to about
+  480 Mbit/s), so every stream on the host stalls (`origin` `pump_behind` and
+  `swarm`) and TailHedge trips its "saturated link" breaker.
+- The extractor opens a new handle every few seconds, each further into the
+  file. `[V284]` promotes each one to primary after 3 sequential reads, so
+  the pump follows the extractor, not the player.
+- Those jumps arrive on fresh handles, so `cause` labels their stalls
+  `playback`, not `seek`.
+- `origin="evicted"` is still 21 % of confirmed stalls under v2026.11.3 (62 of
+  300), although step 2 of the previous section aimed at it.
+- `flodni_playing_pumps` changed meaning with v2026.11.3's pump lifetime, so
+  stalls per watch-hour can only be compared across releases with an outside
+  source of watch time.
+
+Flodni knows no play position or duration: the play webhook carries titles,
+indices and the file path only. So the player cannot be picked by position,
+and `player_off` is written by the handle that already won the primary role.
+The steps below measure per reader first, then tighten the guard that exists.
+
+1. **Label stalls by reader role and log why a handle became primary.** Add a
+   `role` label (`primary` or `second`) to the stall counters and a log line
+   naming the promotion path. Stall `cause` is tracked per path, `confirmed`
+   per torrent, and probe reads count too, so some of the 159 may be
+   extractor reads no viewer waited on. This is the measurement for steps 4
+   and 5. Relabelling such a jump as `seek` instead would hide real stalls.
+2. **Count watch time.** A `flodni_confirmed_playback_seconds_total` counter
+   (seconds in which a confirmed session read), so stalls per watch-hour can
+   be compared across releases without an outside source.
+3. **Find what still evicts ahead of the player.** Break the `evicted` stalls
+   since v2026.11.3 down by `flodni_engine_cache_evictions_total` zone,
+   readers and whole-file sessions, as queries, before changing eviction
+   again.
+4. **Close the holes in the primary-promotion guard** (`pump.go`). The
+   incumbent counts only if it read within the last 6 s; once a usurper
+   releases no primary exists and the proof drops to 3 reads, which a reader
+   running flat out wins; a handle opened before the play webhook counts as
+   the player's successor; and some promotion paths skip the proof. Keep the
+   long-proof escape hatch: a player misjudged as a second reader is served
+   like a probe, with no read-ahead and no pump. Tests, each a scenario: the
+   extractor opens before the webhook; the player is quiet past the active
+   window (buffering or paused); the player's own reopen near its position
+   promotes quickly; a usurper's release leaves no primary; a transcoder
+   that is the player reads ahead of real time; a forward seek on a new
+   handle still promotes. Judged on step 1's role split.
+5. **Pace a second reader, only if the link still saturates after step 4.**
+   The `bulk` fill class paces pump fills only; a second reader fetches per
+   FUSE read. Pacing it means a wait in `Read()`, capped at a multiple of the
+   primary's measured read rate with a floor, and the wait must not count as
+   a stall. It holds FUSE threads while it waits.
+
+Order across this section, the next one and "Where it hurts": steps 1 to 3
+here; step 4; the inode guard (next section, step 1); "Where it hurts" step 4,
+after step 3 here because it changes eviction pressure; step 5 here if still
+needed; then the upstream checks.
+
+## Ideas from upstream v1.11.16 to v1.13.1 (after v2026.11.3)
+
+From a review of upstream Tiramisu's release notes v1.11.16 to v1.13.1
+(2026-11-17 to 2026-11-22) against Flodni's tree. Ordered at the end of the
+previous section; each step first checks what Flodni already does. Designed,
+not built.
+
+1. **Keep the inode map after a failed load.** File inodes are a hash of
+   the infohash and file index, and the map shrinks only through the guarded
+   prune, so a large removal is not the risk. The risk is a load that fails
+   with only a warning, followed by `InodeMap.saveToDB`
+   (`internal/vfs/inodemap.go`), which deletes every row before it rewrites.
+   Refuse a save after a failed load, and refuse writing zero file rows over
+   stored rows; no ratio threshold, so a large removal still saves. Tests
+   cover both. Upstream v1.12.0.
+2. **Check the pause of other torrents' speculative reads.** Warm on add
+   and catch-up already pause while any playback is open. Check only
+   next-episode warming, and whether upstream's buffered-ahead floor adds
+   anything; close the step if not. Upstream v1.13.1.
+3. **Warm cache eviction by last use, never under an open handle; keep
+   complete tails across restarts.** Check Flodni's warm cache against both
+   first; build only what is missing. Upstream v1.13.1.
+4. **Release a torrent only when nothing references it.** Removing one
+   episode of a season pack must not drop the pack while another stub or
+   record still cites it. Check Flodni's removal path; add the guard and a
+   test if it is missing; the diff gets a review, since it touches removals.
+   Upstream v1.12.01.
+5. **Check the native stream path for error responses read as file data.**
+   Upstream v1.12.03 turned non-2xx stream responses into read errors.
+   Flodni's native path appears to make no HTTP calls; confirm, and close the
+   step if so.
+
+Not taken: HTTPS on the panel port, MCP tokens, peer GeoIP, the UI changes
+and the move of settings into SQLite. Flodni has its own records and scoped
+auth.
+
+**Moving to Tentacle: investigated, stay on Flodni's engine.** From a code
+read of upstream v1.12.03 and v1.13.1 on 2026-11-23, nothing run; to be
+recorded as an ADR.
+
+- Tentacle reshapes GoStorm's bridge and engine, rewrites the piece store and
+  adds a new streamer. The FUSE pump and primary promotion stay.
+- It breaks hard rule 3: in the default tracker mode the public tracker list
+  is added to every torrent with no private check, DHT and PEX are
+  client-wide switches, and none of the six privacy tests has an equivalent.
+  Its vendored engine lacks Flodni's private guard and forced announce.
+- On this host's evidence it would not help `pump_behind` (the pump and the
+  promotion stay, and nothing paces a same-file reader) or `swarm` (same
+  engine). It could help `evicted`: windows are hard exclusions, and window
+  and read-ahead come from one pass, at the cost of the cache overshooting.
+- A rebase is a re-port of Flodni's changes, weeks of work: it refuses to
+  start on an unimported `config.db` and removes `:8090`. The benchmarks are
+  not reproducible from the release, and their sub-millisecond gains are not
+  Flodni's problem, which is reads over 1 s.
+- Techniques worth a trial, each after step 3 of the previous section: one
+  pass for window and read-ahead, hard window protection, oldest-wait-first
+  pins. Its stream cursors and piece exclusion would add features to the
+  vendored engine, which hard rule 4 does not allow without the owner.
+- Reopen if step 3 shows read-ahead evictions the current cache cannot fix
+  and upstream gains per-torrent private guards.
 
 ## Done
 
