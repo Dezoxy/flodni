@@ -1005,11 +1005,64 @@ Needs the owner's decision, not ordered yet:
 
 - A second reader on a playing file (another viewer, or a probe) gets one
   engine stream per FUSE read today. Is a second viewer first-class, with its
-  own lead, or kept as a probe with one reused reader?
+  own lead, or kept as a probe with one reused reader? The next section
+  covers a second reader that is not a viewer (subtitle extraction); a
+  second real viewer stays open here.
 - Warm the first 16 MiB instead of 4 MiB for next episodes and recent adds,
   if step 1 shows confirmed starts waiting past the warm head. Costs warmup
   quota.
 - A smaller engine cache for an unconfirmed open (scans and probes).
+
+## A second reader on a playing file (after v2026.11.3)
+
+From production evidence on one host, 2026-11-18 to 2026-11-22 (v2026.11.1
+to v2026.11.3). Designed, not built; measurement comes before each change.
+
+- About half of the confirmed stalls under v2026.11.3 (159 of 324 in about
+  30 watch-hours) came from six sessions that read the whole file in 3 to 16
+  minutes while the viewer was a few minutes in. The reader is the media
+  server's subtitle extraction: for a direct play with an embedded text
+  subtitle selected on a client that cannot read it from the stream, Plex runs
+  its transcoder with `-map 0:<subtitle> -codec copy -f segment
+  -segment_format srt`, which demuxes the whole container as fast as reads
+  return. Through Flodni that is the whole torrent at link rate (up to about
+  480 Mbit/s), so every stream on the host stalls (`origin` `pump_behind` and
+  `swarm`) and TailHedge trips its "saturated link" breaker.
+- The extractor opens a new handle every few seconds, each further into the
+  file. `[V284]` promotes each one to primary after 3 sequential reads, so
+  the pump follows the extractor, not the player.
+- Those jumps arrive on fresh handles, so `cause` labels their stalls
+  `playback`, not `seek`.
+- `origin="evicted"` is still 21 % of confirmed stalls under v2026.11.3 (62 of
+  300), although step 2 of the previous section aimed at it.
+- `flodni_playing_pumps` changed meaning with v2026.11.3's pump lifetime, so
+  stalls per watch-hour can only be compared across releases with an outside
+  source of watch time.
+
+1. **Tell the player from a second reader on the same file.** Choose the
+   primary by which handle tracks the player (`player_off`, read rate near
+   the file's average bitrate), not by 3 sequential reads, so a reader far
+   ahead of the player never takes the pump. Tests, each a scenario: a
+   transcode where the transcoder is the player and reads ahead of real time;
+   a seek past the extractor, whose restarted handle must not become primary;
+   two viewers on one file, both first-class; a file with no confirmed
+   position yet.
+2. **Pace a second reader that runs ahead of the player.** Move it to the
+   `bulk` fill class and cap it at a multiple of the file's average bitrate
+   (size over duration; about 4x), so a subtitle job still finishes well ahead
+   of the viewer without filling the link. Never pace the primary. A test
+   holds the extractor ahead of a player reading at the bitrate. Judged on
+   full-file sessions: other streams' `pump_behind` and `swarm` stalls during
+   one fall to their usual rate.
+3. **Count a jump on a new handle as a seek** when the file already has a
+   primary: such a stall within 15 s of the open is `cause="seek"`. Extends
+   the stall-cause tests.
+4. **Count watch time.** A `flodni_confirmed_playback_seconds_total` counter
+   (seconds in which a confirmed session read), so stalls per watch-hour can
+   be compared across releases without an outside source.
+5. **Find what still evicts ahead of the player.** Break the `evicted` stalls
+   since v2026.11.3 down by `flodni_engine_cache_evictions_total` zone and
+   readers before changing eviction again.
 
 ## Done
 
