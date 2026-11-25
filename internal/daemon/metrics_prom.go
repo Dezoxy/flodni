@@ -113,6 +113,14 @@ func collectProm(w *promtext.Writer) {
 		"Bytes handed to the kernel by the path that answered. Counts reads outside any session too, so it differs from the [Session] lines.",
 		bytesBySource...)
 
+	w.Counter("flodni_plays_total",
+		"Confirmed plays that ended (stop webhook, last release of the file, or shutdown), one per [Play] line, by stalled: true when the play had at least one read stall. Present from 0.",
+		promSample(playStats.byStalled[1].Load(), lbl("stalled", "true")),
+		promSample(playStats.byStalled[0].Load(), lbl("stalled", "false")))
+	w.Histogram("flodni_play_start_seconds",
+		"Open to the first byte served, for the first session of each confirmed play that ended: how long the viewer waited for it to start.",
+		promHistogram(&playStats.start))
+
 	closed := make([]promtext.Sample, 0, len(sessionOutcomes))
 	for i, o := range sessionOutcomes {
 		closed = append(closed, promSample(sessionsClosedByOutcome[i].Load(), lbl("outcome", o)))

@@ -2753,6 +2753,32 @@ whole, since it packs the trackers.
 The conversion from `log.Printf` is `scripts/slogify` (see its README); it
 can be run again on a newer tree.
 
+**Play line.** When a confirmed play ends, the daemon writes one `[Play]` line
+with the structured fields below; in the default text format they follow the
+message as `key=value`, in JSON they are keys. A play is the chain of a path's
+confirmed sessions that served real playback (a pause closes a session and the
+next read opens one linked by `resumed_from`). It ends at the stop webhook
+(the line then includes the still-open session so far), when a session closes
+at its usual idle close with no handle on the file left open, or at shutdown,
+whichever comes first; the line is written once. A release and reopen, as a
+player does on a seek, does not end it. A scan or probe, and a session the
+play webhook never confirmed, writes none. Observability only: sessions open
+and close exactly as before, and no read, pump or cache decision uses it.
+
+| Field | Meaning |
+| --- | --- |
+| `hash`, `file` | First 8 characters of the info hash, and the file name. |
+| `start_ms` | Open to the first byte of the play's first session; -1 if it never got one. |
+| `watch_s` | Confirmed watch seconds, counted as `flodni_confirmed_playback_seconds_total` counts them. |
+| `stalls` | Served reads over one second, with `stalls_evicted`, `stalls_pump_behind`, `stalls_no_pump`, `stalls_swarm` (by `origin`) and `stalls_primary`, `stalls_second` (by `role`); each set sums to `stalls`. |
+| `stalled_s` | Summed duration of those reads, in seconds. |
+| `sessions`, `resumed` | Sessions merged into the play, and whether any continued an earlier one (a pause). |
+| `bytes_fetch_block`, `bytes_racache_hit`, `bytes_warmup_head`, `bytes_warmup_tail` | Bytes handed to the caller per serving path, summed over the sessions. |
+
+Two series count the same plays: `flodni_plays_total{stalled}` (`true` when the
+play had at least one stall) and the histogram `flodni_play_start_seconds`
+(`start_ms` of each play that got a first byte).
+
 ## Metrics
 
 `GET /metrics/prometheus` on the control port serves the Prometheus text
@@ -2787,6 +2813,8 @@ scraper on the same host or Docker network.
 | `flodni_read_duration_seconds` | histogram | `source` | Duration of each served read. Its `_count` is the number of reads each path answered. |
 | `flodni_read_bytes_total` | counter | `source` | Bytes handed to the kernel. |
 | `flodni_sessions_closed_total` | counter | `outcome` | Closed sessions: `served`, `probe`, `unserved`, `dead_swarm`. |
+| `flodni_plays_total` | counter | `stalled` | Confirmed plays that ended, one per `[Play]` line (see Logging). `stalled` is `true` when the play had at least one stall. Both from 0. |
+| `flodni_play_start_seconds` | histogram | none | Open to the first byte of the first session of each confirmed play that ended, in seconds: how long the viewer waited for it to start. |
 | `flodni_dead_swarm_verdicts_total` | counter | `reason`, `source` | Dead-swarm verdicts; `reason` as `last_failure_reason`, `source` is `mount`, or `wake` for `metainfo_timeout`. |
 | `flodni_warmup_cache_bytes` | gauge | none | Approximate size of the warmup cache; only with the cache enabled. |
 | `flodni_warmup_cache_quota_bytes` | gauge | none | Its size limit; only with the cache enabled. |
