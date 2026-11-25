@@ -70,7 +70,7 @@ jobs:
     # The image's own build stage: the same Go and Debian packages as docker/Dockerfile,
     # and no dependency on the runner's Ubuntu mirror, which failed to resolve for hours.
     container:
-      image: golang:1.27-bookworm@sha256:4fa7c968ba93f1635670522dbb01a2c78150443e1385746924566079f36570ea
+      image: golang:1.27-bookworm@sha256:ce59b41415e2524ae99926fe1f37ce48ba8c194dcbd2a56a65436cdcefa2bd34
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
