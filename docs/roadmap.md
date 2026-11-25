@@ -1214,6 +1214,23 @@ torrent that just failed a play keeps a seeder count up to a day old.
    off on the owner's deployment, whose scrape consumer reads only the full
    pass it started and would see an evidence pass as the latest one.
 
+## Per-play record (after v2026.11.5)
+
+From the owner's wish to know, per viewing, whether the viewer waited and why,
+without one-off log analysis. Sessions, stalls by origin and role, and the
+time to first byte were already counted; this joins them per play.
+
+1. **One `[Play]` line per confirmed play.** [FINISHED] Built. When a
+   confirmed play ends (the stop webhook, a session's usual idle close with
+   no handle on the file open, or shutdown) the daemon logs one line with the
+   start time, the confirmed watch seconds, the stalls in total and by origin
+   and role, their summed duration, the sessions merged and whether the play
+   resumed an earlier one, and the bytes per serving path (`play_record.go`
+   in `internal/daemon`). A release and reopen on a seek does not end it.
+   It is written once however the play ends. Counted by
+   `flodni_plays_total{stalled}` and `flodni_play_start_seconds`.
+   Observability only: no read, pump or cache decision changes.
+
 ## Done
 
 - 2026-11-11, trim step 1: telemetry, the update check, the MCP server and

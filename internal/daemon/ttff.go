@@ -149,6 +149,7 @@ type TTFFSession struct {
 	fileIndex       int          // the index the stub carries (0 = none), for the session log line
 	id              uint64       // process-unique, for the session log and resumed_from
 	resumedFrom     uint64       // id of the session this one continues; 0 = a fresh open
+	afterPlayEnd    bool         // resumedFrom's session ended a play (stop webhook), so this one starts a new play
 	pacedNS         atomic.Int64 // time this session's pump was parked by fill pacing
 	warmupHeadReady atomic.Bool
 	warmupTailReady atomic.Bool
@@ -187,6 +188,15 @@ type TTFFSession struct {
 	tailOrDeep    atomic.Bool // read at off>=8MB or inside last 16MB (tail region)
 
 	reopens atomic.Int64 // read-path wakes of a closed torrent, for /api/sessions
+	// This session's share of the per-play record (play_record.go): confirmed watch time
+	// (what creditWatchTime adds to confirmedPlaybackNS), and the stalls of countStall by
+	// origin and role with their summed duration.
+	watchNS       atomic.Int64
+	playReported  atomic.Bool // this session's numbers are in a play record (closed fold or stop snapshot), once
+	playStopped   atomic.Bool // a stop webhook ended the play while this session was open
+	stalledNS     atomic.Int64
+	stallByOrigin [numStallOrigins]atomic.Int64
+	stallByRole   [numStallRoles]atomic.Int64
 	// confirmed is sticky: a webhook confirmed the path while the session was open, or
 	// it was confirmed at register. The state at close would read false after a stop.
 	confirmed atomic.Bool
@@ -450,7 +460,8 @@ func (s *TTFFSession) closeSession() {
 		s.closed.Store(true)
 		if sessions.CompareAndDelete(s.path, s) {
 			lastClosed.Store(s.path, closedInfo{id: s.id, size: s.size, hash: s.hash,
-				fileIndex: s.fileIndex, headReady: s.warmupHeadReady.Load(), tailReady: s.warmupTailReady.Load()})
+				fileIndex: s.fileIndex, headReady: s.warmupHeadReady.Load(), tailReady: s.warmupTailReady.Load(),
+				playEnded: s.playStopped.Load()})
 		}
 		s.resolveReaderBudget()
 		dead := s.reportSwarmVerdict()
@@ -459,7 +470,9 @@ func (s *TTFFSession) closeSession() {
 		countSessionClosed(rec.Outcome)
 		closedSessions.add(rec)
 		logSessionRecord(rec)
-		if !ttffIsReal(s.tailOrDeep.Load(), s.bytesRead.Load()) {
+		real := ttffIsReal(s.tailOrDeep.Load(), s.bytesRead.Load())
+		s.playClosed(real)
+		if !real {
 			ttffStats.sessionsFiltered.Add(1)
 			return
 		}
@@ -645,6 +658,7 @@ type closedInfo struct {
 	hash                 string
 	fileIndex            int
 	headReady, tailReady bool
+	playEnded            bool // a stop webhook ended the play this session belonged to
 }
 
 var (
@@ -679,7 +693,7 @@ func sessionForRead(path string) *TTFFSession {
 	ci := v.(closedInfo)
 	nowN := time.Now().UnixNano()
 	ns := &TTFFSession{path: path, size: ci.size, hash: ci.hash, fileIndex: ci.fileIndex,
-		id: sessionSeq.Add(1), resumedFrom: ci.id}
+		id: sessionSeq.Add(1), resumedFrom: ci.id, afterPlayEnd: ci.playEnded}
 	ns.confirmed.Store(playbackConfirmed(path))
 	ns.warmupHeadReady.Store(ci.headReady)
 	ns.warmupTailReady.Store(ci.tailReady)
@@ -724,6 +738,7 @@ func closeAllSessions() {
 	if n > 0 {
 		logger.Info(fmt.Sprintf("[Sessions] closed %d open session(s) at shutdown", n), "n", n)
 	}
+	finishAllPlays()
 }
 
 // Test-only overrides of the session idle close and the cleanup tick, read once at

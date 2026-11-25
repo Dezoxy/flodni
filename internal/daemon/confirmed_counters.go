@@ -97,6 +97,7 @@ func (s *TTFFSession) creditWatchTime(nowN int64) {
 		}
 		if gap := min(time.Duration(nowN-prev), watchCreditCap); hashConfirmed(s.hash) {
 			confirmedPlaybackNS.Add(int64(gap))
+			s.watchNS.Add(int64(gap))
 		}
 		return
 	}
@@ -218,9 +219,10 @@ func countReopen(path, hash string) {
 // n are the read's offset and returned bytes, d how long it took.
 func countStall(path string, cause, role int, off int64, n int, d time.Duration) {
 	hash, fileIdx := "", 0
+	var sess *TTFFSession
 	if v, ok := sessions.Load(path); ok {
-		s := v.(*TTFFSession)
-		hash, fileIdx = s.hash, s.fileIndex
+		sess = v.(*TTFFSession)
+		hash, fileIdx = sess.hash, sess.fileIndex
 	}
 	if hash == "" {
 		if v, ok := app.playbackRegistry.Load(path); ok {
@@ -231,4 +233,7 @@ func countStall(path string, cause, role int, off int64, n int, d time.Duration)
 	}
 	origin := stallOriginOf(path, hash, fileIdx, off, n, d)
 	keepaliveCounters.stalls[confirmedIdx(hashConfirmed(hash))][cause][origin][role].Add(1)
+	if sess != nil {
+		sess.noteStall(origin, role, d)
+	}
 }

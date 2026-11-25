@@ -342,6 +342,7 @@ func handlePlexWebhook(w http.ResponseWriter, r *http.Request) {
 			stopState.SetHealthy(false) // persists with IsStopped=true
 			invalidateConfirmed()       // the keep-alive releases the torrent at once
 			logger.Info(fmt.Sprintf("[PLEX] STOP applied for: %s (Event: %s)", filepath.Base(stopMatch), payload.Event), "file", filepath.Base(stopMatch), "event", payload.Event)
+			stopPlay(stopMatch) // the play ends here: one [Play] line
 
 			if val, ok := app.activePumps.Load(stopMatch); ok {
 				ps := val.(*NativePumpState)
