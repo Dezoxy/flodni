@@ -1168,6 +1168,39 @@ read of upstream v1.12.03 and v1.13.1 on 2026-11-23, nothing run; recorded in
 - Reopen if step 3 shows read-ahead evictions the current cache cannot fix
   and upstream gains per-torrent private guards.
 
+## Upstream v1.13.2 to v1.13.5: nothing taken (after v2026.11.5)
+
+From a review of upstream Tiramisu's release notes v1.13.2 to v1.13.5
+(2026-11-24) against Flodni's tree on 2026-11-25. Nothing here is a step;
+every fix that applies is already built.
+
+- **A stored Plex secret does not follow a changed URL** (v1.13.3). Already
+  built: a save that changes `plex.url` without a typed token is refused
+  (`internal/daemon/control_api.go`), and the check sees an environment
+  token because `LoadConfig` applies the environment first. Flodni has no
+  Prowlarr secret and no poster proxy, the other half of that release.
+- **Private torrents announce only to their own trackers** (v1.13.4).
+  Already hard rule 3, pinned by the privacy tests.
+- **Verify https tracker certificates** (v1.13.5). Already the default;
+  skipping verification is opt-in.
+- **Concurrent tail creates do not truncate each other; heads recreate only
+  from offset 0** (v1.13.5). Already built in `internal/warmup/warmup.go`
+  (`tailMu`, and the offset-0 check on a missing head).
+- **Not taken:** Friends (v1.13.2). Trusted nodes share warm caches, help each
+  other's playback and can push a library; that moves private-torrent data
+  to other machines (hard rule 3), and a master can add any torrent to a
+  slave's library. Also not taken: the MP4 bitrate fix (Flodni reads no
+  bitrate), the PeerEject removal (Flodni never had it) and the move of
+  `package main` into `internal/app`.
+- **A file bitrate estimate: designed, not built.** Size over duration, with
+  the duration from the container header the warm head already holds. It
+  would give the promotion guard of the second-reader section a real signal
+  (a reader far above the bitrate for many seconds is not the player) and
+  let read-ahead and pacing be set in seconds. Not built: on this host's
+  evidence from 2026-11-23 to 2026-11-25, no whole-file read recurred and
+  the stall alert fired only for the promoted reader. Reopen with that guard,
+  if a non-player reader is promoted again.
+
 ## Done
 
 - 2026-11-11, trim step 1: telemetry, the update check, the MCP server and
