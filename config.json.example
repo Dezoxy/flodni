@@ -46,6 +46,7 @@
   "tracker_scrape_hours": 24,
   "tracker_scrape_batch": 100,
   "tracker_scrape_pace_ms": 1000,
+  "scrape_on_failure": false,
   "plex_path_map": {},
   "plex": {
     "url": "http://127.0.0.1:32400",

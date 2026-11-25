@@ -148,6 +148,7 @@ func newReachabilityRecorder(store readabilityStore, logger *slog.Logger) func(n
 				return
 			}
 			countDeadSwarmVerdict(failReasonMetainfoTimeout, failSourceWake)
+			evidenceScrape.note(o.Hash, failReasonMetainfoTimeout)
 			err = store.RecordMetadataFailure(o.Hash, failReasonMetainfoTimeout, failSourceWake, at)
 		case native.OutcomeFailed:
 			short := o.Hash
@@ -159,6 +160,7 @@ func newReachabilityRecorder(store readabilityStore, logger *slog.Logger) func(n
 			logger.Info(fmt.Sprintf("[DeadSwarm] %s did not answer", short), "short", short)
 			// Counted before the store call, so a database error does not hide a verdict.
 			countDeadSwarmVerdict(o.Reason, o.Source)
+			evidenceScrape.note(o.Hash, "dead_swarm_"+o.Reason)
 			err = store.RecordMetadataFailure(o.Hash, o.Reason, o.Source, time.Now())
 		}
 		if err != nil {

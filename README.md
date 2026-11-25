@@ -1124,6 +1124,7 @@ URL.
 | Key in `config.json` | Default | Read | Effect |
 |---|---|---|---|
 | `tracker_tls_insecure` | `false` | once at start (a change needs a restart) | `true` skips certificate verification for announces and scrapes (`/api/torrents/scrape`) to every `https` tracker. It does not apply to `wss` (WebTorrent) trackers, which are always verified. A start with it on logs `[Tracker] TLS certificate verification is OFF (tracker_tls_insecure)` at WARN. |
+| `scrape_on_failure` | `false` | live | `true` starts a one-torrent tracker scrape (trigger `evidence`) when a dead-swarm verdict, a metainfo timeout or a failed warm is recorded for a torrent, at most once per torrent per hour and never while a pass runs. See Tracker scrape. |
 
 The trade-off: a tracker with a self-signed, expired or mismatched certificate
 stops announcing until the key is set, and the torrents that depend on it find
@@ -1363,8 +1364,22 @@ grow.
   409 with the running `run_id`; an unknown hash is 404. Both routes need the
   bearer token when `api_token` is set. A manual pass has no start jitter but
   keeps the pacing and backoff.
+- **On failure evidence (opt-in).** `scrape_on_failure` (default `false`,
+  read live) starts a one-torrent pass, trigger `evidence`, when Flodni
+  records failure evidence for a torrent: a dead-swarm verdict, a metainfo
+  timeout or a failed warm. The record then holds fresh seeder counts within
+  seconds instead of up to `tracker_scrape_hours` old. At most one such pass
+  per torrent per hour, and none while another pass runs (no queue); the
+  trigger returns at once and never waits on a read. It is the same pass as
+  the other routes, so a private torrent is asked only on its own trackers.
+  Off by default. A log line
+  `[Scrape] evidence pass for <8 hex> started (<cause>)` marks each pass.
+  An evidence pass becomes the latest pass in the status route and in
+  `/api/torrents/health`, so a consumer that starts a full pass and then
+  reads the health must accept a newer evidence pass there, or keep this
+  switch off.
 - **Status.** `GET /api/torrents/scrape/status` returns the latest pass:
-  `run_id`, `trigger` (`schedule` or `manual`), `scope` (`all` or `one`),
+  `run_id`, `trigger` (`schedule`, `manual` or `evidence`), `scope` (`all` or `one`),
   `state` (`running` or `done`), `started_at`, `finished_at` (null while
   running), `torrents`, `ok`, `errors`, `skipped` (counts of torrents:
   answered, ended in an error, nothing to scrape), and `previous` with the
@@ -1401,6 +1416,9 @@ grow.
   `skipped`, counted per torrent and tracker; a hash a tracker omitted
   counts as `error`), `flodni_torrents_by_seeders{bucket}`
   (`0`, `1-2`, `3+`, torrents with numbers only),
+  `flodni_tracker_scrape_evidence_total{result}` (`started`, `rate_limited`,
+  `busy`, `disabled`: what `scrape_on_failure` did with each failure
+  evidence event),
   `flodni_tracker_scrape_pass_running` (0 or 1) and
   `flodni_tracker_scrape_last_pass_finished_timestamp_seconds` (absent before
   the first full pass).
@@ -2836,6 +2854,7 @@ scraper on the same host or Docker network.
 | `flodni_pump_watchdog_restarts_total` | counter | none | Pumps the watchdog started for a confirmed playback that had none for 10 s. 0 from start. |
 | `flodni_tracker_scrapes_total` | counter | `result` | Experimental. Tracker scrapes per torrent and tracker: `ok` (answered), `error` (the request failed or the answer left the torrent out), `skipped` (no BEP 48 scrape URL or an unsupported scheme). All values present from 0 once the scraper runs. See Tracker scrape. |
 | `flodni_torrents_by_seeders` | gauge | `bucket` | Experimental. Torrents by the seeders of their latest scrape answer: `0`, `1-2`, `3+`. A torrent with an error entry is in none. |
+| `flodni_tracker_scrape_evidence_total` | counter | `result` | Experimental. Failure-evidence events by what the opt-in `scrape_on_failure` did: `started` (a one-torrent scrape pass), `rate_limited` (one pass per torrent per hour), `busy` (a pass was running), `disabled` (switch off, scrape not running, or the pass could not start). All values present from 0. See Tracker scrape. |
 | `flodni_tracker_scrape_pass_running` | gauge | none | Experimental. 1 while a scrape pass runs. |
 | `flodni_tracker_scrape_last_pass_finished_timestamp_seconds` | gauge | none | Experimental. Unix time the last finished full pass ended; absent before the first. |
 | `flodni_readahead_cache_bytes` | gauge | none | Bytes in the read-ahead cache. |

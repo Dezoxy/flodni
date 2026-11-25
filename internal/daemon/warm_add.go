@@ -92,6 +92,7 @@ func addWarmerDeps(x *fileStateIndex, stop <-chan struct{}) warmer.Deps {
 		DeliveredAt:  warmDeliveredAt,
 		EvictedSince: x.EvictedSince,
 		Record: func(u warmer.Update) {
+			noteWarmFailure(u)
 			x.RecordWarm(warmUpdate{key: u.Key, readability: u.Readability, cache: u.Cache,
 				deliveredAt: u.DeliveredAt, attemptAt: u.AttemptAt, clearQueued: u.ClearQueued})
 		},
