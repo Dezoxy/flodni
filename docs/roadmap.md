@@ -403,8 +403,7 @@ others are designed, not built.
 The owner moved every entry of [ideas.md](ideas.md) here on 2026-11-14.
 Waves 1 to 3 are built in that order; steps 22 to 25 are gated and were built
 opt-in and off by default, so the measurement they name decides whether to
-switch them on. Steps 1 to 19 and 22 to 26 are merged; steps 20 (`slog`) and 21
-(`App` struct) are in flight, not merged (hard rule 5).
+switch them on. Steps 1 to 26 are merged.
 
 **Wave 1**
 
@@ -642,7 +641,7 @@ Requests from running v0.2.0 on a real host.
 ## Durable records (after v0.2.2)
 
 From a review after v0.2.2 and from running it. Steps 1 to 3 were must-fix:
-data loss and an open-port gap. Steps 1 to 20 are built; 21 and 22 are
+data loss and an open-port gap. Steps 1 to 20 and 22 are built; 21 is
 designed, not built.
 
 1. **Make the engine database durable.** [FINISHED] The engine's `config.db` is
