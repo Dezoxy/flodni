@@ -337,6 +337,20 @@ type Config struct {
 	StateDBPath   string `json:"state_db_path"`   // default: <STATE>/tiramisu.db
 }
 
+// OptInSwitches is the one list of opt-in switches, keyed by their JSON names; a new
+// switch is added here.
+func (c *Config) OptInSwitches() map[string]bool {
+	return map[string]bool{
+		"unconfirmed_readahead_clamp": c.UnconfirmedReadaheadClamp,
+		"attribute_fills_to_reader":   c.AttributeFillsToReader,
+		"redial_dropped_peer":         c.RedialDroppedPeer,
+		"engine_refill_v2":            c.EngineRefillV2,
+		"engine_cold_boost":           c.EngineColdBoost,
+		"tracker_tls_insecure":        c.TrackerTLSInsecure,
+		"scrape_on_failure":           c.ScrapeOnFailure,
+	}
+}
+
 // UnknownKeys lists, by name and sorted, the top-level keys of config.json that are
 // not the exact name of a setting (a removed setting, a typo, another letter case).
 // Names only, never a value. Run logs them once at start; they do not stop it.
