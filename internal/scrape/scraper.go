@@ -44,7 +44,7 @@ const UnknownToTracker = "unknown_to_tracker"
 // scrapeable tracker. A torrent a stopped pass did not reach counts in none.
 type Pass struct {
 	RunID      int
-	Trigger    string // "schedule" or "manual"
+	Trigger    string // "schedule", "manual" or "evidence"
 	Scope      string // "all" or "one"
 	State      string // "running" or "done"
 	StartedAt  time.Time

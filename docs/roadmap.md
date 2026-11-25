@@ -1200,6 +1200,20 @@ every fix that applies is already built.
   the stall alert fired only for the promoted reader. Reopen with that guard,
   if a non-player reader is promoted again.
 
+## Scrape on failure evidence (after v2026.11.5)
+
+Today the tracker scrape runs on its schedule or by the manual route, so a
+torrent that just failed a play keeps a seeder count up to a day old.
+
+1. **Scrape a torrent's own trackers on failure evidence.** [FINISHED]
+   Opt-in `scrape_on_failure` (default off): a dead-swarm verdict, a metainfo
+   timeout or a failed warm starts a one-torrent pass with trigger `evidence`,
+   at most once per torrent per hour and never while a pass runs. It reuses
+   the scrape pass, so a private torrent is asked only on its own trackers;
+   `flodni_tracker_scrape_evidence_total{result}` counts what it did. Built;
+   off on the owner's deployment, whose scrape consumer reads only the full
+   pass it started and would see an evidence pass as the latest one.
+
 ## Per-play record (after v2026.11.5)
 
 From the owner's wish to know, per viewing, whether the viewer waited and why,
