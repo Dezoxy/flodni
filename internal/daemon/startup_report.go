@@ -111,6 +111,9 @@ type startupReport struct {
 	// Auth is additive (schema stays 1): the mode, the token count and the scopes in
 	// use. It never holds a name, a hash, a path or a key.
 	Auth apiauth.Report `json:"auth"`
+	// OptIn is additive (schema stays 1): each opt-in switch and whether it is on.
+	// Booleans only; absent when no config is loaded.
+	OptIn map[string]bool `json:"opt_in,omitempty"`
 }
 
 // startupReporter collects the startup stages and emits the report once, when the mount
@@ -174,6 +177,7 @@ func buildStartupReport(f startupFacts) startupReport {
 	rep.Version = AppVersion
 	if c := gc(); c != nil {
 		rep.ConfigPath = c.ConfigPath
+		rep.OptIn = c.OptInSwitches()
 	}
 	w := warmup.Started()
 	rep.Warmup.Active, rep.Warmup.Dir = w.Active, w.Dir

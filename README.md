@@ -662,6 +662,7 @@ raises it.
 | `invalid_stubs` | Stubs that parse but declare a size out of range. |
 | `alarms` | Ids of the alarm conditions that fired, `[]` when none. |
 | `auth` | `mode` (`open`, `legacy_token` or `scoped`), `tokens` (count), `scopes` (the sorted union in use) and `jwt`; no name, hash or path. |
+| `opt_in` | The seven opt-in switches (`unconfirmed_readahead_clamp`, `attribute_fills_to_reader`, `redial_dropped_peer`, `engine_refill_v2`, `engine_cold_boost`, `tracker_tls_insecure`, `scrape_on_failure`), each `true` or `false`. |
 
 Alarm ids: `config_parse_failed`, `config_paths_differ`, `settings_migrated`,
 `settings_corrupt`, `torrents_migrated` (a legacy `torrserver.db` was carried

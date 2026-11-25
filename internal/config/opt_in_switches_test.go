@@ -66,3 +66,30 @@ func TestTrackerTLSInsecureParses(t *testing.T) {
 		t.Fatal("tracker_tls_insecure did not parse")
 	}
 }
+
+// OptInSwitches is the one list of opt-in switches: its keys are the JSON names.
+func TestOptInSwitchesListsEverySwitchUnderItsJSONName(t *testing.T) {
+	all := &Config{UnconfirmedReadaheadClamp: true, AttributeFillsToReader: true, RedialDroppedPeer: true, EngineRefillV2: true, EngineColdBoost: true, TrackerTLSInsecure: true, ScrapeOnFailure: true}
+	got := all.OptInSwitches()
+	if len(got) != 7 {
+		t.Fatalf("OptInSwitches has %d entries, want 7: %v", len(got), got)
+	}
+	b, err := json.Marshal(*all)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for key, on := range got {
+		if !on {
+			t.Errorf("%s is false with every switch on", key)
+		}
+		if !strings.Contains(string(b), `"`+key+`":true`) {
+			t.Errorf("%s is not a JSON tag of Config: %s", key, b)
+		}
+	}
+	def := loadCfg(t)
+	for key, on := range def.OptInSwitches() {
+		if on {
+			t.Errorf("%s is on in the default config", key)
+		}
+	}
+}

@@ -458,3 +458,37 @@ func TestStartupReportRaisesNoAuthNotEnforcedAlarm(t *testing.T) {
 		t.Error("no mode may raise auth_not_enforced: the gate enforces them all")
 	}
 }
+
+// opt_in is additive (schema stays 1) and shows each opt-in switch, on or off.
+func TestStartupReportOptInSwitches(t *testing.T) {
+	prev := globalConfig.Load()
+	t.Cleanup(func() { globalConfig.Store(prev) })
+	for _, on := range []bool{false, true} {
+		globalConfig.Store(&config.Config{ScrapeOnFailure: on})
+		b, err := json.Marshal(buildStartupReport(startupFacts{}))
+		if err != nil {
+			t.Fatal(err)
+		}
+		var got struct {
+			Schema int             `json:"schema"`
+			OptIn  map[string]bool `json:"opt_in"`
+		}
+		if err := json.Unmarshal(b, &got); err != nil {
+			t.Fatal(err)
+		}
+		if got.Schema != 1 {
+			t.Errorf("schema = %d, want 1", got.Schema)
+		}
+		if len(got.OptIn) != 7 {
+			t.Errorf("opt_in has %d entries, want 7: %s", len(got.OptIn), b)
+		}
+		v, ok := got.OptIn["scrape_on_failure"]
+		if !ok || v != on {
+			t.Errorf("opt_in.scrape_on_failure = %v (present %v), want %v: %s", v, ok, on, b)
+		}
+		want := fmt.Sprintf(`"scrape_on_failure":%v`, on)
+		if !strings.Contains(string(b), want) {
+			t.Errorf("report lacks %s: %s", want, b)
+		}
+	}
+}
