@@ -466,6 +466,32 @@ func TestPrivateTargetsOnlyReachTheirOwnTrackers(t *testing.T) {
 	}
 }
 
+// An evidence pass is a one-torrent pass over the same targets: it asks only the
+// trackers of the hash it was started for, a private torrent's own and no others.
+func TestEvidencePassReachesOnlyTheTorrentsOwnTrackers(t *testing.T) {
+	a, b := h20(1), h20(2)
+	own := newFakeHTTP(t, map[[20]byte]Counts{a: {1, 1}})
+	otherTorrent := newFakeHTTP(t, map[[20]byte]Counts{b: {5, 5}})
+	public := newFakeHTTP(t, map[[20]byte]Counts{a: {99, 99}})
+	s, _ := newTest(t, []Target{
+		{Hash: a, Trackers: []string{own.announce()}},
+		{Hash: b, Trackers: []string{otherTorrent.announce()}},
+	}, nil)
+	if _, err := s.StartPass("evidence", &a); err != nil {
+		t.Fatal(err)
+	}
+	p := waitDone(t, s)
+	if p.Trigger != "evidence" || p.Scope != "one" || p.Torrents != 1 {
+		t.Fatalf("pass = %+v, want a one-torrent evidence pass", p)
+	}
+	if len(own.requests()) == 0 {
+		t.Fatal("the torrent's own tracker was not asked")
+	}
+	if len(public.requests()) != 0 || len(otherTorrent.requests()) != 0 {
+		t.Fatal("a host outside the torrent's own trackers was contacted")
+	}
+}
+
 func TestPasskeyNeverLeaks(t *testing.T) {
 	const passkey = "test-passkey-not-real"
 	const auth = "test-token-not-real"

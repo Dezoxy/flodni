@@ -294,6 +294,11 @@ type Config struct {
 	// requests to one tracker host. 100 to 60000; anything else is replaced by the
 	// default (1000). Read at start-up.
 	TrackerScrapePaceMs int `json:"tracker_scrape_pace_ms"`
+	// ScrapeOnFailure starts a one-torrent tracker scrape pass (trigger "evidence")
+	// when Flodni records failure evidence for a torrent: a dead-swarm verdict, a
+	// metainfo timeout or a failed warm. At most one such pass per torrent per hour,
+	// and none while a pass runs. Off by default. Read live.
+	ScrapeOnFailure bool `json:"scrape_on_failure"`
 
 	// PlexPathMap maps a media server library path prefix to the path of the same
 	// files inside this container, for libraries whose files are Sonarr/Radarr-named

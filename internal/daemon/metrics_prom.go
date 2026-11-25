@@ -154,6 +154,7 @@ func collectProm(w *promtext.Writer) {
 	collectUnlinkedProm(w)
 	collectSwarmProm(w)
 	collectScrapeProm(w)
+	collectScrapeEvidenceProm(w)
 	collectReadAheadProm(w)
 	collectStubIndexProm(w)
 	collectAuthRefusalsProm(w)
